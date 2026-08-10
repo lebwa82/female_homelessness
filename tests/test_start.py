@@ -30,3 +30,19 @@ async def test_start_records_safe_welcome_and_shows_main_options(monkeypatch: py
     assert "не даёт полной анонимности" in text
     assert "Можно не называть имя" in text
     assert reply_and_store.await_args.kwargs["buttons"] == MAIN_OPTIONS
+
+
+@pytest.mark.asyncio
+async def test_start_shows_optional_runtime_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = SimpleNamespace(from_user=SimpleNamespace(id=101), chat=SimpleNamespace(id=202), message_id=303)
+    conversation = SimpleNamespace(id=404)
+    reply_and_store = AsyncMock()
+    monkeypatch.setattr(bot, "get_or_create_conversation", AsyncMock(return_value=conversation))
+    monkeypatch.setattr(bot, "record_event", AsyncMock())
+    monkeypatch.setattr(bot, "record_message", AsyncMock())
+    monkeypatch.setattr(bot, "reply_and_store", reply_and_store)
+    monkeypatch.setattr(bot.settings, "bot_runtime_label", "серверная версия")
+
+    await bot.start(message)
+
+    assert reply_and_store.await_args.args[2].startswith("🧪 Тестовый контур: серверная версия.")

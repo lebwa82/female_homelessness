@@ -78,10 +78,13 @@ async def start(message: Message) -> None:
     conversation = await get_or_create_conversation(message.from_user.id)
     await record_event(conversation.id, "started")
     await record_message(conversation.id, "user", "/start")
+    runtime_label = settings.bot_runtime_label.strip()
+    test_banner = f"🧪 Тестовый контур: {runtime_label}.\n\n" if runtime_label else ""
     await reply_and_store(
         message,
         conversation.id,
-        "Перед началом: Telegram не является экстренной службой и не даёт полной анонимности. "
+        test_banner
+        + "Перед началом: Telegram не является экстренной службой и не даёт полной анонимности. "
         "Пожалуйста, не присылайте паспорт, точный адрес или другие документы. "
         "Можно остановиться в любой момент и написать «специалист».\n\n" + WELCOME,
         buttons=MAIN_OPTIONS,

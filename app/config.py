@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_proxy_url: str = ""
+    bot_runtime_label: str = ""
     staff_telegram_chat_id: int | None = None
     database_url: str = "postgresql+asyncpg://helper:helper@localhost:5432/women_help"
     llm_enabled: bool = True
