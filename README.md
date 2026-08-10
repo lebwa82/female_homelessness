@@ -62,6 +62,20 @@ sudo systemctl status women-help-bot
 через rootful Podman Compose, а unit бота перезапускает только Python-процесс.
 На подготовленной MVP VM это выбранный режим: rootless Podman там не работает.
 
+### Деплой
+
+Из чистого рабочего дерева после коммита запустите:
+
+```bash
+just deploy-prod
+```
+
+Команда отправляет на VM только содержимое текущего Git-коммита (без `.env` и
+других неотслеживаемых файлов), синхронизирует зависимости, задаёт
+`APP_ENV=production` и `BUILD_VERSION`, перезапускает бота, затем проверяет
+статус systemd и запускает `just check`. Другой SSH-хост можно передать как
+`just deploy-prod user@example.org`.
+
 Проверить доступ к модели коротким обезличенным запросом: `uv run python -m scripts.llm_health_check`.
 
 `STAFF_TELEGRAM_CHAT_ID` пока оставьте пустым. Позже это будет ID закрытой группы

@@ -46,3 +46,8 @@ check: lint test
 # Send one short, anonymized request to verify Yandex AI Studio access.
 llm-health:
     uv run python -m scripts.llm_health_check
+
+# Deploy the clean, committed Git snapshot to the MVP VM and verify it.
+# Override host when needed: just deploy-prod user@host
+deploy-prod host="lebwa82@89.169.180.0": check
+    bash scripts/deploy_prod.sh "{{host}}"
