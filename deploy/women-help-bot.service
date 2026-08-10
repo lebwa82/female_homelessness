@@ -1,0 +1,22 @@
+[Unit]
+Description=Women Help Telegram bot
+Wants=network-online.target
+Requires=women-help-postgres.service
+After=network-online.target women-help-postgres.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/women-help-bot
+EnvironmentFile=/etc/women-help-bot.env
+
+# The database has its own unit. This service waits for it instead of owning
+# the container's lifecycle.
+ExecStartPre=/bin/sh -c 'for attempt in $$(seq 1 30); do /usr/bin/podman exec women-help-bot_postgres_1 pg_isready -U helper -d women_help && exit 0; sleep 1; done; exit 1'
+ExecStart=/opt/women-help-bot/.venv/bin/python -m app.bot
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
