@@ -78,8 +78,7 @@ async def start(message: Message) -> None:
     conversation = await get_or_create_conversation(message.from_user.id)
     await record_event(conversation.id, "started")
     await record_message(conversation.id, "user", "/start")
-    runtime_label = settings.bot_runtime_label.strip()
-    test_banner = f"🧪 Тестовый контур: {runtime_label}.\n\n" if runtime_label else ""
+    test_banner = f"🧪 Тестовый контур: {settings.runtime_label()}.\n\n"
     await reply_and_store(
         message,
         conversation.id,
@@ -101,6 +100,31 @@ async def delete_request(message: Message) -> None:
         conversation.id,
         "Запрос на удаление данных принят. Специалистка обработает его по правилам организации. "
         "Если сейчас нужна помощь, можно продолжить писать здесь."
+    )
+
+
+@dp.message(Command("system_info"))
+async def system_info(message: Message) -> None:
+    """Return non-secret diagnostic data; this command is intentionally not in the UI."""
+    conversation = await get_or_create_conversation(message.from_user.id)
+    await record_event(conversation.id, "system_info_requested")
+    await record_message(conversation.id, "user", "/system_info")
+    llm_status = "включена" if settings.llm_enabled else "выключена"
+    await reply_and_store(
+        message,
+        conversation.id,
+        "🛠 Служебная информация\n"
+        f"ENV: {settings.app_env}\n"
+        f"Сборка: {settings.build_version}\n"
+        f"LLM: {llm_status}",
+        audit={
+            "system_info": {
+                "app_env": settings.app_env,
+                "build_version": settings.build_version,
+                "llm_enabled": settings.llm_enabled,
+            }
+        },
+        buttons=MAIN_OPTIONS,
     )
 
 

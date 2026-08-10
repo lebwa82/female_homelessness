@@ -1,6 +1,7 @@
+from typing import Literal
 from urllib.parse import parse_qs, quote, urlparse
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_YANDEX_CLOUD_FOLDER_ID = "b1gepl5pmqr8f7hbu3bj"
@@ -11,7 +12,10 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_proxy_url: str = ""
-    bot_runtime_label: str = ""
+    app_env: Literal["development", "production", "test"] = Field(
+        default="development", validation_alias=AliasChoices("APP_ENV", "ENV")
+    )
+    build_version: str = "dev"
     staff_telegram_chat_id: int | None = None
     database_url: str = "postgresql+asyncpg://helper:helper@localhost:5432/women_help"
     llm_enabled: bool = True
@@ -60,6 +64,13 @@ class Settings(BaseSettings):
         if parsed.scheme not in {"http", "https", "socks4", "socks4a", "socks5"}:
             raise ValueError("TELEGRAM_PROXY_URL must use http(s), socks4(a), socks5, or tg://socks.")
         return value
+
+    def runtime_label(self) -> str:
+        return {
+            "development": "локальная версия",
+            "production": "серверная версия",
+            "test": "тестовая версия",
+        }[self.app_env]
 
 
 settings = Settings()
