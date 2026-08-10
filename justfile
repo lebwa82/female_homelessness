@@ -17,9 +17,20 @@ db-down:
 db-status:
     podman compose ps
 
+# Stop only a previous local instance of this bot's polling command.
+stop-local:
+    @pids="$(pgrep -f '^uv run python -m app\.bot$' || true)"; if [ -n "$pids" ]; then kill -TERM $pids; sleep 1; fi
+
 # Start the Telegram bot in the foreground.
-run: db-up
-    uv run python -m app.bot
+run: stop-local db-up
+    mkdir -p .runtime
+    uv run python -m app.bot 2>&1 | tee -a .runtime/bot.log
+
+# Follow the local bot log (last 100 lines first).
+logs:
+    mkdir -p .runtime
+    touch .runtime/bot.log
+    tail -n 100 -f .runtime/bot.log
 
 # Run the test suite.
 test:

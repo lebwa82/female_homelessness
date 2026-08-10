@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from app.config import settings
 from app.db import init_db
 from app.safety import assess_crisis
 from app.service import (
+    MAIN_OPTIONS,
     WELCOME,
     get_history,
     get_or_create_conversation,
@@ -25,6 +28,13 @@ logger = logging.getLogger(__name__)
 dp = Dispatcher()
 
 
+def create_bot() -> Bot:
+    proxy_url = settings.resolved_telegram_proxy_url()
+    if proxy_url:
+        logger.info("Telegram Bot API proxy is enabled (%s).", urlparse(proxy_url).scheme)
+    return Bot(settings.telegram_bot_token, session=AiohttpSession(proxy=proxy_url))
+
+
 async def notify_staff(bot: Bot, message: Message, reason: str) -> None:
     if not settings.staff_telegram_chat_id:
         return
@@ -36,7 +46,11 @@ async def notify_staff(bot: Bot, message: Message, reason: str) -> None:
 
 
 async def reply_and_store(
-    message: Message, conversation_id: int, text: str, audit: dict | None = None
+    message: Message,
+    conversation_id: int,
+    text: str,
+    audit: dict | None = None,
+    buttons: tuple[str, ...] = (),
 ) -> None:
     await record_message(
         conversation_id,
@@ -44,10 +58,19 @@ async def reply_and_store(
         text,
         audit={
             "telegram": {"chat_id": message.chat.id, "in_reply_to_message_id": message.message_id},
+            "ui": {"buttons": list(buttons)},
             **(audit or {}),
         },
     )
-    await message.answer(text)
+    reply_markup = (
+        ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=button)] for button in buttons],
+            resize_keyboard=True,
+        )
+        if buttons
+        else ReplyKeyboardRemove()
+    )
+    await message.answer(text, reply_markup=reply_markup)
 
 
 @dp.message(CommandStart())
@@ -60,7 +83,8 @@ async def start(message: Message) -> None:
         conversation.id,
         "Перед началом: Telegram не является экстренной службой и не даёт полной анонимности. "
         "Пожалуйста, не присылайте паспорт, точный адрес или другие документы. "
-        "Можно остановиться в любой момент и написать «специалист».\n\n" + WELCOME
+        "Можно остановиться в любой момент и написать «специалист».\n\n" + WELCOME,
+        buttons=MAIN_OPTIONS,
     )
 
 
@@ -99,9 +123,9 @@ async def reply(message: Message, bot: Bot) -> None:
         },
     )
     history = await get_history(conversation.id)
-    reply_text, notify, audit = await reply_for(conversation, message.text, history, assessment)
-    await reply_and_store(message, conversation.id, reply_text, audit)
-    if notify:
+    reply = await reply_for(conversation, message.text, history, assessment)
+    await reply_and_store(message, conversation.id, reply.text, reply.audit, reply.buttons)
+    if reply.notify_staff:
         await notify_staff(bot, message, "crisis/concern or human handoff")
 
 
@@ -110,7 +134,7 @@ async def main() -> None:
         raise RuntimeError("Set TELEGRAM_BOT_TOKEN in .env before launching the bot.")
     await init_db()
     while True:
-        bot = Bot(settings.telegram_bot_token)
+        bot = create_bot()
         try:
             await dp.start_polling(bot)
             return

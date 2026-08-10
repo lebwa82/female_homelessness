@@ -21,8 +21,27 @@
 4. Запустите Postgres и бота: `just run`.
 5. Проверка: `just check`.
 
-`just run` запускает бота в foreground; остановить его можно `Ctrl+C`. Полный
-список команд — `just`. Данные Postgres сохраняются после `just db-down`.
+`just run` перед запуском завершает предыдущий локальный экземпляр этого бота,
+поэтому long polling не конфликтует сам с собой. Затем бот работает в foreground;
+остановить его можно `Ctrl+C`. Полный список команд — `just`. Данные Postgres
+сохраняются после `just db-down`.
+
+Логи каждого локального запуска дублируются в `.runtime/bot.log`; посмотреть их
+в реальном времени можно командой `just logs`. Эта папка не коммитится.
+
+### Прокси для Telegram Bot API
+
+Если сервер не имеет прямого доступа к `api.telegram.org`, добавьте в `.env`
+или `/etc/women-help-bot.env` одну переменную:
+
+```dotenv
+TELEGRAM_PROXY_URL=socks5://login:password@proxy.example:1080
+```
+
+Поддерживаются `http://`, `https://`, `socks4://`, `socks4a://`, `socks5://` и
+ссылка Telegram-клиента вида `tg://socks?server=…&port=…&user=…&pass=…`.
+Ссылка `tg://proxy?server=…&secret=…` — это MTProto, она не подходит для HTTP
+Telegram Bot API.
 
 ## Постоянный запуск на VM
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -12,12 +13,27 @@ from app.llm import BridgeResult, compassionate_bridge
 from app.pii import redact_with_audit
 from app.safety import assess_crisis
 
+MAIN_OPTIONS = (
+    "Продукты и гигиена",
+    "Безопасное место / специалистка",
+    "Вопрос о документах",
+    "Другое",
+)
+DELIVERY_OPTIONS = ("Самовывоз в ПВЗ", "Электронный сертификат", "Связаться со специалисткой")
+HELP_OPTIONS = ("Получить базовую помощь", "Связаться со специалисткой")
+
 WELCOME = (
     "Здравствуйте. Я рядом, чтобы спокойно помочь с первым шагом. "
-    "Можно не называть имя и не рассказывать всё сразу. Что вам сейчас нужнее всего?\n\n"
-    "1. Продукты или гигиена\n2. Безопасное место / разговор со специалисткой\n3. Вопрос о документах или правах\n4. Другое\n\n"
-    "В любой момент напишите «специалист», и я передам диалог человеку."
+    "Можно не называть имя и не рассказывать всё сразу. Выберите то, что сейчас ближе всего."
 )
+
+
+@dataclass(frozen=True)
+class BotReply:
+    text: str
+    notify_staff: bool = False
+    audit: dict[str, Any] | None = None
+    buttons: tuple[str, ...] = ()
 
 
 async def get_or_create_conversation(channel_user_id: int) -> Conversation:
@@ -90,31 +106,46 @@ async def request_human(conversation: Conversation, reason: str) -> str:
 
 async def reply_for(
     conversation: Conversation, text: str, history: list[tuple[str, str]], assessment=None
-) -> tuple[str, bool, dict[str, Any]]:
-    """Returns (reply, notify_staff) after the latest user message is saved."""
+) -> BotReply:
+    """Build a response whose available actions are controlled by the backend."""
     assessment = assessment or assess_crisis(text)
     if assessment.risk is Risk.ACUTE:
         await request_human(conversation, assessment.reason or "acute")
-        return CRISIS_REPLY, True, {"routing": {"action": "crisis_handoff", "reason": assessment.reason}}
+        return BotReply(
+            CRISIS_REPLY,
+            notify_staff=True,
+            audit={"routing": {"action": "crisis_handoff", "reason": assessment.reason}},
+        )
 
     normalized = text.lower().strip()
     if any(term in normalized for term in ("специалист", "человек", "оператор", "помогите")):
-        return await request_human(conversation, "user_request"), True, {
-            "routing": {"action": "human_handoff", "reason": "user_request"}
-        }
+        return BotReply(
+            await request_human(conversation, "user_request"),
+            notify_staff=True,
+            audit={"routing": {"action": "human_handoff", "reason": "user_request"}},
+        )
 
     bridge: BridgeResult = await compassionate_bridge(history)
     if bridge.text == "Нужна помощь специалистки.":
-        return await request_human(conversation, "model_escalation"), True, {
-            "llm": bridge.audit,
-            "routing": {"action": "human_handoff", "reason": "model_escalation"},
-        }
+        return BotReply(
+            await request_human(conversation, "model_escalation"),
+            notify_staff=True,
+            audit={
+                "llm": bridge.audit,
+                "routing": {"action": "human_handoff", "reason": "model_escalation"},
+            },
+        )
     prefix = f"{bridge.text}\n\n" if bridge.text else ""
     message_audit = {"llm": bridge.audit}
 
     answer = find_verified_answer(normalized)
     if answer:
-        return prefix + answer, assessment.risk is Risk.CONCERN, message_audit
+        return BotReply(
+            prefix + answer,
+            notify_staff=assessment.risk is Risk.CONCERN,
+            audit=message_audit,
+            buttons=HELP_OPTIONS,
+        )
 
     if conversation.stage == Stage.WELCOME.value:
         async with Session() as session:
@@ -123,27 +154,41 @@ async def reply_for(
             item.stage = Stage.DELIVERY.value
             await session.commit()
         prefix = prefix or "Спасибо, что написали.\n\n"
-        return (
-            prefix + "Для базовой помощи можно выбрать: \n"
-            "1. Самовывоз в безопасной точке выдачи\n2. Электронный сертификат\n\n"
-            "Ответьте 1 или 2. Если сейчас важнее поговорить — напишите «специалист»."
-        ), assessment.risk is Risk.CONCERN, message_audit
+        return BotReply(
+            prefix + "Для базовой помощи выберите подходящий способ получения.",
+            notify_staff=assessment.risk is Risk.CONCERN,
+            audit=message_audit,
+            buttons=DELIVERY_OPTIONS,
+        )
 
-    if conversation.stage == Stage.DELIVERY.value and normalized in {"1", "самовывоз", "пвз", "2", "сертификат"}:
-        method = "pickup" if normalized in {"1", "самовывоз", "пвз"} else "certificate"
+    if conversation.stage == Stage.DELIVERY.value and normalized in {
+        "1",
+        "самовывоз",
+        "самовывоз в пвз",
+        "пвз",
+        "2",
+        "сертификат",
+        "электронный сертификат",
+    }:
+        method = "pickup" if normalized in {"1", "самовывоз", "самовывоз в пвз", "пвз"} else "certificate"
         async with Session() as session:
             item = await session.get(Conversation, conversation.id)
             item.delivery_method = method
             item.stage = Stage.FOLLOW_UP.value
             session.add(Event(conversation_id=conversation.id, kind="delivery_choice", payload=method))
             await session.commit()
-        return (
+        return BotReply(
             prefix
             + "Приняла. Сейчас это прототип: специалистка уточнит безопасный способ получения и не будет запрашивать лишние данные. "
-            "Я напишу позже, чтобы спросить, стало ли немного легче."
-        ), True, message_audit
+            "Я напишу позже, чтобы спросить, стало ли немного легче.",
+            notify_staff=True,
+            audit=message_audit,
+        )
 
-    return (
+    return BotReply(
         prefix
-        + "Я вас слышу. Могу помочь с базовой помощью или позвать специалистку — напишите «специалист». "
-    ), assessment.risk is Risk.CONCERN, message_audit
+        + "Я вас слышу. Выберите следующий шаг.",
+        notify_staff=assessment.risk is Risk.CONCERN,
+        audit=message_audit,
+        buttons=HELP_OPTIONS,
+    )

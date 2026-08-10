@@ -5,6 +5,7 @@ description = "Safety-first Telegram MVP for first contact with women facing hom
 requires-python = ">=3.14"
 dependencies = [
   "aiogram",
+  "aiohttp-socks>=0.11.0",
   "asyncpg",
   "greenlet",
   "openai",
