@@ -2,6 +2,7 @@
 __pycache__/
 .pytest_cache/
 .runtime/
+.worktrees/
 *.py[cod]
 .DS_Store
 postgres_data/
