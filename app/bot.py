@@ -8,24 +8,18 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
 from app.db import init_db
-from app.safety import assess_crisis
-from app.service import (
-    MAIN_OPTIONS,
-    WELCOME,
-    get_history,
-    get_or_create_conversation,
-    record_event,
-    record_message,
-    reply_for,
-)
+from app.domain import AgentTurn, Choice, IncomingMessage
+from app.service import ConversationService
+from app.worker import worker_loop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 dp = Dispatcher()
+conversation_service = ConversationService()
 
 
 def create_bot() -> Bot:
@@ -35,125 +29,98 @@ def create_bot() -> Bot:
     return Bot(settings.telegram_bot_token, session=AiohttpSession(proxy=proxy_url))
 
 
-async def notify_staff(bot: Bot, message: Message, reason: str) -> None:
-    if not settings.staff_telegram_chat_id:
-        return
-    # Do not forward the visitor's message automatically: it may contain sensitive data.
-    await bot.send_message(
-        settings.staff_telegram_chat_id,
-        f"Нужна помощь специалистки. Канал: Telegram, диалог: {message.from_user.id}. Причина: {reason}."
+def incoming_from_message(message: Message, text: str | None = None, user: object | None = None) -> IncomingMessage:
+    sender = user or message.from_user
+    return IncomingMessage(
+        platform_user_id=sender.id,
+        chat_id=message.chat.id,
+        username=getattr(sender, "username", None),
+        text=message.text if text is None else text,
+        message_id=message.message_id,
+        received_at=message.date.isoformat(),
     )
 
 
-async def reply_and_store(
-    message: Message,
-    conversation_id: int,
-    text: str,
-    audit: dict | None = None,
-    buttons: tuple[str, ...] = (),
-) -> None:
-    await record_message(
-        conversation_id,
-        "assistant",
-        text,
-        audit={
-            "telegram": {"chat_id": message.chat.id, "in_reply_to_message_id": message.message_id},
-            "ui": {"buttons": list(buttons)},
-            **(audit or {}),
-        },
+def render_keyboard(turn: AgentTurn) -> InlineKeyboardMarkup | None:
+    if not turn.choices:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=choice.label, callback_data=choice.id)] for choice in turn.choices
+        ]
     )
-    reply_markup = (
-        ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text=button)] for button in buttons],
-            resize_keyboard=True,
-        )
-        if buttons
-        else ReplyKeyboardRemove()
-    )
-    await message.answer(text, reply_markup=reply_markup)
+
+
+async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn) -> None:
+    await conversation_service.record_outbound(incoming, turn)
+    await message.answer(turn.text, reply_markup=render_keyboard(turn))
 
 
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
-    conversation = await get_or_create_conversation(message.from_user.id)
-    await record_event(conversation.id, "started")
-    await record_message(conversation.id, "user", "/start")
-    test_banner = f"🧪 Тестовый контур: {settings.runtime_label()}.\n\n"
-    await reply_and_store(
-        message,
-        conversation.id,
-        test_banner
-        + "Перед началом: Telegram не является экстренной службой и не даёт полной анонимности. "
-        "Пожалуйста, не присылайте паспорт, точный адрес или другие документы. "
-        "Можно остановиться в любой момент и написать «специалист».\n\n" + WELCOME,
-        buttons=MAIN_OPTIONS,
-    )
+    incoming = incoming_from_message(message, text="")
+    turn = await conversation_service.start(incoming)
+    await send_turn(message, incoming, turn)
 
 
 @dp.message(Command("delete"))
 async def delete_request(message: Message) -> None:
-    conversation = await get_or_create_conversation(message.from_user.id)
-    await record_event(conversation.id, "deletion_requested")
-    await record_message(conversation.id, "user", "/delete")
-    await reply_and_store(
-        message,
-        conversation.id,
-        "Запрос на удаление данных принят. Специалистка обработает его по правилам организации. "
-        "Если сейчас нужна помощь, можно продолжить писать здесь."
-    )
+    incoming = incoming_from_message(message, text="/delete")
+    turn = await conversation_service.delete(incoming)
+    await send_turn(message, incoming, turn)
 
 
 @dp.message(Command("system_info"))
 async def system_info(message: Message) -> None:
-    """Return non-secret diagnostic data; this command is intentionally not in the UI."""
-    conversation = await get_or_create_conversation(message.from_user.id)
-    await record_event(conversation.id, "system_info_requested")
-    await record_message(conversation.id, "user", "/system_info")
+    incoming = incoming_from_message(message, text="/system_info")
     llm_status = "включена" if settings.llm_enabled else "выключена"
-    await reply_and_store(
-        message,
-        conversation.id,
-        "🛠 Служебная информация\n"
-        f"ENV: {settings.app_env}\n"
-        f"Сборка: {settings.build_version}\n"
-        f"LLM: {llm_status}",
-        audit={
-            "system_info": {
-                "app_env": settings.app_env,
-                "build_version": settings.build_version,
-                "llm_enabled": settings.llm_enabled,
-            }
-        },
-        buttons=MAIN_OPTIONS,
+    turn = AgentTurn(
+        text=(
+            "🛠 Служебная информация\n"
+            f"ENV: {settings.app_env}\n"
+            f"Сборка: {settings.build_version}\n"
+            f"LLM: {llm_status}"
+        )
     )
+    await send_turn(message, incoming, turn)
+
+
+@dp.callback_query(F.data)
+async def callback(query: CallbackQuery) -> None:
+    if query.message is None or query.data is None:
+        await query.answer()
+        return
+    incoming = incoming_from_message(query.message, text=query.data, user=query.from_user)
+    turn = await conversation_service.handle_callback(incoming, query.data)
+    await query.answer()
+    await send_turn(query.message, incoming, turn)
 
 
 @dp.message(F.text)
-async def reply(message: Message, bot: Bot) -> None:
-    conversation = await get_or_create_conversation(message.from_user.id)
-    assessment = assess_crisis(message.text)
-    await record_message(
-        conversation.id,
-        "user",
-        message.text,
-        audit={
-            "telegram": {
-                "chat_id": message.chat.id,
-                "message_id": message.message_id,
-                "received_at": message.date.isoformat(),
-            },
-            "risk_assessment": {
-                "risk": assessment.risk.value,
-                "reason": assessment.reason,
-                "detector": "rule_based_v1",
-            },
-        },
+async def reply(message: Message) -> None:
+    incoming = incoming_from_message(message)
+    turn = await conversation_service.handle_text(incoming)
+    await send_turn(message, incoming, turn)
+
+
+@dp.message()
+async def unsupported_content(message: Message) -> None:
+    incoming = incoming_from_message(message, text="[non-text content]")
+    turn = AgentTurn(
+        text="Пока я могу общаться только текстом. Можно написать несколькими словами, что сейчас важнее всего.",
+        choices=(Choice(id="human", label="Поговорить с живым человеком"),),
     )
-    history = await get_history(conversation.id)
-    reply = await reply_for(conversation, message.text, history, assessment)
-    await reply_and_store(message, conversation.id, reply.text, reply.audit, reply.buttons)
-    if reply.notify_staff:
-        await notify_staff(bot, message, "crisis/concern or human handoff")
+    await send_turn(message, incoming, turn)
+
+
+async def poll_once(bot: Bot) -> None:
+    worker_task = asyncio.create_task(worker_loop(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)
+        await bot.session.close()
 
 
 async def main() -> None:
@@ -163,13 +130,11 @@ async def main() -> None:
     while True:
         bot = create_bot()
         try:
-            await dp.start_polling(bot)
+            await poll_once(bot)
             return
         except TelegramNetworkError:
             logger.warning("Telegram network timeout; retrying polling in five seconds.")
             await asyncio.sleep(5)
-        finally:
-            await bot.session.close()
 
 
 if __name__ == "__main__":

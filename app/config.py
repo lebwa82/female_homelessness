@@ -16,17 +16,16 @@ class Settings(BaseSettings):
         default="development", validation_alias=AliasChoices("APP_ENV", "ENV")
     )
     build_version: str = "dev"
-    staff_telegram_chat_id: int | None = None
-    database_url: str = "postgresql+asyncpg://helper:helper@localhost:5432/women_help"
+    database_url: str = "postgresql+asyncpg://helper:helper@localhost:5433/women_help"
     llm_enabled: bool = True
     yandex_ai_api_key: str = ""
     yandex_cloud_folder_id: str = DEFAULT_YANDEX_CLOUD_FOLDER_ID
     yandex_ai_model: str = "qwen3.6-35b-a3b"
-
-    @field_validator("staff_telegram_chat_id", mode="before")
-    @classmethod
-    def blank_chat_id_is_none(cls, value: object) -> object:
-        return None if value == "" else value
+    identity_hash_key: str = "women-help-mvp"
+    followup_delay_seconds: int = Field(default=7 * 24 * 60 * 60, ge=1)
+    followup_reminder_seconds: int = Field(default=48 * 60 * 60, ge=1)
+    message_retention_days: int = Field(default=30, ge=1)
+    worker_poll_seconds: int = Field(default=15, ge=1)
 
     @field_validator("yandex_cloud_folder_id", mode="before")
     @classmethod

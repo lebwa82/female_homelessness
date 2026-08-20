@@ -4,7 +4,7 @@
 
 **Goal:** Replace the scripted prototype with a Telegram MVP that follows the approved S01–S19 product flow, runs independent risk and support Qwen agents concurrently, stores auditable aid/escalation/follow-up state in PostgreSQL, and degrades safely.
 
-**Architecture:** aiogram remains a thin Telegram adapter around a channel-neutral `ConversationService`. PydanticAI sends one native structured-output request to `RiskAgent` and one to `SupportAgent` concurrently through Yandex AI Studio; backend policy merges local/model risk, validates the final action, and executes side effects only after the safety result. PostgreSQL 18 stores one persistent conversation per Telegram identity plus messages, agent runs, requests, escalations and recoverable scheduled jobs.
+**Architecture:** aiogram remains a thin Telegram adapter around a channel-neutral `ConversationService`. PydanticAI sends one prompted JSON request to `RiskAgent` and one to `SupportAgent` concurrently through Yandex AI Studio; backend Pydantic validation, local safety policy and the action gate execute side effects only after the safety result. PostgreSQL 18 stores one persistent conversation per Telegram identity plus messages, agent runs, requests, escalations and recoverable scheduled jobs.
 
 **Tech Stack:** Python 3.14, uv, aiogram 3, PydanticAI slim with OpenAI provider, OpenAI Responses API, Qwen3.6-35B in Yandex AI Studio, Pydantic v2, SQLAlchemy async, asyncpg, PostgreSQL 18, Presidio/spaCy, pytest/pytest-asyncio, ruff, Podman Compose, systemd, just.
 
@@ -213,7 +213,7 @@ async def test_evaluate_starts_exactly_two_calls_concurrently() -> None:
     assert result.risk.level is RiskLevel.NONE
 ```
 
-Also assert complete history is Presidio-redacted, header logging is disabled, max output is 150, and audits contain no raw prompt or API key.
+Also assert complete history is Presidio-redacted, header logging is disabled, Qwen reasoning is disabled, max output is 300, and audits contain no raw prompt or API key.
 
 - [ ] **Step 3: Confirm RED**
 
@@ -231,11 +231,11 @@ client = AsyncOpenAI(
 )
 provider = OpenAIProvider(openai_client=client)
 model = OpenAIResponsesModel(settings.model_uri, provider=provider)
-risk_agent = Agent(model, output_type=NativeOutput(RiskAssessment))
-support_agent = Agent(model, output_type=NativeOutput(AgentAction))
+risk_agent = Agent(model, output_type=PromptedOutput(RiskAssessment))
+support_agent = Agent(model, output_type=PromptedOutput(AgentAction))
 ```
 
-Run both with `asyncio.create_task`, stable system instructions, redacted transcript, catalog/knowledge/state context, temperature `0.3`, and `max_tokens=150`. Convert PydanticAI usage/response metadata into `AgentRunAudit` without storing request bodies.
+Run both with `asyncio.create_task`, stable system instructions, redacted transcript, catalog/knowledge/state context, `reasoning.effort=none`, temperature `0.3`, and `max_tokens=300`. Convert PydanticAI usage/response metadata into `AgentRunAudit` without storing request bodies. The live compatibility check found that Qwen3.6 rejects native `json_schema`; PromptedOutput plus local Pydantic validation is the accepted transport.
 
 - [ ] **Step 5: Confirm GREEN with mocks, then run a real compatibility smoke**
 
@@ -244,7 +244,7 @@ Expected: all pass.
 Run: `uv run python -m scripts.llm_health_check --structured`  
 Expected: `risk=none`, a valid `AgentAction`, exactly two successful request audits, and no prompt/token output.
 
-If the Yandex endpoint rejects a provider-specific PydanticAI field, keep the same `AgentGateway` but implement the two requests with `AsyncOpenAI.responses.create` plus strict JSON schema and Pydantic validation. The acceptance condition remains two real structured Responses calls.
+If the Yandex endpoint changes its JSON behavior, keep the same `AgentGateway`, run the compatibility smoke and validate parsed JSON locally before any action. The acceptance condition remains two real typed Responses calls.
 
 ### Task 5: Conversation application service and policy gate
 

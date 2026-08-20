@@ -1,8 +1,8 @@
 import pytest
 
+from app.agents import format_redacted_transcript
 from app.config import Settings
 from app.domain import Risk
-from app.llm import format_transcript
 from app.safety import assess_crisis
 
 
@@ -12,10 +12,6 @@ def test_detects_acute_crisis() -> None:
 
 def test_detects_concern() -> None:
     assert assess_crisis("Мне страшно, нет где ночевать").risk is Risk.CONCERN
-
-
-def test_accepts_blank_optional_telegram_chat_id() -> None:
-    assert Settings(staff_telegram_chat_id="").staff_telegram_chat_id is None
 
 
 def test_blank_folder_id_uses_project_default() -> None:
@@ -36,6 +32,7 @@ def test_rejects_mtproto_proxy_link_for_bot_api() -> None:
 
 
 def test_transcript_preserves_full_dialogue() -> None:
-    assert format_transcript([("user", "Мне нужна помощь"), ("assistant", "Я рядом")]) == (
-        "Пользователь: Мне нужна помощь\n\nБот: Я рядом\n\nСформулируй следующую короткую реплику бота."
-    )
+    transcript, audit = format_redacted_transcript((("user", "Мне нужна помощь"), ("assistant", "Я рядом")))
+
+    assert transcript == "Пользователь: Мне нужна помощь\n\nБот: Я рядом"
+    assert audit["messages_processed"] == 2

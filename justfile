@@ -47,6 +47,10 @@ check: lint test
 llm-health:
     uv run python -m scripts.llm_health_check
 
+# Run deterministic aid and crisis paths without Telegram or LLM access.
+scenario-smoke:
+    uv run python -m scripts.scenario_smoke
+
 # Deploy the clean, committed Git snapshot to the MVP VM and verify it.
 # Override host when needed: just deploy-prod user@host
 deploy-prod host="lebwa82@89.169.180.0": check

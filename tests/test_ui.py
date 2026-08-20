@@ -1,12 +1,24 @@
-from app.service import DELIVERY_OPTIONS, HELP_OPTIONS, MAIN_OPTIONS
+from app.bot import render_keyboard
+from app.domain import AgentTurn, Choice
 
 
-def test_every_backend_choice_has_a_button_label() -> None:
-    assert MAIN_OPTIONS == (
-        "Продукты и гигиена",
-        "Безопасное место / специалистка",
-        "Вопрос о документах",
-        "Другое",
+def test_all_concrete_choices_render_as_stable_inline_callbacks() -> None:
+    turn = AgentTurn(
+        text="Что выбрать?",
+        choices=(
+            Choice(id="aid:food_card", label="Карточка на продукты"),
+            Choice(id="human", label="Поговорить с живым человеком"),
+        ),
     )
-    assert DELIVERY_OPTIONS == ("Самовывоз в ПВЗ", "Электронный сертификат", "Связаться со специалисткой")
-    assert HELP_OPTIONS == ("Получить базовую помощь", "Связаться со специалисткой")
+
+    markup = render_keyboard(turn)
+
+    assert markup is not None
+    assert [button.callback_data for row in markup.inline_keyboard for button in row] == [
+        "aid:food_card",
+        "human",
+    ]
+
+
+def test_no_choices_means_no_keyboard() -> None:
+    assert render_keyboard(AgentTurn(text="Этот чат открыт.")) is None
