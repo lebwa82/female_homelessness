@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.agents import AgentEvaluation
-from app.domain import AgentAction, IncomingMessage, RiskAssessment, RiskLevel
+from app.domain import ActionKind, AgentAction, Choice, IncomingMessage, RiskAssessment, RiskLevel
 from app.service import ConversationService
 from app.store import InMemoryConversationStore, StoredFollowupJob
 
@@ -67,6 +67,31 @@ async def test_start_then_food_card_current_telegram_creates_one_aid_request() -
         ("food_card", "current_telegram", "@helper_test")
     ]
     assert len(store.followup_jobs) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    (
+        AgentAction(
+            kind=ActionKind.SHOW_CHOICES,
+            text="Что сейчас важнее всего?",
+            choices=(Choice(id="need:housing", label="Жильё / некуда идти"),),
+        ),
+        AgentAction(kind=ActionKind.REPLY, text="Что сейчас важнее всего?"),
+    ),
+)
+async def test_need_button_after_free_text_opens_aid_options_instead_of_repeating_needs(
+    action: AgentAction,
+) -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation(action)))
+
+    need_turn = await service.handle_text(identity("мне нужна помощь"))
+    offer = await service.handle_callback(identity(), "need:housing")
+
+    assert any(choice.id == "need:housing" for choice in need_turn.choices)
+    assert any(choice.id == "aid:hostel_3_nights" for choice in offer.choices)
 
 
 @pytest.mark.asyncio

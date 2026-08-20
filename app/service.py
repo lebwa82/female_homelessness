@@ -68,35 +68,33 @@ class ConversationService:
             await self.store.cancel_pending_reminder(record)
             record = await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
         if callback_id == "continue":
-            await self.store.update(record, state=ConversationState.DISCOVERING_NEED.value)
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         if callback_id == "pause":
             await self.store.update(record, state=ConversationState.CLOSED.value)
             return self._turn(PAUSE)
         if callback_id == "continue_bot":
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         if callback_id == "human":
             return await self._human_turn(record, "button")
         if callback_id == "location:skip":
             if record.state != ConversationState.COLLECTING_LOCATION.value:
-                return self._state_turn(record)
+                return await self._state_turn(record)
             await self.store.update(record, state=ConversationState.COLLECTING_CONTACT_METHOD.value)
             return self._contact_turn()
         if callback_id.startswith("need:"):
             if record.state not in {ConversationState.DISCOVERING_NEED.value, ConversationState.CHOOSING_AID.value}:
-                return self._state_turn(record)
+                return await self._state_turn(record)
             return await self._handle_need_choice(record, callback_id.removeprefix("need:"))
         if callback_id.startswith("aid:"):
             if record.state != ConversationState.CHOOSING_AID.value:
-                return self._state_turn(record)
+                return await self._state_turn(record)
             return await self._handle_aid_choice(record, callback_id.removeprefix("aid:"))
         if callback_id.startswith("contact:"):
             if record.state != ConversationState.COLLECTING_CONTACT_METHOD.value:
-                return self._state_turn(record)
+                return await self._state_turn(record)
             return await self._handle_contact_choice(record, callback_id.removeprefix("contact:"))
         if callback_id == "more_help":
-            await self.store.update(record, state=ConversationState.DISCOVERING_NEED.value)
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         if callback_id == "finish":
             await self.store.update(record, state=ConversationState.CLOSED.value)
             return self._turn("Хорошо. Этот чат всегда открыт — пишите, когда захотите.")
@@ -174,14 +172,14 @@ class ConversationService:
 
         action = evaluation.action
         if action is None:
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         return await self._apply_model_action(record, action, incoming.text)
 
     async def _handle_need_choice(self, record: ConversationRecord, raw_need: str) -> AgentTurn:
         try:
             need = NeedKind(raw_need)
         except ValueError:
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         await self.store.update(record, need=need.value, state=ConversationState.CHOOSING_AID.value)
         if need is NeedKind.OTHER:
             return self._turn(OTHER_PROMPT)
@@ -190,7 +188,7 @@ class ConversationService:
     async def _handle_aid_choice(self, record: ConversationRecord, aid_id: str) -> AgentTurn:
         item = get_aid_item(aid_id)
         if item is None:
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         if item.needs_location:
             await self.store.update(
                 record,
@@ -237,7 +235,7 @@ class ConversationService:
     ) -> AgentTurn:
         aid_id = record.pending_aid_id
         if aid_id is None or get_aid_item(aid_id) is None:
-            return self._need_turn()
+            return await self._enter_need_discovery(record)
         contact_method = method.value if method else record.pending_contact_method
         await self.store.create_aid_request(
             record,
@@ -280,12 +278,14 @@ class ConversationService:
         if action.kind is ActionKind.SHOW_CHOICES:
             choices = safe_choices(action.choices)
             if choices:
+                if any(choice.id.startswith("need:") for choice in choices):
+                    return await self._enter_need_discovery(record, action.text, choices)
                 return self._turn(action.text, choices)
         detected = detect_need(user_text)
         if detected is not None:
             await self.store.update(record, need=detected.value, state=ConversationState.CHOOSING_AID.value)
             return self._offer_turn(detected, prefix=action.text)
-        return self._turn(action.text, NEED_CHOICES)
+        return await self._enter_need_discovery(record, action.text, NEED_CHOICES)
 
     async def _human_turn(self, record: ConversationRecord, reason: str) -> AgentTurn:
         assessment = RiskAssessment(
@@ -334,9 +334,14 @@ class ConversationService:
     def _turn(text: str, choices: tuple[Choice, ...] = ()) -> AgentTurn:
         return AgentTurn(text=text, choices=choices).with_human_choice()
 
-    @staticmethod
-    def _need_turn() -> AgentTurn:
-        return ConversationService._turn(NEED_PROMPT, NEED_CHOICES)
+    async def _enter_need_discovery(
+        self,
+        record: ConversationRecord,
+        text: str = NEED_PROMPT,
+        choices: tuple[Choice, ...] = NEED_CHOICES,
+    ) -> AgentTurn:
+        await self.store.update(record, state=ConversationState.DISCOVERING_NEED.value)
+        return self._turn(text, choices)
 
     @staticmethod
     def _offer_turn(need: NeedKind, prefix: str = "") -> AgentTurn:
@@ -354,8 +359,7 @@ class ConversationService:
         text = prefix.strip() or "Чтобы это передать, нужен удобный способ связи. Что вам подходит?"
         return ConversationService._turn(text, CONTACT_CHOICES)
 
-    @staticmethod
-    def _state_turn(record: ConversationRecord) -> AgentTurn:
+    async def _state_turn(self, record: ConversationRecord) -> AgentTurn:
         if record.state == ConversationState.AID_REQUESTED.value:
             return ConversationService._turn("Запрос уже сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
         if record.state == ConversationState.CHOOSING_AID.value and record.need:
@@ -364,8 +368,8 @@ class ConversationService:
             except ValueError:
                 pass
         if record.state == ConversationState.COLLECTING_CONTACT_METHOD.value:
-            return ConversationService._contact_turn()
-        return ConversationService._need_turn()
+            return self._contact_turn()
+        return await self._enter_need_discovery(record)
 
 
 def available_catalog() -> tuple[AidItem, ...]:
