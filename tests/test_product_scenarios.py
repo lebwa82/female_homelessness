@@ -95,6 +95,18 @@ async def test_need_button_after_free_text_opens_aid_options_instead_of_repeatin
 
 
 @pytest.mark.asyncio
+async def test_existing_need_button_from_legacy_greeting_state_opens_aid_options() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    record = await store.ensure(identity())
+    record.state = "greeting"
+
+    offer = await service.handle_callback(identity(), "need:housing")
+
+    assert any(choice.id == "aid:hostel_3_nights" for choice in offer.choices)
+
+
+@pytest.mark.asyncio
 async def test_other_telegram_contact_is_collected_as_free_text_after_button_choice() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))

@@ -82,7 +82,11 @@ class ConversationService:
             await self.store.update(record, state=ConversationState.COLLECTING_CONTACT_METHOD.value)
             return self._contact_turn()
         if callback_id.startswith("need:"):
-            if record.state not in {ConversationState.DISCOVERING_NEED.value, ConversationState.CHOOSING_AID.value}:
+            if record.state not in {
+                ConversationState.GREETING.value,
+                ConversationState.DISCOVERING_NEED.value,
+                ConversationState.CHOOSING_AID.value,
+            }:
                 return await self._state_turn(record)
             return await self._handle_need_choice(record, callback_id.removeprefix("need:"))
         if callback_id.startswith("aid:"):
