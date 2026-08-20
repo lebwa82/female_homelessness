@@ -2,8 +2,12 @@
 # Deploy the current committed repository snapshot to one MVP VM.
 set -euo pipefail
 
-host="${1:-lebwa82@89.169.180.0}"
+host="${1:-}"
 target_dir="${2:-/opt/women-help-bot}"
+
+if [[ -z "$host" ]]; then
+  host="$(uv run python -m scripts.resolve_prod_host)"
+fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
   echo "Refusing to deploy: commit or stash local changes first." >&2

@@ -52,6 +52,7 @@ scenario-smoke:
     uv run python -m scripts.scenario_smoke
 
 # Deploy the clean, committed Git snapshot to the MVP VM and verify it.
-# Override host when needed: just deploy-prod user@host
-deploy-prod host="lebwa82@89.169.180.0": check
+# The current public IP is resolved from Yandex Cloud; override when needed:
+# just deploy-prod user@host
+deploy-prod host="": check
     bash scripts/deploy_prod.sh "{{host}}"
