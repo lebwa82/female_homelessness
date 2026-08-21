@@ -124,7 +124,11 @@ class ConversationService:
                 LEVEL_TWO_CHOICES,
             )
         if callback_id == "level2:details":
-            return await self._human_turn(record, "level_two_support")
+            return await self._human_turn(
+                record,
+                "level_two_support",
+                cause=EscalationCause.LEVEL_TWO_SUPPORT,
+            )
         if callback_id == "level2:later":
             return self._turn("Хорошо. К этой возможности можно вернуться в любое время.")
         return self._turn("Можно выбрать следующий шаг или написать своими словами.", NEED_CHOICES)
@@ -308,10 +312,15 @@ class ConversationService:
             return self._turn(plan.text)
         return self._turn(plan.text)
 
-    async def _human_turn(self, record: ConversationRecord, reason: str) -> AgentTurn:
+    async def _human_turn(
+        self,
+        record: ConversationRecord,
+        reason: str,
+        cause: EscalationCause = EscalationCause.HUMAN_REQUEST,
+    ) -> AgentTurn:
         await self.store.create_escalation(
             record,
-            EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason=reason),
+            EscalationRequest(cause=cause, reason=reason),
         )
         await self.store.record_action(record, "human_handoff", "simulated")
         return AgentTurn(

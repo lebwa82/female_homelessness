@@ -332,7 +332,7 @@ async def test_followup_better_opens_level_two_explanation_before_human_handoff(
     assert "временное жильё" in introduction.text.lower()
     assert {choice.id for choice in introduction.choices} >= {"level2:details", "level2:later", "human"}
     assert "зову человека" in handoff.text.lower()
-    assert store.escalations[-1].cause is EscalationCause.HUMAN_REQUEST
+    assert store.escalations[-1].cause is EscalationCause.LEVEL_TWO_SUPPORT
     assert store.escalations[-1].level is None
 
 
