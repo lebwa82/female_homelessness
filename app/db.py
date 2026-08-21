@@ -20,6 +20,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.ext.asyncio import AsyncAttrs, AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -120,6 +121,24 @@ class ActionExecution(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class CallbackExecution(Base):
+    __tablename__ = "callback_executions"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "callback_id",
+            "source_message_id",
+            name="uq_callback_executions_origin",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
+    callback_id: Mapped[str] = mapped_column(String(64))
+    source_message_id: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AidRequest(Base):
     __tablename__ = "aid_requests"
 
@@ -203,6 +222,19 @@ async def init_db() -> None:
             "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS cause VARCHAR(48) NOT NULL DEFAULT 'safety'",
             "ALTER TABLE escalations ALTER COLUMN level DROP NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_escalations_cause ON escalations (cause)",
+            """
+            CREATE TABLE IF NOT EXISTS callback_executions (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                callback_id VARCHAR(64) NOT NULL,
+                source_message_id VARCHAR(32) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_callback_executions_origin
+            ON callback_executions (conversation_id, callback_id, source_message_id)
+            """,
         ):
             await connection.execute(text(statement))
 
@@ -319,6 +351,34 @@ async def record_action(
         await session.commit()
 
 
+async def claim_callback_execution(
+    conversation_id: int,
+    callback_id: str,
+    message_id: int | None,
+) -> bool:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        statement = (
+            postgres_insert(CallbackExecution)
+            .values(
+                conversation_id=conversation_id,
+                callback_id=callback_id,
+                source_message_id=source_message_id,
+            )
+            .on_conflict_do_nothing(
+                index_elements=(
+                    CallbackExecution.conversation_id,
+                    CallbackExecution.callback_id,
+                    CallbackExecution.source_message_id,
+                )
+            )
+            .returning(CallbackExecution.id)
+        )
+        result = await session.execute(statement)
+        await session.commit()
+        return result.scalar_one_or_none() is not None
+
+
 async def create_escalation(conversation_id: int, request: EscalationRequest) -> None:
     async with Session() as session:
         session.add(
@@ -356,6 +416,7 @@ async def delete_conversation_data(conversation_id: int) -> None:
         await session.execute(delete(FollowupJob).where(FollowupJob.conversation_id == conversation_id))
         await session.execute(delete(AidRequest).where(AidRequest.conversation_id == conversation_id))
         await session.execute(delete(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id))
+        await session.execute(delete(CallbackExecution).where(CallbackExecution.conversation_id == conversation_id))
         conversation = await session.get(Conversation, conversation_id)
         if conversation is not None:
             conversation.state = ConversationState.GREETING.value

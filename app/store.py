@@ -85,6 +85,7 @@ class InMemoryConversationStore:
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
     risk_assessments: list[tuple[int, RiskAssessment]] = field(default_factory=list)
     actions: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
+    callback_claims: set[tuple[int, str, str]] = field(default_factory=set)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -127,6 +128,18 @@ class InMemoryConversationStore:
     ) -> None:
         self.actions.append((record.id, kind, status, audit or {}))
 
+    async def claim_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        message_id: int | None,
+    ) -> bool:
+        claim = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        if claim in self.callback_claims:
+            return False
+        self.callback_claims.add(claim)
+        return True
+
     async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
         self.escalations.append(StoredEscalation(record.id, request))
 
@@ -163,6 +176,7 @@ class InMemoryConversationStore:
         request_ids = {item.id for item in self.aid_requests if item.conversation_id == record.id}
         self.aid_requests = [item for item in self.aid_requests if item.conversation_id != record.id]
         self.followup_jobs = [item for item in self.followup_jobs if item.aid_request_id not in request_ids]
+        self.callback_claims = {claim for claim in self.callback_claims if claim[0] != record.id}
         record.state = "greeting"
         record.need = None
         record.pending_aid_id = None
@@ -225,6 +239,14 @@ class PostgresConversationStore:
         self, record: ConversationRecord, kind: str, status: str, audit: dict[str, Any] | None = None
     ) -> None:
         await db.record_action(record.id, kind, status, audit)
+
+    async def claim_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        message_id: int | None,
+    ) -> bool:
+        return await db.claim_callback_execution(record.id, callback_id, message_id)
 
     async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
         await db.create_escalation(record.id, request)

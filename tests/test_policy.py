@@ -59,6 +59,22 @@ def test_explicit_human_request_is_not_a_risk_but_becomes_handoff() -> None:
     )
 
     assert decision.effect is PolicyEffect.HUMAN_HANDOFF
+    assert decision.choice_set is ChoiceSet.SAFE_CONTINUE
+
+
+def test_direct_psychologist_request_owns_contact_choice_set() -> None:
+    decision = resolve_turn(
+        safe_risk(),
+        SupportPlan(
+            intent="psychologist_request",
+            next_action="start_psychologist_request",
+            text="Начинаю запрос к психологу.",
+        ),
+        ConversationState.OPEN_CONVERSATION.value,
+    )
+
+    assert decision.effect is PolicyEffect.START_PSYCHOLOGIST_REQUEST
+    assert decision.choice_set is ChoiceSet.CONTACT_METHODS
 
 
 def test_critical_risk_discards_support_plan() -> None:

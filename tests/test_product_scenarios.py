@@ -41,13 +41,13 @@ class ScriptedGateway:
         return self.evaluations.pop(0)
 
 
-def identity(text: str = "") -> IncomingMessage:
+def identity(text: str = "", message_id: int | None = 303) -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=101,
         chat_id=202,
         username="helper_test",
         text=text,
-        message_id=303,
+        message_id=message_id,
     )
 
 
@@ -223,6 +223,20 @@ async def test_direct_psychologist_request_collects_contact_without_a_prior_offe
 
 
 @pytest.mark.asyncio
+async def test_direct_psychologist_request_audit_matches_contact_ui() -> None:
+    service, store, _ = scripted_service(psychologist_request_plan())
+
+    turn = await service.handle_text(identity("хочу поговорить с психологом"))
+
+    _, kind, _, audit = store.actions[-1]
+    assert kind == "policy_decision"
+    assert audit["choice_set"] == "contact_methods"
+    assert audit["rendered_callback_ids"] == [choice.id for choice in turn.choices]
+    assert audit["effect"] == "start_psychologist_request"
+    assert audit["side_effects"] == []
+
+
+@pytest.mark.asyncio
 async def test_psychologist_callback_without_a_recorded_offer_returns_open_conversation() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
@@ -231,7 +245,7 @@ async def test_psychologist_callback_without_a_recorded_offer_returns_open_conve
 
     assert [choice.id for choice in turn.choices] == ["human"]
     assert store.aid_requests == []
-    assert store.conversations[101].state == "open_conversation"
+    assert store.conversations[101].state == "greeting"
 
 
 @pytest.mark.asyncio
@@ -261,7 +275,7 @@ async def test_unknown_callback_returns_open_conversation_instead_of_need_menu()
     turn = await service.handle_callback(identity(), "unknown:old-button")
 
     assert [choice.id for choice in turn.choices] == ["human"]
-    assert store.conversations[101].state == "open_conversation"
+    assert store.conversations[101].state == "greeting"
 
 
 @pytest.mark.asyncio
@@ -282,6 +296,7 @@ async def test_policy_audit_contains_only_resolved_literals_after_execution() ->
         "choice_set": "none",
         "rendered_callback_ids": [choice.id for choice in turn.choices],
         "effect": "none",
+        "side_effects": [],
         "fallback_reason": None,
     }
     assert "text" not in audit
@@ -338,6 +353,90 @@ async def test_noncritical_safety_is_recorded_while_a_valid_plan_continues(level
     assert [choice.id for choice in turn.choices] == ["human"]
     assert store.escalations[-1].cause is EscalationCause.SAFETY
     assert store.escalations[-1].level is level
+    assert store.actions[-1][3]["side_effects"] == ["record_safety"]
+
+
+@pytest.mark.asyncio
+async def test_stale_continue_preserves_contact_collection_without_a_need_menu() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    await service.start(identity())
+    await service.handle_callback(identity(), "continue")
+    await service.handle_callback(identity(), "need:legal")
+    await service.handle_callback(identity(), "aid:legal_consultation")
+
+    turn = await service.handle_callback(identity(message_id=304), "continue")
+
+    record = store.conversations[101]
+    assert record.state == "collecting_contact_method"
+    assert record.pending_aid_id == "legal_consultation"
+    assert any(choice.id == "contact:current_telegram" for choice in turn.choices)
+    assert not any(choice.id.startswith("need:") for choice in turn.choices)
+
+
+@pytest.mark.asyncio
+async def test_stale_more_help_preserves_contact_collection_without_a_need_menu() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    await service.start(identity())
+    await service.handle_callback(identity(), "continue")
+    await service.handle_callback(identity(), "need:legal")
+    await service.handle_callback(identity(), "aid:legal_consultation")
+
+    turn = await service.handle_callback(identity(message_id=304), "more_help")
+
+    record = store.conversations[101]
+    assert record.state == "collecting_contact_method"
+    assert record.pending_aid_id == "legal_consultation"
+    assert any(choice.id == "contact:current_telegram" for choice in turn.choices)
+    assert not any(choice.id.startswith("need:") for choice in turn.choices)
+
+
+@pytest.mark.asyncio
+async def test_human_callback_is_idempotent_per_originating_message() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    await service.handle_callback(identity(message_id=410), "human")
+    await service.handle_callback(identity(message_id=410), "human")
+    await service.handle_callback(identity(message_id=411), "human")
+
+    assert [item.cause for item in store.escalations] == [
+        EscalationCause.HUMAN_REQUEST,
+        EscalationCause.HUMAN_REQUEST,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_city_capture_audit_has_final_contact_ui_and_strict_keys() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    await service.start(identity())
+    await service.handle_callback(identity(), "continue")
+    await service.handle_callback(identity(), "need:housing")
+    await service.handle_callback(identity(), "aid:hostel_3_nights")
+
+    turn = await service.handle_text(identity("Москва", message_id=512))
+
+    _, kind, _, audit = store.actions[-1]
+    assert kind == "policy_decision"
+    assert set(audit) == {
+        "state_before",
+        "state_after",
+        "risk",
+        "intent",
+        "next_action",
+        "choice_set",
+        "rendered_callback_ids",
+        "effect",
+        "side_effects",
+        "fallback_reason",
+    }
+    assert audit["state_before"] == "collecting_location"
+    assert audit["state_after"] == "collecting_contact_method"
+    assert audit["choice_set"] == "contact_methods"
+    assert audit["rendered_callback_ids"] == [choice.id for choice in turn.choices]
+    assert audit["effect"] == "capture_location"
 
 
 @pytest.mark.asyncio
@@ -451,6 +550,18 @@ async def test_critical_risk_discards_model_create_aid_action_and_returns_hotlin
     assert "8-800-2000-122" in turn.text
     assert store.aid_requests == []
     assert store.escalations[-1].level is RiskLevel.CRITICAL
+
+
+@pytest.mark.asyncio
+async def test_continue_bot_from_critical_turn_is_not_stale() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    await service.handle_text(identity("не хочу жить", message_id=620))
+    turn = await service.handle_callback(identity(message_id=621), "continue_bot")
+
+    assert store.conversations[101].state == "open_conversation"
+    assert [choice.id for choice in turn.choices] == ["human"]
 
 
 @pytest.mark.asyncio

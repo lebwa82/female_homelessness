@@ -133,7 +133,14 @@ class PolicyEffect(str, Enum):
     START_PSYCHOLOGIST_REQUEST = "start_psychologist_request"
     HUMAN_HANDOFF = "human_handoff"
     CRITICAL_ESCALATION = "critical_escalation"
+    CAPTURE_LOCATION = "capture_location"
+    COMPLETE_CONTACT = "complete_contact"
+    REPLAY_WORKFLOW = "replay_workflow"
     CLOSE = "close"
+
+
+class PolicySideEffect(str, Enum):
+    RECORD_SAFETY = "record_safety"
 
 
 class ResolvedTurn(BaseModel):
@@ -145,6 +152,8 @@ class ResolvedTurn(BaseModel):
     need: NeedKind | None = None
     catalog_item_ids: tuple[str, ...] = ()
     offered_support: SupportOffer | None = None
+    workflow_value: str | None = Field(default=None, max_length=320)
+    side_effects: tuple[PolicySideEffect, ...] = ()
     fallback_reason: str | None = Field(default=None, max_length=120)
 
 

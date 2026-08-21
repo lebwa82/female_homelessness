@@ -78,3 +78,28 @@ async def test_delete_data_resets_pending_offer() -> None:
     await store.delete_data(record)
 
     assert record.pending_offer is None
+
+
+@pytest.mark.asyncio
+async def test_in_memory_callback_claim_is_idempotent_per_message() -> None:
+    store = InMemoryConversationStore()
+    record = await store.ensure(identity())
+
+    assert await store.claim_callback(record, "human", 303)
+    assert not await store.claim_callback(record, "human", 303)
+    assert await store.claim_callback(record, "human", 304)
+
+
+@pytest.mark.asyncio
+async def test_postgres_store_forwards_callback_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, str, int | None]] = []
+
+    async def capture_claim(conversation_id: int, callback_id: str, message_id: int | None) -> bool:
+        calls.append((conversation_id, callback_id, message_id))
+        return True
+
+    monkeypatch.setattr(store_module.db, "claim_callback_execution", capture_claim)
+    record = ConversationRecord(1, "telegram", 101, 202, "helper_test")
+
+    assert await PostgresConversationStore().claim_callback(record, "human", 303)
+    assert calls == [(1, "human", 303)]
