@@ -69,9 +69,19 @@ class ConversationService:
 
     async def handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         record = await self.store.ensure(incoming)
-        if not await self.store.claim_callback(record, callback_id, incoming.message_id):
+        lease_token = await self.store.claim_callback(record, callback_id, incoming.message_id)
+        if lease_token is None:
             return await self._replay_callback(record, callback_id)
-        await self.store.append_message(record, "user", callback_id, {"callback": True})
+        try:
+            await self.store.append_message(record, "user", callback_id, {"callback": True})
+            turn = await self._dispatch_callback(record, callback_id)
+        except Exception:
+            await self.store.fail_callback(record, callback_id, incoming.message_id, lease_token)
+            raise
+        await self.store.complete_callback(record, callback_id, incoming.message_id, lease_token)
+        return turn
+
+    async def _dispatch_callback(self, record: ConversationRecord, callback_id: str) -> AgentTurn:
         if callback_id.startswith("followup:") and record.state == ConversationState.FOLLOWUP_SENT.value:
             await self.store.cancel_pending_reminder(record)
             record = await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
@@ -185,9 +195,6 @@ class ConversationService:
     async def handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         record = await self.store.ensure(incoming)
         await self.store.append_message(record, "user", incoming.text, {"telegram_message_id": incoming.message_id})
-        if record.state == ConversationState.FOLLOWUP_SENT.value:
-            await self.store.cancel_pending_reminder(record)
-            record = await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
         history = await self.store.history(record)
         knowledge_query = " ".join(content for role, content in history if role == "user")
         verified_articles = find_verified_articles(knowledge_query)
@@ -343,6 +350,9 @@ class ConversationService:
         for side_effect in decision.side_effects:
             if side_effect is PolicySideEffect.RECORD_SAFETY and assessment is not None:
                 await self.store.create_escalation(record, self._safety_escalation(assessment))
+            if side_effect is PolicySideEffect.COMPLETE_FOLLOWUP:
+                await self.store.cancel_pending_reminder(record)
+                await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
 
         if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
             await self.store.update(record, state=ConversationState.OPEN_CONVERSATION.value)

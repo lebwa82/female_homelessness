@@ -41,6 +41,18 @@ class ScriptedGateway:
         return self.evaluations.pop(0)
 
 
+class FailOnceHumanEscalationStore(InMemoryConversationStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self._fail_human_escalation = True
+
+    async def create_escalation(self, record, request) -> None:  # type: ignore[no-untyped-def]
+        if request.cause is EscalationCause.HUMAN_REQUEST and self._fail_human_escalation:
+            self._fail_human_escalation = False
+            raise RuntimeError("simulated handoff failure")
+        await super().create_escalation(record, request)
+
+
 def identity(text: str = "", message_id: int | None = 303) -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=101,
@@ -618,6 +630,63 @@ async def test_followup_answer_cancels_the_one_pending_reminder() -> None:
 
     assert store.followup_jobs == []
     assert record.state == "followup_answered"
+
+
+@pytest.mark.asyncio
+async def test_followup_text_is_resolved_before_reminder_completion_and_audited() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    record = await store.ensure(identity())
+    record.state = "followup_sent"
+    store.followup_jobs.append(
+        StoredFollowupJob(
+            conversation_id=record.id,
+            aid_request_id=1,
+            due_at=datetime.now(UTC),
+            kind="followup_reminder",
+        )
+    )
+
+    turn = await service.handle_text(identity("Спасибо", message_id=631))
+
+    _, kind, _, audit = store.actions[-1]
+    assert kind == "policy_decision"
+    assert set(audit) == {
+        "state_before",
+        "state_after",
+        "risk",
+        "intent",
+        "next_action",
+        "choice_set",
+        "rendered_callback_ids",
+        "effect",
+        "side_effects",
+        "fallback_reason",
+    }
+    assert audit["state_before"] == "followup_sent"
+    assert audit["state_after"] == "open_conversation"
+    assert audit["side_effects"] == ["complete_followup"]
+    assert audit["rendered_callback_ids"] == [choice.id for choice in turn.choices]
+    assert store.followup_jobs == []
+    assert record.state == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_human_callback_retries_after_failed_dispatch_then_replays_after_completion() -> None:
+    store = FailOnceHumanEscalationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    incoming = identity(message_id=632)
+
+    with pytest.raises(RuntimeError, match="simulated handoff failure"):
+        await service.handle_callback(incoming, "human")
+
+    successful = await service.handle_callback(incoming, "human")
+    replay = await service.handle_callback(incoming, "human")
+
+    assert len(store.escalations) == 1
+    assert store.escalations[0].cause is EscalationCause.HUMAN_REQUEST
+    assert [choice.id for choice in successful.choices] == ["continue_bot", "human"]
+    assert [choice.id for choice in replay.choices] == ["continue_bot", "human"]
 
 
 @pytest.mark.asyncio

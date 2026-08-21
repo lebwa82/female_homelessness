@@ -4,6 +4,7 @@ import hashlib
 import hmac
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import (
     BigInteger,
@@ -14,10 +15,13 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
     delete,
     func,
+    or_,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
@@ -27,6 +31,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from app.config import settings
 from app.domain import ConversationState, EscalationRequest, RiskAssessment
 from app.pii import redact_with_audit
+
+CALLBACK_PROCESSING_LEASE = timedelta(minutes=5)
 
 
 class Base(AsyncAttrs, DeclarativeBase):
@@ -136,6 +142,9 @@ class CallbackExecution(Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
     callback_id: Mapped[str] = mapped_column(String(64))
     source_message_id: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="processing", index=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -228,9 +237,16 @@ async def init_db() -> None:
                 conversation_id INTEGER NOT NULL REFERENCES conversations(id),
                 callback_id VARCHAR(64) NOT NULL,
                 source_message_id VARCHAR(32) NOT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'processing',
+                lease_token VARCHAR(64),
+                lease_expires_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT now()
             )
             """,
+            "ALTER TABLE callback_executions ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'completed'",
+            "ALTER TABLE callback_executions ADD COLUMN IF NOT EXISTS lease_token VARCHAR(64)",
+            "ALTER TABLE callback_executions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            "UPDATE callback_executions SET status = 'completed' WHERE status IS NULL",
             """
             CREATE UNIQUE INDEX IF NOT EXISTS uq_callback_executions_origin
             ON callback_executions (conversation_id, callback_id, source_message_id)
@@ -355,8 +371,10 @@ async def claim_callback_execution(
     conversation_id: int,
     callback_id: str,
     message_id: int | None,
-) -> bool:
+) -> str | None:
     source_message_id = str(message_id) if message_id is not None else "missing"
+    now = datetime.now(UTC)
+    lease_token = uuid4().hex
     async with Session() as session:
         statement = (
             postgres_insert(CallbackExecution)
@@ -364,19 +382,80 @@ async def claim_callback_execution(
                 conversation_id=conversation_id,
                 callback_id=callback_id,
                 source_message_id=source_message_id,
+                status="processing",
+                lease_token=lease_token,
+                lease_expires_at=now + CALLBACK_PROCESSING_LEASE,
             )
-            .on_conflict_do_nothing(
+            .on_conflict_do_update(
                 index_elements=(
                     CallbackExecution.conversation_id,
                     CallbackExecution.callback_id,
                     CallbackExecution.source_message_id,
-                )
+                ),
+                set_={
+                    "status": "processing",
+                    "lease_token": lease_token,
+                    "lease_expires_at": now + CALLBACK_PROCESSING_LEASE,
+                },
+                where=or_(
+                    CallbackExecution.status == "failed",
+                    and_(
+                        CallbackExecution.status == "processing",
+                        CallbackExecution.lease_expires_at <= now,
+                    ),
+                ),
             )
-            .returning(CallbackExecution.id)
+            .returning(CallbackExecution.lease_token)
         )
         result = await session.execute(statement)
         await session.commit()
-        return result.scalar_one_or_none() is not None
+        return result.scalar_one_or_none()
+
+
+async def complete_callback_execution(
+    conversation_id: int,
+    callback_id: str,
+    message_id: int | None,
+    lease_token: str,
+) -> bool:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            update(CallbackExecution)
+            .where(
+                CallbackExecution.conversation_id == conversation_id,
+                CallbackExecution.callback_id == callback_id,
+                CallbackExecution.source_message_id == source_message_id,
+                CallbackExecution.status == "processing",
+                CallbackExecution.lease_token == lease_token,
+            )
+            .values(status="completed", lease_token=None, lease_expires_at=None)
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def fail_callback_execution(
+    conversation_id: int,
+    callback_id: str,
+    message_id: int | None,
+    lease_token: str,
+) -> bool:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            update(CallbackExecution)
+            .where(
+                CallbackExecution.conversation_id == conversation_id,
+                CallbackExecution.callback_id == callback_id,
+                CallbackExecution.source_message_id == source_message_id,
+                CallbackExecution.status == "processing",
+                CallbackExecution.lease_token == lease_token,
+            )
+            .values(status="failed", lease_token=None, lease_expires_at=None)
+        )
+        await session.commit()
+        return result.rowcount == 1
 
 
 async def create_escalation(conversation_id: int, request: EscalationRequest) -> None:

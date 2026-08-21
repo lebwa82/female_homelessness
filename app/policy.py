@@ -43,26 +43,33 @@ def resolve_turn(
 ) -> ResolvedTurn:
     """Resolve model outputs to the only permitted UI and workflow decision."""
     if risk.level is RiskLevel.CRITICAL:
-        return critical_resolved_turn(risk)
+        return _finalize_turn(risk, state, critical_resolved_turn(risk))
     if risk.level is RiskLevel.UNKNOWN:
-        return ResolvedTurn(
-            text=_UNKNOWN_PROMPT,
-            choice_set=ChoiceSet.SAFE_CONTINUE,
-            fallback_reason="risk_unknown",
+        return _finalize_turn(
+            risk,
+            state,
+            ResolvedTurn(
+                text=_UNKNOWN_PROMPT,
+                choice_set=ChoiceSet.SAFE_CONTINUE,
+                fallback_reason="risk_unknown",
+            ),
         )
     if plan is None:
-        return _with_safety_side_effect(
+        return _finalize_turn(
             risk,
+            state,
             ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_plan_missing"),
         )
     if not _is_consistent(plan):
-        return _with_safety_side_effect(
+        return _finalize_turn(
             risk,
+            state,
             ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="inconsistent_plan"),
         )
     if _starts_new_workflow(plan) and state in _FINITE_WORKFLOW_STATES:
-        return _with_safety_side_effect(
+        return _finalize_turn(
             risk,
+            state,
             ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="workflow_active"),
         )
 
@@ -98,7 +105,7 @@ def resolve_turn(
         decision = ResolvedTurn(text=plan.text, effect=PolicyEffect.CLOSE)
     else:
         decision = ResolvedTurn(text=plan.text, offered_support=plan.offered_support)
-    return _with_safety_side_effect(risk, decision)
+    return _finalize_turn(risk, state, decision)
 
 
 def resolve_workflow_turn(
@@ -152,7 +159,7 @@ def resolve_workflow_turn(
             effect=PolicyEffect.REPLAY_WORKFLOW,
             fallback_reason="workflow_active",
         )
-    return _with_safety_side_effect(risk, decision)
+    return _finalize_turn(risk, state, decision)
 
 
 def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
@@ -197,6 +204,15 @@ def _with_safety_side_effect(risk: RiskAssessment, decision: ResolvedTurn) -> Re
         return decision
     return decision.model_copy(
         update={"side_effects": (*decision.side_effects, PolicySideEffect.RECORD_SAFETY)}
+    )
+
+
+def _finalize_turn(risk: RiskAssessment, state: str, decision: ResolvedTurn) -> ResolvedTurn:
+    decision = _with_safety_side_effect(risk, decision)
+    if state != ConversationState.FOLLOWUP_SENT.value:
+        return decision
+    return decision.model_copy(
+        update={"side_effects": (*decision.side_effects, PolicySideEffect.COMPLETE_FOLLOWUP)}
     )
 
 

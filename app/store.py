@@ -76,6 +76,13 @@ class StoredFollowupJob:
 
 
 @dataclass
+class StoredCallbackClaim:
+    status: str
+    lease_token: str | None
+    lease_expires_at: datetime | None
+
+
+@dataclass
 class InMemoryConversationStore:
     conversations: dict[int, ConversationRecord] = field(default_factory=dict)
     messages: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
@@ -85,7 +92,7 @@ class InMemoryConversationStore:
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
     risk_assessments: list[tuple[int, RiskAssessment]] = field(default_factory=list)
     actions: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
-    callback_claims: set[tuple[int, str, str]] = field(default_factory=set)
+    callback_claims: dict[tuple[int, str, str], StoredCallbackClaim] = field(default_factory=dict)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -133,12 +140,53 @@ class InMemoryConversationStore:
         record: ConversationRecord,
         callback_id: str,
         message_id: int | None,
-    ) -> bool:
-        claim = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
-        if claim in self.callback_claims:
-            return False
-        self.callback_claims.add(claim)
-        return True
+    ) -> str | None:
+        key = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        current = self.callback_claims.get(key)
+        now = datetime.now(UTC)
+        if current is not None:
+            is_expired = (
+                current.status == "processing"
+                and current.lease_expires_at is not None
+                and current.lease_expires_at <= now
+            )
+            if current.status == "completed" or (current.status == "processing" and not is_expired):
+                return None
+        lease_token = uuid4().hex
+        self.callback_claims[key] = StoredCallbackClaim(
+            status="processing",
+            lease_token=lease_token,
+            lease_expires_at=now + timedelta(minutes=5),
+        )
+        return lease_token
+
+    async def complete_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        message_id: int | None,
+        lease_token: str,
+    ) -> None:
+        key = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        claim = self.callback_claims.get(key)
+        if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
+            claim.status = "completed"
+            claim.lease_token = None
+            claim.lease_expires_at = None
+
+    async def fail_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        message_id: int | None,
+        lease_token: str,
+    ) -> None:
+        key = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        claim = self.callback_claims.get(key)
+        if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
+            claim.status = "failed"
+            claim.lease_token = None
+            claim.lease_expires_at = None
 
     async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
         self.escalations.append(StoredEscalation(record.id, request))
@@ -176,7 +224,7 @@ class InMemoryConversationStore:
         request_ids = {item.id for item in self.aid_requests if item.conversation_id == record.id}
         self.aid_requests = [item for item in self.aid_requests if item.conversation_id != record.id]
         self.followup_jobs = [item for item in self.followup_jobs if item.aid_request_id not in request_ids]
-        self.callback_claims = {claim for claim in self.callback_claims if claim[0] != record.id}
+        self.callback_claims = {key: claim for key, claim in self.callback_claims.items() if key[0] != record.id}
         record.state = "greeting"
         record.need = None
         record.pending_aid_id = None
@@ -245,8 +293,26 @@ class PostgresConversationStore:
         record: ConversationRecord,
         callback_id: str,
         message_id: int | None,
-    ) -> bool:
+    ) -> str | None:
         return await db.claim_callback_execution(record.id, callback_id, message_id)
+
+    async def complete_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        message_id: int | None,
+        lease_token: str,
+    ) -> None:
+        await db.complete_callback_execution(record.id, callback_id, message_id, lease_token)
+
+    async def fail_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        message_id: int | None,
+        lease_token: str,
+    ) -> None:
+        await db.fail_callback_execution(record.id, callback_id, message_id, lease_token)
 
     async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
         await db.create_escalation(record.id, request)

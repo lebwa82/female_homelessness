@@ -141,6 +141,7 @@ class PolicyEffect(str, Enum):
 
 class PolicySideEffect(str, Enum):
     RECORD_SAFETY = "record_safety"
+    COMPLETE_FOLLOWUP = "complete_followup"
 
 
 class ResolvedTurn(BaseModel):
