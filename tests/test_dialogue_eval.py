@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from app.agents import AgentContext, AgentEvaluation
-from app.domain import DiagnosticStatus
+from app.domain import DiagnosticStatus, RiskLevel, SafetyDiagnostic, SupportDiagnostic
 from scripts.dialogue_eval import (
     DatasetError,
     DiagnosticVariant,
@@ -137,6 +137,42 @@ async def test_provider_health_failure_is_separate_from_hard_behavior() -> None:
 
     assert report.hard_failures == ()
     assert len(report.provider_failures) == len(cases) * 2
+
+
+@pytest.mark.asyncio
+async def test_normalized_support_fields_remain_non_authoritative_and_observable() -> None:
+    case = load_cases(DATASET)[0]
+    evaluation = AgentEvaluation(
+        safety=SafetyDiagnostic(level=RiskLevel.NONE),
+        support=SupportDiagnostic(intent=None, need_hint=None, draft_text="safe draft"),
+        safety_status=DiagnosticStatus.COMPLETED,
+        support_status=DiagnosticStatus.COMPLETED,
+        safety_audit={"diagnostic_status": "completed", "normalization": {"categories": []}},
+        support_audit={
+            "diagnostic_status": "completed",
+            "normalization": {
+                "categories": [
+                    "support_unknown_intent_cleared",
+                    "support_unknown_need_hint_cleared",
+                ]
+            },
+        },
+    )
+
+    report = await evaluate_cases(
+        ScriptedGateway([evaluation]), (case,), require_provider_health=True
+    )
+
+    assert report.hard_failures == ()
+    assert report.provider_failures == ()
+    assert report.cases[0].diagnostics["support_normalizations"] == (
+        "support_unknown_intent_cleared",
+        "support_unknown_need_hint_cleared",
+    )
+    assert report.cases[0].diagnostic_deltas == (
+        "support_intent:normalized_unknown",
+        "support_normalization:support_unknown_need_hint_cleared",
+    )
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,7 @@ The provider health observations are not consistently green: one anonymized obse
 | --- | --- |
 | 1 | 53 cases; 0 hard failures; 23 diagnostic deltas; 8 provider failures |
 | 2 | 53 cases; 0 hard failures; 23 diagnostic deltas; 9 provider failures |
+| 3 | 53 cases; 0 hard failures; 22 diagnostic deltas; 9 provider failures |
 
 No case output, histories, prompts, response IDs, or provider text were retained from these approved live runs. Fix round 2 itself did not call the provider or run a live evaluation.
 
@@ -66,6 +67,13 @@ No case output, histories, prompts, response IDs, or provider text were retained
 - The existing 12-second provider client timeout was reviewed and made explicit through a tested client factory; SDK retries and agent retries remain zero. Evaluator concurrency remains capped at four.
 - Local verification after this change: 257 tests passed, scenario smoke passed, and offline replay was 53 cases with 0 hard failures, 0 diagnostic deltas, and 0 provider failures.
 - No provider, live-evaluation, Podman, or real-PostgreSQL call was made in this fix round. An empty isolated package cache made one blocked dependency-metadata DNS attempt before tests; it fetched nothing, and all subsequent verification used the already-installed environment or `UV_OFFLINE=1`.
+
+## Fix round 3 — narrow partial diagnostic normalization
+
+- Approved live run 3 produced 53 cases, 0 hard failures, 22 diagnostic deltas, and 9 provider failures. Its safe aggregate classified 4 safety and 5 support failures; all were invalid JSON-object outputs, with 0 transport failures. Validation categories were rationale `string_too_long` (4), intent `enum` (5), and need hint `enum` (2).
+- Safety now truncates only a string rationale longer than 240 characters and records `safety_rationale_truncated`. Support clears only unknown string `intent` and `need_hint` values to `None`, recording the corresponding finite categories. No unknown value is converted to a real enum, and valid draft text/suggested support retain their existing soft-only semantics.
+- Missing or invalid safety level, missing or invalid support draft text, non-string enum data, and invalid suggested support remain invalid. `intent=None` is treated as no soft authority and recorded safely in evaluator diagnostic deltas.
+- This fix round made no provider, live-evaluation, Podman, or real-PostgreSQL call.
 
 ## Self-review
 

@@ -83,6 +83,11 @@ _TRANSPORT_ERROR_CATEGORIES = {
     "APIStatusError": "ServerError",
     "UnexpectedModelBehavior": "UnexpectedModelBehavior",
 }
+_DIAGNOSTIC_NORMALIZATION_CATEGORIES = frozenset({
+    "safety_rationale_truncated",
+    "support_unknown_intent_cleared",
+    "support_unknown_need_hint_cleared",
+})
 
 
 class DatasetError(ValueError):
@@ -168,7 +173,7 @@ class ProviderFailureMetadata:
 @dataclass(frozen=True)
 class CaseReport:
     case_id: str
-    diagnostics: dict[str, str | None]
+    diagnostics: dict[str, object]
     hard_projection: dict[str, Any]
     hard_hash: str
     rule_ids: tuple[str, ...]
@@ -603,13 +608,15 @@ def _policy_audit(store: InMemoryConversationStore) -> dict[str, Any]:
     return dict(audits[-1]) if audits else {}
 
 
-def _diagnostic_projection(store: InMemoryConversationStore, audit: Mapping[str, Any]) -> dict[str, str | None]:
+def _diagnostic_projection(store: InMemoryConversationStore, audit: Mapping[str, Any]) -> dict[str, object]:
     runs = {name: value for _, name, value in store.agent_runs}
     return {
         "safety_status": str(audit.get("safety_status") or runs.get("safety", {}).get("diagnostic_status") or "unavailable"),
         "safety_level": audit.get("safety_label"),
+        "safety_normalizations": _diagnostic_normalization_categories(runs.get("safety", {})),
         "support_status": str(audit.get("support_status") or runs.get("support", {}).get("diagnostic_status") or "unavailable"),
         "support_intent": audit.get("support_intent"),
+        "support_normalizations": _diagnostic_normalization_categories(runs.get("support", {})),
     }
 
 
@@ -632,17 +639,54 @@ def _behavior_failures(expected: Mapping[str, Any], actual: Mapping[str, Any], a
     return failures
 
 
-def _diagnostic_deltas(expected: Mapping[str, tuple[str, ...]], actual: Mapping[str, str | None]) -> tuple[str, ...]:
+def _diagnostic_deltas(expected: Mapping[str, tuple[str, ...]], actual: Mapping[str, object]) -> tuple[str, ...]:
     deltas: list[str] = []
     if actual["safety_status"] != DiagnosticStatus.COMPLETED.value:
         deltas.append(f"safety_status:{actual['safety_status']}")
     elif actual["safety_level"] not in expected["safety_levels"]:
         deltas.append(f"safety_level:{actual['safety_level']}")
+    deltas.extend(
+        f"safety_normalization:{category}"
+        for category in _normalization_categories_from_projection(actual, "safety_normalizations")
+    )
     if actual["support_status"] != DiagnosticStatus.COMPLETED.value:
         deltas.append(f"support_status:{actual['support_status']}")
+    elif actual["support_intent"] is None:
+        intent_delta = (
+            "support_intent:normalized_unknown"
+            if "support_unknown_intent_cleared" in _normalization_categories_from_projection(actual, "support_normalizations")
+            else "support_intent:missing"
+        )
+        deltas.append(intent_delta)
     elif actual["support_intent"] not in expected["support_intents"]:
         deltas.append(f"support_intent:{actual['support_intent']}")
+    deltas.extend(
+        f"support_normalization:{category}"
+        for category in _normalization_categories_from_projection(actual, "support_normalizations")
+        if category != "support_unknown_intent_cleared"
+    )
     return tuple(deltas)
+
+
+def _diagnostic_normalization_categories(audit: object) -> tuple[str, ...]:
+    if not isinstance(audit, Mapping):
+        return ()
+    normalization = audit.get("normalization")
+    if not isinstance(normalization, Mapping):
+        return ()
+    categories = normalization.get("categories")
+    if not isinstance(categories, list):
+        return ()
+    return tuple(sorted({
+        category
+        for category in categories
+        if isinstance(category, str) and category in _DIAGNOSTIC_NORMALIZATION_CATEGORIES
+    }))
+
+
+def _normalization_categories_from_projection(actual: Mapping[str, object], field: str) -> tuple[str, ...]:
+    value = actual.get(field)
+    return value if isinstance(value, tuple) and all(isinstance(item, str) for item in value) else ()
 
 
 def _provider_failures(diagnostics: Mapping[str, str | None]) -> tuple[str, ...]:

@@ -156,6 +156,111 @@ def test_level_only_safety_diagnostic_is_accepted_for_provider_schema_robustness
     assert audit["diagnostic_status"] == "completed"
 
 
+def test_safety_truncates_only_an_oversized_string_rationale() -> None:
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(
+            payload={
+                "level": "none",
+                "rationale": "r" * 241,
+            },
+            audit={"status": "completed"},
+        ),
+        "anonymized",
+    )
+
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None and len(diagnostic.rationale) == 240
+    assert audit["normalization"] == {"categories": ["safety_rationale_truncated"]}
+    assert "r" * 241 not in repr(audit)
+
+
+def test_support_clears_only_unknown_string_enum_labels() -> None:
+    diagnostic, status, audit = parse_support_diagnostic(
+        AgentCallResult(
+            payload={
+                "intent": "unrecognized_intent",
+                "need_hint": "unrecognized_need",
+                "draft_text": "safe draft",
+            },
+            audit={"status": "completed"},
+        ),
+        "anonymized",
+    )
+
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None
+    assert diagnostic.intent is None
+    assert diagnostic.need_hint is None
+    assert audit["normalization"] == {
+        "categories": ["support_unknown_intent_cleared", "support_unknown_need_hint_cleared"]
+    }
+    assert "unrecognized" not in repr(audit)
+
+
+def test_partial_normalization_does_not_accept_missing_draft_or_invalid_safety_level() -> None:
+    safety, safety_status, safety_audit = parse_safety_diagnostic(
+        AgentCallResult(
+            payload={"level": "unrecognized_level", "rationale": "r" * 241},
+            audit={"status": "completed"},
+        ),
+        "anonymized",
+    )
+    support, support_status, support_audit = parse_support_diagnostic(
+        AgentCallResult(
+            payload={"intent": "unrecognized_intent"},
+            audit={"status": "completed"},
+        ),
+        "anonymized",
+    )
+
+    assert safety is None and safety_status is DiagnosticStatus.INVALID
+    assert support is None and support_status is DiagnosticStatus.INVALID
+    assert safety_audit["normalization"] == {"categories": ["safety_rationale_truncated"]}
+    assert support_audit["normalization"] == {"categories": ["support_unknown_intent_cleared"]}
+
+
+@pytest.mark.parametrize("payload", ({}, {"level": 7}, {"level": []}))
+def test_partial_normalization_rejects_missing_or_non_string_safety_level(
+    payload: dict[str, object],
+) -> None:
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(payload=payload, audit={"status": "completed"}),
+        "anonymized",
+    )
+
+    assert diagnostic is None
+    assert status is DiagnosticStatus.INVALID
+    assert audit["normalization"] == {"categories": []}
+
+
+@pytest.mark.parametrize(
+    ("payload", "categories"),
+    (
+        ({"intent": 7, "draft_text": "safe draft"}, []),
+        ({"intent": "open_conversation", "need_hint": 7, "draft_text": "safe draft"}, []),
+        ({"intent": "unknown", "draft_text": ""}, ["support_unknown_intent_cleared"]),
+        ({"intent": "unknown", "draft_text": 7}, ["support_unknown_intent_cleared"]),
+        ({"intent": "unknown"}, ["support_unknown_intent_cleared"]),
+        (
+            {"intent": "unknown", "draft_text": "safe draft", "suggested_support": "unknown"},
+            ["support_unknown_intent_cleared"],
+        ),
+        ({"intent": "open_conversation", "draft_text": "safe draft", "suggested_support": 7}, []),
+    ),
+)
+def test_partial_normalization_rejects_non_string_enum_and_invalid_support_fields(
+    payload: dict[str, object], categories: list[str]
+) -> None:
+    diagnostic, status, audit = parse_support_diagnostic(
+        AgentCallResult(payload=payload, audit={"status": "completed"}),
+        "anonymized",
+    )
+
+    assert diagnostic is None
+    assert status is DiagnosticStatus.INVALID
+    assert audit["normalization"] == {"categories": categories}
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     (

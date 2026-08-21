@@ -22,8 +22,10 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from app.config import settings
 from app.domain import (
     DiagnosticStatus,
+    NeedKind,
     SafetyDiagnostic,
     SupportDiagnostic,
+    SupportIntent,
 )
 from app.pii import redact_with_audit
 from app.skills import load_support_skills
@@ -73,6 +75,12 @@ class ProviderSettings:
 
 DEFAULT_PROVIDER_SETTINGS = ProviderSettings()
 PROVIDER_TIMEOUT_SECONDS = 12.0
+_SAFETY_RATIONALE_MAX_LENGTH = 240
+_NORMALIZATION_CATEGORIES = frozenset({
+    "safety_rationale_truncated",
+    "support_unknown_intent_cleared",
+    "support_unknown_need_hint_cleared",
+})
 
 
 @dataclass(frozen=True)
@@ -339,13 +347,14 @@ def parse_safety_diagnostic(
     alias_value = payload.pop("rationale_short", None)
     if "rationale" not in payload and alias_value is not None:
         payload["rationale"] = alias_value
+    normalized, normalization_categories = _normalize_safety_payload(payload)
     try:
-        diagnostic = SafetyDiagnostic.model_validate(payload)
+        diagnostic = SafetyDiagnostic.model_validate(normalized)
     except ValidationError as error:
-        audit = _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+        audit = _normalized_diagnostic_audit(result.audit, DiagnosticStatus.INVALID, normalization_categories)
         audit["validation_errors"] = validation_error_shape(error)
         return None, DiagnosticStatus.INVALID, audit
-    audit = _diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED)
+    audit = _normalized_diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED, normalization_categories)
     audit["rationale_alias_used"] = alias_used
     audit["evidence"] = _validate_evidence_claims(diagnostic.evidence_claims, current_user_text)
     return diagnostic.model_copy(update={"evidence_claims": ()}), DiagnosticStatus.COMPLETED, audit
@@ -357,14 +366,14 @@ def parse_support_diagnostic(
 ) -> tuple[SupportDiagnostic | None, DiagnosticStatus, dict[str, Any]]:
     if result.audit.get("status") != "completed":
         return None, DiagnosticStatus.UNAVAILABLE, _diagnostic_audit(result.audit, DiagnosticStatus.UNAVAILABLE)
-    payload = dict(result.payload)
+    payload, normalization_categories = _normalize_support_payload(dict(result.payload))
     try:
         diagnostic = SupportDiagnostic.model_validate(payload)
     except ValidationError as error:
-        audit = _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+        audit = _normalized_diagnostic_audit(result.audit, DiagnosticStatus.INVALID, normalization_categories)
         audit["validation_errors"] = validation_error_shape(error)
         return None, DiagnosticStatus.INVALID, audit
-    audit = _diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED)
+    audit = _normalized_diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED, normalization_categories)
     audit["evidence"] = _validate_evidence_claims(diagnostic.evidence_claims, current_user_text)
     return diagnostic.model_copy(update={"evidence_claims": ()}), DiagnosticStatus.COMPLETED, audit
 
@@ -390,6 +399,40 @@ def validation_error_shape(error: ValidationError) -> dict[str, list[str]]:
         "fields": sorted({".".join(str(part) for part in item["loc"]) for item in errors}),
         "types": sorted({str(item["type"]) for item in errors}),
     }
+
+
+def _normalize_safety_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], frozenset[str]]:
+    categories: set[str] = set()
+    rationale = payload.get("rationale")
+    if isinstance(rationale, str) and len(rationale) > _SAFETY_RATIONALE_MAX_LENGTH:
+        payload["rationale"] = rationale[:_SAFETY_RATIONALE_MAX_LENGTH]
+        categories.add("safety_rationale_truncated")
+    return payload, frozenset(categories)
+
+
+def _normalize_support_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], frozenset[str]]:
+    categories: set[str] = set()
+    for field, enum_type, category in (
+        ("intent", SupportIntent, "support_unknown_intent_cleared"),
+        ("need_hint", NeedKind, "support_unknown_need_hint_cleared"),
+    ):
+        value = payload.get(field)
+        if isinstance(value, str) and value not in {item.value for item in enum_type}:
+            payload[field] = None
+            categories.add(category)
+    return payload, frozenset(categories)
+
+
+def _normalized_diagnostic_audit(
+    audit: dict[str, Any],
+    status: DiagnosticStatus,
+    categories: frozenset[str],
+) -> dict[str, Any]:
+    result = _diagnostic_audit(audit, status)
+    result["normalization"] = {
+        "categories": sorted(category for category in categories if category in _NORMALIZATION_CATEGORIES)
+    }
+    return result
 
 
 def _diagnostic_audit(audit: dict[str, Any], status: DiagnosticStatus) -> dict[str, Any]:

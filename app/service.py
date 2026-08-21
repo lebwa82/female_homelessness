@@ -473,7 +473,11 @@ class ConversationService:
                 "local_risk": assessment.level.value,
                 "safety_label": evaluation.safety.level.value if evaluation.safety else None,
                 "safety_status": evaluation.safety_status.value,
-                "support_intent": evaluation.support.intent.value if evaluation.support else None,
+                "support_intent": (
+                    evaluation.support.intent.value
+                    if evaluation.support is not None and evaluation.support.intent is not None
+                    else None
+                ),
                 "support_status": evaluation.support_status.value,
                 "rule_ids": [match.rule_id for match in signals.matches] if signals is not None else [],
                 "choice_set": decision.choice_set.value,

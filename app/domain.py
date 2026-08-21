@@ -159,7 +159,7 @@ class SupportDiagnostic(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    intent: SupportIntent
+    intent: SupportIntent | None = None
     need_hint: NeedKind | None = None
     evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
     draft_text: str = Field(min_length=1, max_length=1200)
