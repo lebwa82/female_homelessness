@@ -196,7 +196,7 @@ async def test_direct_human_button_records_escalation_without_stopping_bot() -> 
 
     assert "зову человека" in turn.text.lower()
     assert any(choice.id == "continue_bot" for choice in turn.choices)
-    assert store.escalations[-1].level is RiskLevel.HUMAN_REQUESTED
+    assert store.escalations[-1].level is RiskLevel.NONE
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_followup_better_opens_level_two_explanation_before_human_handoff(
     assert "временное жильё" in introduction.text.lower()
     assert {choice.id for choice in introduction.choices} >= {"level2:details", "level2:later", "human"}
     assert "зову человека" in handoff.text.lower()
-    assert store.escalations[-1].level is RiskLevel.HUMAN_REQUESTED
+    assert store.escalations[-1].level is RiskLevel.NONE
 
 
 @pytest.mark.asyncio

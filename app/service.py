@@ -159,8 +159,6 @@ class ConversationService:
                     Choice(id="human", label="Поговорить с живым человеком"),
                 ),
             )
-        if merged.level is RiskLevel.HUMAN_REQUESTED:
-            return await self._human_turn(record, "message")
         if merged.level in {RiskLevel.URGENT, RiskLevel.CONCERN}:
             await self.store.create_escalation(record, merged)
 
@@ -293,7 +291,7 @@ class ConversationService:
 
     async def _human_turn(self, record: ConversationRecord, reason: str) -> AgentTurn:
         assessment = RiskAssessment(
-            level=RiskLevel.HUMAN_REQUESTED,
+            level=RiskLevel.NONE,
             categories=("human_requested",),
             detector="backend",
             rationale=reason,
