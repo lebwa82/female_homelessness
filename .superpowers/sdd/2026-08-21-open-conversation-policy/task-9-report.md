@@ -140,3 +140,21 @@ effect, choice set, or workflow from a fixture model intent/plan.
 
 `Harden deterministic policy boundaries` (separate local commit after the
 fresh checks above).
+
+## Fix round 2
+
+- Base: `bc68691`.
+- RED evidence: a request/contact completed-action family could be separated
+  from its completion verb by neutral tokens and pass the guarded draft path.
+  Exact and two close neutral-modifier variants failed before the policy change.
+- The completed-family scan now uses a deliberately bounded six-token span,
+  sufficient for reviewed neutral modifiers while retaining the in-span/before
+  modal and conditional exclusions. Allowed-draft coverage confirms a bare
+  future/conditional request mention remains conversational copy.
+- Verification: focused lint and regression suite (`160 passed`), `just check`
+  (`237 passed`), `just scenario-smoke`, and `git diff --check` all passed.
+
+## Fix round 2 commit
+
+`Extend bounded completion guard` (separate local commit after the fresh
+checks above).

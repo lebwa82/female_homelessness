@@ -120,6 +120,7 @@ _EXTERNAL_COMPLETION_PHRASES = (
     ("вы", "уже", "записаны"),
 )
 _NON_COMPLETION_TOKENS = frozenset({"не", "может", "могут", "могу", "можем", "будет", "будут", "если"})
+_MAX_COMPLETION_TOKEN_GAP = 6
 
 
 def resolve_turn(context: PolicyContext) -> ResolvedTurn:
@@ -323,8 +324,8 @@ def _contains_completed_family(
     for referent_index, token in enumerate(tokens):
         if token not in referents:
             continue
-        start = max(0, referent_index - 3)
-        end = min(len(tokens), referent_index + 4)
+        start = max(0, referent_index - _MAX_COMPLETION_TOKEN_GAP)
+        end = min(len(tokens), referent_index + _MAX_COMPLETION_TOKEN_GAP + 1)
         for completion_index in range(start, end):
             if tokens[completion_index] not in completions:
                 continue

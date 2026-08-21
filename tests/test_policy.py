@@ -193,6 +193,9 @@ def test_pending_offer_requires_a_verified_followup_before_a_psychologist_button
         "Оператор уже подключён, ваша заявка зарегистрирована и данные отправлены.",
         "С оператором уже связались, запрос зарегистрировали, информацию отправили.",
         "Заявка зарегистрирована, если будут вопросы — напишите.",
+        "Ваша заявка на помощь уже была зарегистрирована.",
+        "Запрос на помощь уже успешно зарегистрирован.",
+        "Контакт для заявки уже был передан специалисту.",
     ),
 )
 def test_open_conversation_draft_guard_rejects_empty_or_external_action_claims(draft: str) -> None:
@@ -216,6 +219,7 @@ def test_open_conversation_draft_guard_rejects_empty_or_external_action_claims(d
         "Я могу объяснить, какие данные обычно нужны для заявки.",
         "Если захотите, можно передать контакт позже.",
         "Если с вами свяжутся, можно будет уточнить условия.",
+        "Заявка может быть зарегистрирована после вашего согласия.",
     ),
 )
 def test_draft_guard_allows_informational_or_future_language_without_completion_claim(draft: str) -> None:
