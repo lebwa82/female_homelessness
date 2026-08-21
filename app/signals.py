@@ -114,19 +114,17 @@ def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
     for start, token in enumerate(tokens):
         if token in _EVICTION_WORDS:
             add(HardSignalKind.CONCRETE_AID, "aid.housing.eviction", start, start + 1, NeedKind.HOUSING)
-        if token == "продукты":
-            add(HardSignalKind.CONCRETE_AID, "aid.food.products", start, start + 1, NeedKind.FOOD_MONEY)
-        if token == "паспорт":
-            add(HardSignalKind.CONCRETE_AID, "aid.legal.passport", start, start + 1, NeedKind.LEGAL)
-        if token in {"документы", "документами"}:
-            add(HardSignalKind.CONCRETE_AID, "aid.legal.documents", start, start + 1, NeedKind.LEGAL)
-        if token == "юрист":
-            add(HardSignalKind.CONCRETE_AID, "aid.legal.lawyer", start, start + 1, NeedKind.LEGAL)
-    for start in _find_phrase(tokens, ("карточка", "на", "еду")):
-        add(HardSignalKind.CONCRETE_AID, "aid.food.card", start, start + 3, NeedKind.FOOD_MONEY)
-    for start in _find_phrase(tokens, ("помощь", "с", "проездом")):
-        add(HardSignalKind.CONCRETE_AID, "aid.transport", start, start + 3, NeedKind.FOOD_MONEY)
-    for phrase in (("вещи", "для", "ребенка"), ("вещей", "для", "ребенка")):
+    for phrase, rule_id, need in (
+        (("нужны", "продукты"), "aid.food.products", NeedKind.FOOD_MONEY),
+        (("нужна", "карточка", "на", "еду"), "aid.food.card", NeedKind.FOOD_MONEY),
+        (("потеряла", "паспорт"), "aid.legal.passport", NeedKind.LEGAL),
+        (("нужен", "юрист"), "aid.legal.lawyer", NeedKind.LEGAL),
+        (("нужна", "помощь", "с", "документами"), "aid.legal.documents", NeedKind.LEGAL),
+        (("нужна", "помощь", "с", "проездом"), "aid.transport", NeedKind.FOOD_MONEY),
+    ):
+        for start in _find_phrase(tokens, phrase):
+            add(HardSignalKind.CONCRETE_AID, rule_id, start, start + len(phrase), need)
+    for phrase in (("нужны", "вещи", "для", "ребенка"), ("не", "хватает", "вещей", "для", "ребенка")):
         for start in _find_phrase(tokens, phrase):
             add(
                 HardSignalKind.CONCRETE_AID,
@@ -154,24 +152,50 @@ def _add_psychologist_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
 
 
 def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
-    for start in _find_phrase(tokens, ("не", "хочу", "жить")):
-        add(HardSignalKind.SUICIDE_OR_SELF_HARM, "safety.suicide.not_want_to_live", start, start + 3)
+    for phrase in (("не", "хочу", "жить"), ("не", "хочу", "больше", "жить")):
+        for start in _find_phrase(tokens, phrase):
+            if start + len(phrase) == len(tokens):
+                add(
+                    HardSignalKind.SUICIDE_OR_SELF_HARM,
+                    "safety.suicide.not_want_to_live",
+                    start,
+                    start + len(phrase),
+                )
     for start in _find_phrase(tokens, ("хочу", "покончить", "с", "собой")):
         if not _is_negated(tokens, start, start + 4):
             add(HardSignalKind.SUICIDE_OR_SELF_HARM, "safety.suicide.end_life", start, start + 4)
     for start in _find_phrase(tokens, ("причиню", "себе", "вред")):
         marker = _nearby_marker(tokens, start, start + 3)
-        if marker is not None and not _is_negated(tokens, marker, start + 3):
-            add(HardSignalKind.SUICIDE_OR_SELF_HARM, "safety.self_harm.now", marker, start + 3)
+        if marker is not None:
+            token_start, token_end = _marker_action_span(marker, start, start + 3)
+            if not _is_negated(tokens, token_start, token_end):
+                add(HardSignalKind.SUICIDE_OR_SELF_HARM, "safety.self_harm.now", token_start, token_end)
     for start, token in enumerate(tokens):
         if token in _ASSAULT_WORDS:
             marker = _nearby_marker(tokens, start, start + 1)
-            if marker is not None and not _is_negated(tokens, marker, start + 1):
-                add(HardSignalKind.VIOLENCE_OR_THREAT_NOW, "safety.violence.assault_now", marker, start + 1)
+            if marker is not None:
+                token_start, token_end = _marker_action_span(marker, start, start + 1)
+                if not _is_negated(tokens, token_start, token_end):
+                    add(
+                        HardSignalKind.VIOLENCE_OR_THREAT_NOW,
+                        "safety.violence.assault_now",
+                        token_start,
+                        token_end,
+                    )
         if token in _THREAT_WORDS:
             marker = _nearby_marker(tokens, start, start + 1)
-            if marker is not None and not _is_negated(tokens, marker, start + 1):
-                add(HardSignalKind.VIOLENCE_OR_THREAT_NOW, "safety.violence.threat_now", start, marker + 1)
+            if marker is None:
+                if not _is_negated(tokens, start, start + 1):
+                    add(HardSignalKind.SAFETY_CONCERN, "safety.concern.ongoing_threat", start, start + 1)
+            else:
+                token_start, token_end = _marker_action_span(marker, start, start + 1)
+                if not _is_negated(tokens, token_start, token_end):
+                    add(
+                        HardSignalKind.VIOLENCE_OR_THREAT_NOW,
+                        "safety.violence.threat_now",
+                        token_start,
+                        token_end,
+                    )
 
     for start, end in _shelter_phrase_spans(tokens):
         marker = _nearby_marker(tokens, start, end)
@@ -220,6 +244,10 @@ def _nearby_marker(tokens: tuple[str, ...], start: int, end: int) -> int | None:
         if tokens[index] in _IMMEDIATE_MARKERS:
             return index
     return None
+
+
+def _marker_action_span(marker: int, start: int, end: int) -> tuple[int, int]:
+    return min(marker, start), max(marker + 1, end)
 
 
 def _is_negated(tokens: tuple[str, ...], start: int, end: int) -> bool:

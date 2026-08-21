@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ConversationState(str, Enum):
@@ -68,6 +68,12 @@ class SignalMatch(BaseModel):
     token_start: int = Field(ge=0)
     token_end: int = Field(ge=0)
     need: NeedKind | None = None
+
+    @model_validator(mode="after")
+    def require_nonempty_token_span(self) -> SignalMatch:
+        if self.token_end <= self.token_start:
+            raise ValueError("token_end must be greater than token_start")
+        return self
 
 
 class DeterministicSignals(BaseModel):

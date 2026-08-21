@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from app.domain import NeedKind
+from app.domain import HardSignalKind, NeedKind, SignalMatch
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
 
@@ -163,6 +164,87 @@ def test_legacy_safety_phrases_remain_explicit_bounded_rules(
     text: str, kind: str, rule_id: str
 ) -> None:
     assert (kind, rule_id, None) in _matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ("не хочу жить", "не хочу больше жить"),
+)
+def test_terminal_existential_suicide_statements_have_bounded_hard_rules(text: str) -> None:
+    assert ("suicide_or_self_harm", "safety.suicide.not_want_to_live", None) in _matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ("не хочу жить в этом городе", "не хочу жить с ним"),
+)
+def test_residence_or_relationship_continuations_do_not_match_suicide(text: str) -> None:
+    kinds = {kind for kind, _, _ in _matches(text)}
+
+    assert "suicide_or_self_harm" not in kinds
+
+
+@pytest.mark.parametrize(
+    "text",
+    ("продукты лежат на столе", "паспорт уже готов", "документы в папке", "юрист позвонит позже"),
+)
+def test_bare_aid_narrative_nouns_do_not_create_concrete_aid_signal(text: str) -> None:
+    assert _matches(text) == ()
+
+
+@pytest.mark.parametrize("token_end", (3, 2))
+def test_signal_match_requires_a_nonempty_half_open_token_span(token_end: int) -> None:
+    with pytest.raises(ValidationError, match="token_end must be greater than token_start"):
+        SignalMatch(
+            kind=HardSignalKind.SUICIDE_OR_SELF_HARM,
+            rule_id="test.invalid_span",
+            token_start=3,
+            token_end=token_end,
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "rule_id"),
+    (
+        ("сейчас причиню себе вред", "safety.self_harm.now"),
+        ("причиню себе вред сейчас", "safety.self_harm.now"),
+        ("сейчас меня бьют", "safety.violence.assault_now"),
+        ("меня бьют сейчас", "safety.violence.assault_now"),
+        ("сейчас мне угрожают", "safety.violence.threat_now"),
+        ("мне угрожают сейчас", "safety.violence.threat_now"),
+    ),
+)
+def test_immediate_safety_markers_before_or_after_action_have_valid_spans(
+    text: str, rule_id: str
+) -> None:
+    from app.signals import extract_signals
+
+    match = next(match for match in extract_signals(text).matches if match.rule_id == rule_id)
+
+    assert match.token_end > match.token_start
+
+
+def test_ongoing_threat_is_concern_only_without_immediate_marker() -> None:
+    assert _matches("он мне угрожает") == (
+        ("safety_concern", "safety.concern.ongoing_threat", None),
+    )
+    assert ("violence_or_threat_now", "safety.violence.threat_now", None) in _matches(
+        "он мне угрожает сейчас"
+    )
+    assert _matches("он мне не угрожает") == ()
+
+
+@pytest.mark.parametrize(
+    "case_id",
+    (
+        "psychologist-08",
+        "psychologist-09",
+        "multi-aid-completion-open-01",
+        "multi-handoff-continue-open-01",
+    ),
+)
+def test_open_path_fixture_rows_have_no_text_only_hard_route(case_id: str) -> None:
+    assert _matches(_fixture_text(case_id)) == ()
 
 
 def test_normalization_is_casefolded_punctuation_tolerant_and_normalizes_yo() -> None:
