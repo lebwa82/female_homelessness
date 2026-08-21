@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.domain import (
     ChoiceSet,
+    ConversationState,
     PolicyEffect,
     ResolvedTurn,
     RiskAssessment,
@@ -12,6 +13,18 @@ from app.domain import (
 )
 
 _SAFE_FALLBACK = "Я рядом и готова продолжить. Можно написать, что сейчас важно."
+_FINITE_WORKFLOW_STATES = frozenset(
+    {
+        ConversationState.CHOOSING_AID.value,
+        ConversationState.COLLECTING_LOCATION.value,
+        ConversationState.COLLECTING_CONTACT_METHOD.value,
+        ConversationState.COLLECTING_CONTACT_VALUE.value,
+        ConversationState.AID_REQUESTED.value,
+        ConversationState.FOLLOWUP_WAITING.value,
+        ConversationState.FOLLOWUP_SENT.value,
+        ConversationState.FOLLOWUP_ANSWERED.value,
+    }
+)
 
 
 def resolve_turn(
@@ -30,8 +43,10 @@ def resolve_turn(
         )
     if plan is None:
         return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_plan_missing")
-    if not _is_consistent(plan, state):
+    if not _is_consistent(plan):
         return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="inconsistent_plan")
+    if _starts_new_workflow(plan) and state in _FINITE_WORKFLOW_STATES:
+        return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="workflow_active")
 
     if plan.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST:
         return ResolvedTurn(text=plan.text, effect=PolicyEffect.HUMAN_HANDOFF)
@@ -73,8 +88,7 @@ def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
     )
 
 
-def _is_consistent(plan: SupportPlan, state: str) -> bool:
-    del state
+def _is_consistent(plan: SupportPlan) -> bool:
     expected_actions = {
         SupportIntent.OPEN_CONVERSATION: (SupportAction.CONTINUE_CONVERSATION,),
         SupportIntent.CONCRETE_NEED: (SupportAction.OFFER_AID,),
@@ -90,3 +104,10 @@ def _is_consistent(plan: SupportPlan, state: str) -> bool:
     if plan.next_action is SupportAction.OFFER_AID:
         return plan.need is not None
     return True
+
+
+def _starts_new_workflow(plan: SupportPlan) -> bool:
+    return plan.next_action in {
+        SupportAction.OFFER_AID,
+        SupportAction.START_PSYCHOLOGIST_REQUEST,
+    }

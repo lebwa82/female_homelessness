@@ -2,6 +2,7 @@ import pytest
 
 from app.domain import (
     ChoiceSet,
+    ConversationState,
     PolicyEffect,
     RiskAssessment,
     RiskLevel,
@@ -119,6 +120,53 @@ def test_psychologist_considering_offers_only_confirmed_interest_choice_set() ->
 
     assert decision.effect is PolicyEffect.NONE
     assert decision.choice_set is ChoiceSet.PSYCHOLOGIST_INTEREST
+
+
+def test_psychologist_request_cannot_start_an_overlapping_contact_workflow() -> None:
+    decision = resolve_turn(
+        safe_risk(),
+        SupportPlan(
+            intent="psychologist_request",
+            next_action="start_psychologist_request",
+            text="Начинаю запрос к психологу.",
+        ),
+        ConversationState.COLLECTING_CONTACT_METHOD.value,
+    )
+
+    assert decision.effect is PolicyEffect.NONE
+    assert decision.choice_set is ChoiceSet.NONE
+    assert decision.fallback_reason == "workflow_active"
+
+
+def test_offer_aid_cannot_start_an_overlapping_aid_workflow() -> None:
+    decision = resolve_turn(safe_risk(), aid_plan(), ConversationState.CHOOSING_AID.value)
+
+    assert decision.effect is PolicyEffect.NONE
+    assert decision.choice_set is ChoiceSet.NONE
+    assert decision.fallback_reason == "workflow_active"
+
+
+def test_explicit_human_request_remains_available_during_a_finite_workflow() -> None:
+    decision = resolve_turn(
+        safe_risk(),
+        SupportPlan(
+            intent="explicit_human_request",
+            next_action="request_human",
+            text="Позову человека.",
+        ),
+        ConversationState.COLLECTING_CONTACT_METHOD.value,
+    )
+
+    assert decision.effect is PolicyEffect.HUMAN_HANDOFF
+
+
+def test_critical_risk_overrides_an_active_finite_workflow() -> None:
+    decision = resolve_turn(
+        critical_suicide_risk(), aid_plan(), ConversationState.COLLECTING_CONTACT_METHOD.value
+    )
+
+    assert decision.effect is PolicyEffect.CRITICAL_ESCALATION
+    assert "8-800-2000-122" in decision.text
 
 
 @pytest.mark.parametrize("level", [RiskLevel.CONCERN, RiskLevel.URGENT])
