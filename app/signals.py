@@ -20,6 +20,7 @@ _HUMAN_ROLES = frozenset(
         "оператором",
         "специалист",
         "специалиста",
+        "специалистом",
         "специалисткой",
         "специалистку",
     }
@@ -109,6 +110,14 @@ def _add_human_request_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
             if all(part in _HUMAN_TRANSFER_FILLERS for part in tokens[start + 1 : role_index]):
                 add(HardSignalKind.EXPLICIT_HUMAN_REQUEST, "human.transfer.role", start, role_index + 1)
             break
+
+    for preposition in ("с", "со"):
+        for start in _find_phrase(tokens, ("хочу", "поговорить", preposition)):
+            if start > 0 and tokens[start - 1] == "не":
+                continue
+            role_index = start + 3
+            if role_index < len(tokens) and tokens[role_index] in _HUMAN_ROLES:
+                add(HardSignalKind.EXPLICIT_HUMAN_REQUEST, "human.want_talk.role", start, role_index + 1)
 
 
 def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:

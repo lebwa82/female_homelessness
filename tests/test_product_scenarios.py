@@ -217,6 +217,42 @@ async def test_pending_psychologist_offer_expires_after_an_unrelated_reply() -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ("human_text", "human_button", "critical"))
+async def test_handoff_and_critical_routes_clear_a_soft_psychologist_offer(route: str) -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=ScriptedGateway(
+            [
+                diagnostic_evaluation(
+                    draft_text="Я рядом. Могу рассказать о психологе.",
+                    suggested_support=SupportOffer.PSYCHOLOGIST,
+                ),
+                diagnostic_evaluation(draft_text="Я рядом."),
+                diagnostic_evaluation(draft_text="Я рядом."),
+            ]
+        ),
+    )
+
+    await service.handle_text(identity("мне трудно", message_id=315))
+    if route == "human_text":
+        await service.handle_text(identity("хочу поговорить со специалисткой", message_id=316))
+    elif route == "human_button":
+        await service.handle_callback(identity(message_id=316), "human")
+    else:
+        await service.handle_text(identity("не хочу жить", message_id=316))
+
+    expected_cause = EscalationCause.SAFETY if route == "critical" else EscalationCause.HUMAN_REQUEST
+    assert store.escalations[-1].cause is expected_cause
+    assert store.conversations[101].pending_offer is None
+    later = await service.handle_text(identity("да, хочу", message_id=317))
+
+    assert [choice.id for choice in later.choices] == ["human"]
+    assert store.conversations[101].state == "open_conversation"
+    assert store.conversations[101].pending_offer is None
+
+
+@pytest.mark.asyncio
 async def test_concern_and_critical_local_signals_record_only_their_deterministic_escalations() -> None:
     concern_store = InMemoryConversationStore()
     concern = ConversationService(store=concern_store, gateway=FixedGateway(diagnostic_evaluation()))

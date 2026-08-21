@@ -305,6 +305,33 @@ def test_explicit_bot_rejection_is_a_human_request_even_though_it_is_negated() -
     )
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "хочу поговорить со специалисткой",
+        "хочу поговорить со специалистом",
+        "хочу поговорить с человеком",
+        "хочу поговорить с оператором",
+    ),
+)
+def test_explicit_desire_to_speak_with_an_external_role_is_a_human_request(text: str) -> None:
+    assert ("explicit_human_request", "human.want_talk.role", None) in _matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "мне нужен человеческий разговор",
+        "поговори со мной",
+        "выслушай",
+        "не хочу поговорить со специалисткой",
+        "я не хочу поговорить с оператором",
+    ),
+)
+def test_conversational_near_misses_are_not_human_handoffs(text: str) -> None:
+    assert "explicit_human_request" not in {kind for kind, _, _ in _matches(text)}
+
+
 def test_audit_model_contains_hash_and_offsets_but_never_raw_input() -> None:
     from app.signals import extract_signals
 

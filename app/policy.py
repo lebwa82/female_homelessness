@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unicodedata import normalize
+
 from app.catalog import available_aid_for_need, get_aid_item
 from app.domain import (
     ChoiceSet,
@@ -39,29 +41,85 @@ _FINITE_WORKFLOW_STATES = frozenset(
         ConversationState.FOLLOWUP_ANSWERED.value,
     }
 )
-_EXTERNAL_ACTION_MARKERS = (
-    "позвал",
-    "позвала",
-    "связал",
-    "связала",
-    "заявка сохранена",
-    "сохранил заявку",
-    "сохранила заявку",
-    "оформил заявку",
-    "оформила заявку",
-    "организовал помощь",
-    "организовала помощь",
-    "передал контакт",
-    "передала контакт",
-    "заявка принята",
-    "запрос принят",
-    "запрос отправлен",
-    "запись подтверждена",
-    "вы уже записаны",
-    "с вами свяжутся",
-    "с тобой свяжутся",
-    "контакт получен",
+_EXTERNAL_COMPLETION_FAMILIES = (
+    (
+        frozenset({"заявка", "заявку", "заявки", "заявке", "запрос", "запроса", "запросу", "запросом"}),
+        frozenset(
+            {
+                "сохранена",
+                "сохранен",
+                "сохранены",
+                "сохранил",
+                "сохранила",
+                "сохранили",
+                "принята",
+                "принят",
+                "приняты",
+                "принял",
+                "приняла",
+                "приняли",
+                "зарегистрирована",
+                "зарегистрирован",
+                "зарегистрированы",
+                "зарегистрировал",
+                "зарегистрировала",
+                "зарегистрировали",
+                "оформлена",
+                "оформлен",
+                "оформлены",
+                "оформил",
+                "оформила",
+                "оформили",
+                "отправлена",
+                "отправлен",
+                "отправлены",
+                "отправил",
+                "отправила",
+                "отправили",
+            }
+        ),
+    ),
+    (
+        frozenset({"данные", "данных", "данными", "информация", "информацию", "информации", "контакт", "контакта", "контакты", "контактов"}),
+        frozenset(
+            {
+                "отправлен",
+                "отправлена",
+                "отправлены",
+                "отправил",
+                "отправила",
+                "отправили",
+                "передан",
+                "передана",
+                "переданы",
+                "передал",
+                "передала",
+                "передали",
+                "получен",
+                "получена",
+                "получены",
+                "получил",
+                "получила",
+                "получили",
+            }
+        ),
+    ),
+    (
+        frozenset({"помощь", "помощи"}),
+        frozenset({"организована", "организован", "организованы", "организовал", "организовала", "организовали"}),
+    ),
+    (
+        frozenset({"оператор", "оператора", "оператором", "человек", "человека", "человеком", "специалист", "специалиста", "специалистом", "специалисткой"}),
+        frozenset({"подключен", "подключена", "подключены", "подключил", "подключила", "подключили", "позвал", "позвала", "позвали", "связались"}),
+    ),
 )
+_EXTERNAL_COMPLETION_PHRASES = (
+    ("с", "вами", "свяжутся"),
+    ("с", "тобой", "свяжутся"),
+    ("вас", "уже", "записали"),
+    ("вы", "уже", "записаны"),
+)
+_NON_COMPLETION_TOKENS = frozenset({"не", "может", "могут", "могу", "можем", "будет", "будут", "если"})
 
 
 def resolve_turn(context: PolicyContext) -> ResolvedTurn:
@@ -225,8 +283,60 @@ def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
 
 
 def _claims_external_action(draft: str) -> bool:
-    normalized = draft.casefold().replace("ё", "е")
-    return any(marker in normalized for marker in _EXTERNAL_ACTION_MARKERS)
+    tokens = _draft_tokens(draft)
+    return any(_contains_token_phrase(tokens, phrase) for phrase in _EXTERNAL_COMPLETION_PHRASES) or any(
+        _contains_completed_family(tokens, referents, completions)
+        for referents, completions in _EXTERNAL_COMPLETION_FAMILIES
+    )
+
+
+def _draft_tokens(draft: str) -> tuple[str, ...]:
+    normalized = normalize("NFKC", draft).casefold().replace("ё", "е")
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in normalized:
+        if char.isalnum():
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current.clear()
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)
+
+
+def _contains_token_phrase(tokens: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    width = len(phrase)
+    for index in range(len(tokens) - width + 1):
+        if tokens[index : index + width] != phrase:
+            continue
+        if not _has_noncompletion_context(tokens, index, index + width):
+            return True
+    return False
+
+
+def _contains_completed_family(
+    tokens: tuple[str, ...],
+    referents: frozenset[str],
+    completions: frozenset[str],
+) -> bool:
+    for referent_index, token in enumerate(tokens):
+        if token not in referents:
+            continue
+        start = max(0, referent_index - 3)
+        end = min(len(tokens), referent_index + 4)
+        for completion_index in range(start, end):
+            if tokens[completion_index] not in completions:
+                continue
+            phrase_start = min(referent_index, completion_index)
+            phrase_end = max(referent_index, completion_index) + 1
+            if not _has_noncompletion_context(tokens, phrase_start, phrase_end):
+                return True
+    return False
+
+
+def _has_noncompletion_context(tokens: tuple[str, ...], start: int, end: int) -> bool:
+    return bool(_NON_COMPLETION_TOKENS.intersection(tokens[max(0, start - 2) : end]))
 
 
 def _has_signal(context: PolicyContext, kind: HardSignalKind) -> bool:

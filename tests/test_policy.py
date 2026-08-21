@@ -20,6 +20,15 @@ from app.safety import assess_local_risk_from_signals
 from app.signals import extract_signals
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
+_PENDING_PSYCHOLOGIST_CASE_IDS = frozenset(
+    {
+        "psychologist-considering-01",
+        "psychologist-02",
+        "psychologist-03",
+        "psychologist-04",
+        "psychologist-05",
+    }
+)
 
 
 def context(
@@ -181,6 +190,9 @@ def test_pending_offer_requires_a_verified_followup_before_a_psychologist_button
         "",
         "Я оформила заявку и передала контакт.",
         "Ваша заявка уже принята, с вами свяжутся.",
+        "Оператор уже подключён, ваша заявка зарегистрирована и данные отправлены.",
+        "С оператором уже связались, запрос зарегистрировали, информацию отправили.",
+        "Заявка зарегистрирована, если будут вопросы — напишите.",
     ),
 )
 def test_open_conversation_draft_guard_rejects_empty_or_external_action_claims(draft: str) -> None:
@@ -195,6 +207,27 @@ def test_open_conversation_draft_guard_rejects_empty_or_external_action_claims(d
     assert decision.choice_set is ChoiceSet.NONE
     assert decision.text != draft
     assert decision.fallback_reason in {"support_diagnostic_unavailable", "support_draft_guard"}
+
+
+@pytest.mark.parametrize(
+    "draft",
+    (
+        "Оператор может подключиться, если вы захотите позвать человека.",
+        "Я могу объяснить, какие данные обычно нужны для заявки.",
+        "Если захотите, можно передать контакт позже.",
+        "Если с вами свяжутся, можно будет уточнить условия.",
+    ),
+)
+def test_draft_guard_allows_informational_or_future_language_without_completion_claim(draft: str) -> None:
+    decision = resolve_turn(
+        context(
+            "мне хочется выговориться",
+            support=SupportDiagnostic(intent="open_conversation", draft_text=draft),
+        )
+    )
+
+    assert decision.text == draft
+    assert decision.fallback_reason is None
 
 
 def test_concern_narrative_without_request_has_no_aid_menu_but_records_safety() -> None:
@@ -214,7 +247,7 @@ def test_all_53_final_user_turns_have_a_deterministic_route_and_open_rows_stay_o
         final_text = next(text for role, text in reversed(history) if role == "user")
         pending_offer = (
             SupportOffer.PSYCHOLOGIST
-            if any(role == "assistant" and "психолог" in text.casefold() for role, text in history[:-1])
+            if row["id"] in _PENDING_PSYCHOLOGIST_CASE_IDS
             else None
         )
         signals = extract_signals(final_text, pending_offer=pending_offer)

@@ -107,3 +107,36 @@ effect, choice set, or workflow from a fixture model intent/plan.
 
 `Move product actions into deterministic policy` (created after the fresh
 `just check`, scenario smoke, diff check, and read-only review recorded above).
+
+## Fix round 1
+
+- Base: `1a2cfc5`.
+- RED evidence: the initial targeted command reported seven failures: one draft
+  guard bypass, four missing explicit human-grammar matches, and two stale
+  pending-offer routes. A subsequent conditional draft-phrase bypass was also
+  reproduced before its bounded-modal fix.
+- `CRITICAL_ESCALATION` and `HUMAN_HANDOFF` now both clear `pending_offer` in
+  the executor. Product scenarios cover explicit human text, the persistent
+  human callback, and critical safety after a soft psychologist offer; a later
+  bare acknowledgement cannot start the psychologist workflow.
+- Human routing now recognizes only the bounded grammar `хочу поговорить
+  с|со <external role>` for the reviewed role forms. Conversational near-misses
+  remain open conversation.
+- Replaced brittle phrase substrings in the draft guard with bounded completed
+  noun/action families plus exact callback phrases, with modal/conditional
+  bypass tests to avoid blocking common informational language.
+- The 53-row policy fixture test now supplies pending-offer state from an
+  explicit case-ID set and never derives it from assistant text.
+- Rechecked the evidence-claim boundary: production references are limited to
+  gateway validation/audit and then clear the claims before policy; policy and
+  service do not consume them.
+- Verification: focused lint and regression suite passed (`161 passed`). Full
+  `just check` after the initial fix passed (`230 passed`); after the review
+  bypass fixes it passed again (`233 passed`). `just scenario-smoke` and
+  `git diff --check` passed. A second read-only review found no remaining
+  Critical or Important issue in the repaired areas.
+
+## Fix round 1 commit
+
+`Harden deterministic policy boundaries` (separate local commit after the
+fresh checks above).

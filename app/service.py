@@ -370,7 +370,11 @@ class ConversationService:
                 await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
 
         if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
-            await self.store.update(record, state=ConversationState.OPEN_CONVERSATION.value)
+            await self.store.update(
+                record,
+                pending_offer=None,
+                state=ConversationState.OPEN_CONVERSATION.value,
+            )
             await self.store.record_action(record, "critical_escalation", "completed")
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.HUMAN_HANDOFF:
@@ -379,7 +383,11 @@ class ConversationService:
                 handoff_request
                 or EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason="verified_signal"),
             )
-            await self.store.update(record, state=ConversationState.OPEN_CONVERSATION.value)
+            await self.store.update(
+                record,
+                pending_offer=None,
+                state=ConversationState.OPEN_CONVERSATION.value,
+            )
             await self.store.record_action(record, "human_handoff", "simulated")
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.OFFER_AID and decision.need is not None:
