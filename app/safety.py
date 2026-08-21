@@ -31,14 +31,6 @@ _LOCAL_PATTERNS: tuple[tuple[RiskLevel, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        RiskLevel.HUMAN_REQUESTED,
-        "human_requested",
-        (
-            r"\b(хочу поговорить с человеком|нужен живой человек|позвоните мне)\b",
-            r"\b(можно поговорить голосом|нужен оператор|позовите специалист)\b",
-        ),
-    ),
-    (
         RiskLevel.CONCERN,
         "fear_or_threat",
         (
@@ -51,10 +43,9 @@ _LOCAL_PATTERNS: tuple[tuple[RiskLevel, str, tuple[str, ...]], ...] = (
 _PRECEDENCE = {
     RiskLevel.NONE: 0,
     RiskLevel.CONCERN: 1,
-    RiskLevel.HUMAN_REQUESTED: 2,
-    RiskLevel.URGENT: 3,
-    RiskLevel.UNKNOWN: 4,
-    RiskLevel.CRITICAL: 5,
+    RiskLevel.URGENT: 2,
+    RiskLevel.UNKNOWN: 3,
+    RiskLevel.CRITICAL: 4,
 }
 
 
@@ -98,7 +89,6 @@ def assess_crisis(text: str) -> CrisisAssessment:
     assessment = assess_local_risk(text)
     if assessment.level is RiskLevel.CRITICAL:
         return CrisisAssessment(Risk.ACUTE, assessment.rationale)
-    if assessment.level in {RiskLevel.CONCERN, RiskLevel.URGENT, RiskLevel.HUMAN_REQUESTED}:
+    if assessment.level in {RiskLevel.CONCERN, RiskLevel.URGENT}:
         return CrisisAssessment(Risk.CONCERN, assessment.rationale)
     return CrisisAssessment(Risk.NONE)
-

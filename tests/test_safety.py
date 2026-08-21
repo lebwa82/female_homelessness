@@ -14,6 +14,10 @@ def test_detects_concern() -> None:
     assert assess_crisis("Мне страшно, нет где ночевать").risk is Risk.CONCERN
 
 
+def test_request_to_be_heard_is_not_a_crisis() -> None:
+    assert assess_crisis("хочу поговорить с человеком").risk is Risk.NONE
+
+
 def test_blank_folder_id_uses_project_default() -> None:
     assert Settings(yandex_cloud_folder_id="").yandex_cloud_folder_id
 

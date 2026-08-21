@@ -11,7 +11,7 @@ from app.safety import assess_local_risk, merge_risk
         ("он сейчас меня бьёт", RiskLevel.CRITICAL),
         ("сегодня мне негде ночевать", RiskLevel.URGENT),
         ("боюсь возвращаться", RiskLevel.CONCERN),
-        ("хочу поговорить с человеком", RiskLevel.HUMAN_REQUESTED),
+        ("хочу поговорить с человеком", RiskLevel.NONE),
         ("мне нужны продукты", RiskLevel.NONE),
     ],
 )
@@ -48,3 +48,7 @@ def test_unknown_model_result_blocks_side_effects_even_when_local_is_safe() -> N
 
     assert merge_risk(local, unknown).level is RiskLevel.UNKNOWN
 
+
+def test_request_to_be_heard_is_not_a_safety_risk() -> None:
+    assert assess_local_risk("мне просто хочется выговориться").level is RiskLevel.NONE
+    assert assess_local_risk("хочу поговорить с человеком").level is RiskLevel.NONE

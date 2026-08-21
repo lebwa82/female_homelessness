@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ConversationState(str, Enum):
+    OPEN_CONVERSATION = "open_conversation"
     GREETING = "greeting"
     DISCOVERING_NEED = "discovering_need"
     CHOOSING_AID = "choosing_aid"
@@ -40,7 +41,6 @@ class ContactMethod(str, Enum):
 class RiskLevel(str, Enum):
     NONE = "none"
     CONCERN = "concern"
-    HUMAN_REQUESTED = "human_requested"
     URGENT = "urgent"
     CRITICAL = "critical"
     UNKNOWN = "unknown"
@@ -63,6 +63,89 @@ class Choice(BaseModel):
 
     id: str = Field(min_length=1, max_length=64)
     label: str = Field(min_length=1, max_length=64)
+
+
+class SupportIntent(str, Enum):
+    OPEN_CONVERSATION = "open_conversation"
+    CONCRETE_NEED = "concrete_need"
+    AID_INTEREST = "aid_interest"
+    PSYCHOLOGIST_CONSIDERING = "psychologist_considering"
+    PSYCHOLOGIST_REQUEST = "psychologist_request"
+    VERIFIED_INFORMATION = "verified_information"
+    EXPLICIT_HUMAN_REQUEST = "explicit_human_request"
+    CLOSE = "close"
+
+
+class SupportAction(str, Enum):
+    CONTINUE_CONVERSATION = "continue_conversation"
+    CLARIFY = "clarify"
+    OFFER_AID = "offer_aid"
+    PROVIDE_VERIFIED_INFO = "provide_verified_info"
+    REQUEST_HUMAN = "request_human"
+    START_PSYCHOLOGIST_REQUEST = "start_psychologist_request"
+    CLOSE = "close"
+
+
+class ChoiceSet(str, Enum):
+    NONE = "none"
+    SAFE_CONTINUE = "safe_continue"
+    NEED_CATEGORIES = "need_categories"
+    AID_CATALOG = "aid_catalog"
+    PSYCHOLOGIST_INTEREST = "psychologist_interest"
+    CONTACT_METHODS = "contact_methods"
+    MORE_HELP = "more_help"
+
+
+class SupportOffer(str, Enum):
+    PSYCHOLOGIST = "psychologist"
+
+
+class SupportPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: SupportIntent
+    next_action: SupportAction
+    text: str = Field(min_length=1, max_length=1200)
+    choice_set: ChoiceSet = ChoiceSet.NONE
+    need: NeedKind | None = None
+    catalog_item_ids: tuple[str, ...] = Field(default=(), max_length=4)
+    offered_support: SupportOffer | None = None
+
+
+class EscalationCause(str, Enum):
+    SAFETY = "safety"
+    HUMAN_REQUEST = "human_request"
+    LEVEL_TWO_SUPPORT = "level_two_support"
+
+
+class EscalationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    cause: EscalationCause
+    level: RiskLevel | None = None
+    categories: tuple[str, ...] = ()
+    reason: str = Field(default="", max_length=240)
+
+
+class PolicyEffect(str, Enum):
+    NONE = "none"
+    OFFER_AID = "offer_aid"
+    START_PSYCHOLOGIST_REQUEST = "start_psychologist_request"
+    HUMAN_HANDOFF = "human_handoff"
+    CRITICAL_ESCALATION = "critical_escalation"
+    CLOSE = "close"
+
+
+class ResolvedTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: str = Field(min_length=1, max_length=4096)
+    choice_set: ChoiceSet = ChoiceSet.NONE
+    effect: PolicyEffect = PolicyEffect.NONE
+    need: NeedKind | None = None
+    catalog_item_ids: tuple[str, ...] = ()
+    offered_support: SupportOffer | None = None
+    fallback_reason: str | None = Field(default=None, max_length=120)
 
 
 class RiskAssessment(BaseModel):
@@ -146,4 +229,3 @@ CRISIS_REPLY = (
     "Если опасность непосредственная, позвоните 112, если можете сделать это безопасно. "
     "Зову живого человека, а здесь можно продолжать писать."
 )
-
