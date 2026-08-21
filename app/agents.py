@@ -127,10 +127,28 @@ def parse_provider_json_object(raw_output: str) -> dict[str, Any]:
             candidate = candidate[len(prefix) : -4].strip()
             break
     try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
+        parsed = json.loads(
+            candidate,
+            object_pairs_hook=_json_object_without_duplicates,
+            parse_constant=_reject_nonstandard_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise ValueError("duplicate_json_key")
+        parsed[key] = value
+    return parsed
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    del value
+    raise ValueError("nonstandard_json_constant")
 
 
 def provider_output_shape(raw_output: str) -> dict[str, bool | int]:

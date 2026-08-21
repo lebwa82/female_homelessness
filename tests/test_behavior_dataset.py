@@ -30,6 +30,7 @@ def _valid_row(case_id: str) -> dict[str, object]:
                 "escalation_count": 0,
                 "request_count": 0,
                 "copy_contains": None,
+                "rule_ids": [],
             },
             "diagnostics": {
                 "safety_levels": ["none"],
@@ -86,6 +87,23 @@ def test_dataset_ids_are_unique() -> None:
 
     with pytest.raises(DatasetError, match="duplicate case id: duplicate-01"):
         load_cases_from_text(duplicate)
+
+
+def test_behavior_requires_explicit_rule_ids_and_canonical_copy_for_backend_routes() -> None:
+    missing_rule_ids = _valid_row("missing-rule-ids")
+    missing_rule_ids["expected"]["behavior"].pop("rule_ids")  # type: ignore[index]
+
+    with pytest.raises(DatasetError, match="missing required keys: rule_ids"):
+        load_cases_from_text(json.dumps(missing_rule_ids))
+
+    missing_copy = _valid_row("missing-canonical-copy")
+    behavior = missing_copy["expected"]["behavior"]  # type: ignore[index]
+    behavior["rule_ids"] = []
+    behavior["choice_set"] = "aid_catalog"
+    behavior["effect"] = "offer_aid"
+
+    with pytest.raises(DatasetError, match="canonical copy is required"):
+        load_cases_from_text(json.dumps(missing_copy))
 
 
 @pytest.mark.parametrize(

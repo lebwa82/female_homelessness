@@ -79,6 +79,17 @@ async def test_fixture_gateway_consumes_separate_agent_payload_not_expected_inva
 
 
 @pytest.mark.asyncio
+async def test_rule_ids_are_a_deploy_blocking_hard_expectation() -> None:
+    case = load_cases(DATASET)[0]
+    payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
+    mismatched = replace(case, behavior={**case.behavior, "rule_ids": ("unexpected.rule",)})
+
+    report = await evaluate_case(FixtureGateway.from_case(mismatched, payloads), mismatched)
+
+    assert "rule_ids" in report.hard_failures
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["missing", "surplus"])
 async def test_fixture_ids_must_exactly_match_dataset_before_replay(mode: str) -> None:
     """A stale fixture file must fail before any case can be evaluated."""

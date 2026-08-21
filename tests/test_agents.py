@@ -43,6 +43,10 @@ def test_support_text_json_instructions_enumerate_the_only_valid_intents() -> No
         ('```json\n{"level":"none"}\n```', {"level": "none"}),
         ("not-json", {}),
         ('{"level":"none"}\ntrailing', {}),
+        ('{"level":"none","level":"critical"}', {}),
+        ('{"confidence":NaN}', {}),
+        ('{"confidence":Infinity}', {}),
+        ('{"confidence":-Infinity}', {}),
     ],
 )
 def test_provider_json_parser_accepts_only_one_object_or_known_code_fence(

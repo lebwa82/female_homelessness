@@ -50,6 +50,14 @@ The two full-history live evaluator runs are pending a fresh approval-flow autho
 | 1 | not run — fresh full-history external approval pending |
 | 2 | not run — fresh full-history external approval pending |
 
+## Fix round 1 — hardening acceptance evidence
+
+- TDD evidence added for all three review findings. The dataset now requires an explicit exact `rule_ids` array for every case; it is compared as a hard behavior field and remains part of the hard projection hash. All 53 fixture expectations were populated without changing case IDs or history values; verified open paths retain explicit empty arrays, while 29 backend-owned routes carry non-null canonical-copy expectations.
+- Dataset loading rejects omitted or malformed `rule_ids`, and rejects missing canonical-copy expectations for any backend-owned effect or choice. Expectations remain literal fixture data: the evaluator does not synthesize them at runtime.
+- The provider JSON boundary now rejects duplicate object keys and the non-standard constants `NaN`, `Infinity`, and `-Infinity`; malformed diagnostics remain fail-safe and no extra provider request is added.
+- PostgreSQL assurance now creates a unique temporary conversation and a `human_requested` escalation within the existing rollback-only transaction, reads back its own stored level, verifies it, and rolls the transaction back. Mocked SQL-order coverage proves no committed row or cleanup delete is used.
+- This fix round made no provider, live-evaluation, Podman, or real-PostgreSQL calls. The offline service replay aggregate was 53 cases, with 0 hard failures, 0 diagnostic deltas, and 0 provider failures.
+
 ## Self-review
 
 - Service evaluator, explicit workflow state, mutation invariance, stable order, bounded case concurrency, and output redaction are covered by tests.

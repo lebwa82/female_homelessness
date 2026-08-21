@@ -434,7 +434,20 @@ def _expected(value: Any, prefix: str) -> tuple[dict[str, Any], dict[str, tuple[
     behavior, diagnostics = value["behavior"], value["diagnostics"]
     if not isinstance(behavior, dict) or not isinstance(diagnostics, dict):
         raise DatasetError(f"{prefix}: expected sections must be objects")
-    behavior_keys = {"local_risk", "choice_set", "rendered_callback_ids", "effect", "side_effects", "state_after", "escalation", "escalation_cause", "escalation_count", "request_count", "copy_contains"}
+    behavior_keys = {
+        "local_risk",
+        "choice_set",
+        "rendered_callback_ids",
+        "effect",
+        "side_effects",
+        "state_after",
+        "escalation",
+        "escalation_cause",
+        "escalation_count",
+        "request_count",
+        "copy_contains",
+        "rule_ids",
+    }
     _exact_keys(behavior, behavior_keys, f"{prefix}: expected.behavior")
     for key, enum_type in (("local_risk", RiskLevel), ("choice_set", ChoiceSet), ("effect", PolicyEffect), ("state_after", ConversationState)):
         _enum(behavior[key], enum_type, f"{prefix}: expected.behavior.{key}")
@@ -455,6 +468,14 @@ def _expected(value: Any, prefix: str) -> tuple[dict[str, Any], dict[str, tuple[
         raise DatasetError(f"{prefix}: expected.behavior escalation count mismatch")
     if behavior["copy_contains"] is not None and not isinstance(behavior["copy_contains"], str):
         raise DatasetError(f"{prefix}: expected.behavior.copy_contains must be a string or null")
+    if behavior["copy_contains"] is not None:
+        _string(behavior["copy_contains"], f"{prefix}: expected.behavior.copy_contains")
+    if _requires_canonical_copy(behavior) and behavior["copy_contains"] is None:
+        raise DatasetError(f"{prefix}: expected.behavior canonical copy is required")
+    if not isinstance(behavior["rule_ids"], list) or not all(
+        isinstance(item, str) and item for item in behavior["rule_ids"]
+    ):
+        raise DatasetError(f"{prefix}: expected.behavior.rule_ids must be a string array")
     _exact_keys(diagnostics, {"safety_levels", "support_intents"}, f"{prefix}: expected.diagnostics")
     parsed: dict[str, tuple[str, ...]] = {}
     for key, enum_type in (("safety_levels", RiskLevel), ("support_intents", SupportIntent)):
@@ -488,12 +509,12 @@ def _diagnostic_projection(store: InMemoryConversationStore, audit: Mapping[str,
 
 
 def _behavior_failures(expected: Mapping[str, Any], actual: Mapping[str, Any], audit: Mapping[str, Any], history_matches: bool) -> list[str]:
-    fields = ("local_risk", "choice_set", "rendered_callback_ids", "effect", "side_effects", "state_after", "escalation", "escalation_cause", "escalation_count", "request_count")
+    fields = ("local_risk", "choice_set", "rendered_callback_ids", "effect", "side_effects", "state_after", "escalation", "escalation_cause", "escalation_count", "request_count", "rule_ids")
     failures = [
         field
         for field in fields
         if actual[field]
-        != (tuple(expected[field]) if field in {"rendered_callback_ids", "side_effects"} else expected[field])
+        != (tuple(expected[field]) if field in {"rendered_callback_ids", "side_effects", "rule_ids"} else expected[field])
     ]
     if expected["copy_contains"] is not None and not actual["canonical_copy_ok"]:
         failures.append("canonical_copy")
@@ -525,6 +546,13 @@ def _provider_failures(diagnostics: Mapping[str, str | None]) -> tuple[str, ...]
 
 def _hard_hash(projection: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(projection, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _requires_canonical_copy(behavior: Mapping[str, Any]) -> bool:
+    return (
+        behavior["effect"] != PolicyEffect.NONE.value
+        or behavior["choice_set"] != ChoiceSet.NONE.value
+    )
 
 
 def _final_user_text(history: tuple[tuple[str, str], ...]) -> str:

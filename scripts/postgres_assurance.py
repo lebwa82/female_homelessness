@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from uuid import uuid4
 
 from sqlalchemy import text
 
@@ -28,7 +30,7 @@ _REQUIRED_INDEXES = {
 
 
 async def assure() -> dict[str, object]:
-    """Run idempotent DDL twice, then inspect metadata in a rolled-back read transaction."""
+    """Run idempotent DDL twice, then inspect and verify compatibility in a rollback-only transaction."""
     await db.init_db()
     await db.init_db()
     async with db.engine.connect() as connection:
@@ -46,9 +48,36 @@ async def assure() -> dict[str, object]:
                 text("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()")
             )
             indexes = {row.indexname for row in indexes_result}
-            await connection.execute(
-                text("SELECT level FROM escalations WHERE level = 'human_requested' LIMIT 1")
+            token = uuid4().hex
+            conversation_result = await connection.execute(
+                text(
+                    "INSERT INTO conversations (channel, channel_user_id, platform_user_hash) "
+                    "VALUES ('assurance', :platform_user_id, :platform_user_hash) RETURNING id"
+                ),
+                {
+                    "platform_user_id": int(token[:15], 16),
+                    "platform_user_hash": hashlib.sha256(token.encode()).hexdigest(),
+                },
             )
+            conversation_id = conversation_result.scalar_one()
+            request_key = f"assurance:{token}"
+            await connection.execute(
+                text(
+                    "INSERT INTO escalations "
+                    "(conversation_id, cause, level, categories, reason, request_key, status) "
+                    "VALUES (:conversation_id, 'safety', 'human_requested', '{}'::jsonb, "
+                    "'assurance', :request_key, 'simulated')"
+                ),
+                {"conversation_id": conversation_id, "request_key": request_key},
+            )
+            historical_level = (
+                await connection.execute(
+                    text("SELECT level FROM escalations WHERE request_key = :request_key"),
+                    {"request_key": request_key},
+                )
+            ).scalar_one()
+            if historical_level != "human_requested":
+                raise RuntimeError("historical_level_unreadable")
         finally:
             await transaction.rollback()
     missing_columns = _REQUIRED_COLUMNS - set(columns)
