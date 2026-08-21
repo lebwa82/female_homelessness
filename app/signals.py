@@ -4,7 +4,7 @@ from collections.abc import Callable
 from hashlib import sha256
 from unicodedata import normalize
 
-from app.domain import DeterministicSignals, HardSignalKind, NeedKind, SignalMatch
+from app.domain import DeterministicSignals, HardSignalKind, NeedKind, SignalMatch, SupportOffer
 
 MATCHER_VERSION = "deterministic-signals-v1"
 
@@ -31,7 +31,11 @@ _THREAT_WORDS = frozenset({"угрожает", "угрожают"})
 _EVICTION_WORDS = frozenset({"выгнали", "выселили"})
 
 
-def extract_signals(text: str) -> DeterministicSignals:
+def extract_signals(
+    text: str,
+    *,
+    pending_offer: SupportOffer | None = None,
+) -> DeterministicSignals:
     """Extract bounded token-sequence signals without retaining the input text."""
     tokens = _scan_tokens(text)
     matches: list[SignalMatch] = []
@@ -60,6 +64,7 @@ def extract_signals(text: str) -> DeterministicSignals:
     _add_human_request_matches(tokens, add)
     _add_aid_matches(tokens, add)
     _add_psychologist_matches(tokens, add)
+    _add_pending_offer_matches(tokens, pending_offer, add)
     _add_safety_matches(tokens, add)
 
     return DeterministicSignals(
@@ -149,6 +154,27 @@ def _add_psychologist_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
         add(HardSignalKind.PSYCHOLOGIST_CONSIDERING, "psychologist.tentative", start, start + 5)
     for start in _find_phrase(tokens, ("не", "уверена", "насчет", "психолога")):
         add(HardSignalKind.PSYCHOLOGIST_CONSIDERING, "psychologist.uncertain", start, start + 4)
+
+
+def _add_pending_offer_matches(
+    tokens: tuple[str, ...],
+    pending_offer: SupportOffer | None,
+    add: _AddMatch,
+) -> None:
+    """Interpret only bounded acknowledgement language after a backend-owned offer."""
+    if pending_offer is not SupportOffer.PSYCHOLOGIST:
+        return
+    if tokens == ("да", "хочу"):
+        add(HardSignalKind.PSYCHOLOGIST_REQUEST, "psychologist.pending.accept", 0, 2)
+    for start, token in enumerate(tokens):
+        if token != "расскажите":
+            continue
+        end = start + 1
+        if end < len(tokens) and tokens[end] == "пожалуйста":
+            end += 1
+        add(HardSignalKind.PSYCHOLOGIST_CONSIDERING, "psychologist.pending.explain", start, end)
+    for start in _find_phrase(tokens, ("как", "проходят", "встречи")):
+        add(HardSignalKind.PSYCHOLOGIST_CONSIDERING, "psychologist.pending.format", start, start + 3)
 
 
 def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:

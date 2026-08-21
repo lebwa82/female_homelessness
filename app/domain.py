@@ -46,6 +46,14 @@ class RiskLevel(str, Enum):
     UNKNOWN = "unknown"
 
 
+class DiagnosticStatus(str, Enum):
+    """Transport/schema health of an agent diagnostic, not a safety meaning."""
+
+    COMPLETED = "completed"
+    INVALID = "invalid"
+    UNAVAILABLE = "unavailable"
+
+
 class HardSignalKind(str, Enum):
     EXPLICIT_HUMAN_REQUEST = "explicit_human_request"
     CONCRETE_AID = "concrete_aid"
@@ -128,6 +136,45 @@ class SupportOffer(str, Enum):
     PSYCHOLOGIST = "psychologist"
 
 
+class SafetyDiagnostic(BaseModel):
+    """Model observation only; the policy never treats it as an authorization."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    level: RiskLevel
+    categories: tuple[str, ...] = Field(default=(), max_length=5)
+    confidence: float = Field(ge=0.0, le=1.0)
+    rationale: str = Field(min_length=1, max_length=240)
+    evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
+    rationale_alias_used: bool = Field(default=False, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_provider_rationale_alias(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        if "rationale_short" not in value:
+            return value
+        normalized = dict(value)
+        alias_value = normalized.pop("rationale_short")
+        if "rationale" not in normalized:
+            normalized["rationale"] = alias_value
+            normalized["rationale_alias_used"] = True
+        return normalized
+
+
+class SupportDiagnostic(BaseModel):
+    """Conversational model observation without any product-control fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    intent: SupportIntent
+    need_hint: NeedKind | None = None
+    evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
+    draft_text: str = Field(min_length=1, max_length=1200)
+    suggested_support: SupportOffer | None = None
+
+
 class SupportPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -158,6 +205,7 @@ class EscalationRequest(BaseModel):
 
 class PolicyEffect(str, Enum):
     NONE = "none"
+    START_NEED_DISCOVERY = "start_need_discovery"
     OFFER_AID = "offer_aid"
     START_PSYCHOLOGIST_REQUEST = "start_psychologist_request"
     HUMAN_HANDOFF = "human_handoff"
@@ -195,6 +243,23 @@ class RiskAssessment(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     rationale: str = Field(default="", max_length=240)
     detector: str = Field(default="model", max_length=64)
+
+
+class PolicyContext(BaseModel):
+    """Complete backend-owned input for resolving one text turn."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: str
+    signals: DeterministicSignals | None
+    local_risk: RiskAssessment
+    safety_status: DiagnosticStatus = DiagnosticStatus.UNAVAILABLE
+    support_status: DiagnosticStatus = DiagnosticStatus.UNAVAILABLE
+    safety: SafetyDiagnostic | None = None
+    support: SupportDiagnostic | None = None
+    pending_offer: SupportOffer | None = None
+    workflow_value: str = ""
+    need: str | None = None
 
 
 class AgentTurn(BaseModel):

@@ -1,202 +1,236 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from app.domain import (
     ChoiceSet,
     ConversationState,
+    DiagnosticStatus,
+    PolicyContext,
     PolicyEffect,
     RiskAssessment,
     RiskLevel,
-    SupportPlan,
+    SafetyDiagnostic,
+    SupportDiagnostic,
+    SupportOffer,
 )
 from app.policy import resolve_turn
+from app.safety import assess_local_risk_from_signals
+from app.signals import extract_signals
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
 
 
-def safe_risk() -> RiskAssessment:
-    return RiskAssessment(level=RiskLevel.NONE, detector="test")
-
-
-def critical_suicide_risk() -> RiskAssessment:
-    return RiskAssessment(level=RiskLevel.CRITICAL, categories=("suicide",), detector="test")
-
-
-def aid_plan() -> SupportPlan:
-    return SupportPlan(
-        intent="aid_interest",
-        next_action="offer_aid",
-        text="Давайте подберём варианты.",
-        need="food_money",
+def context(
+    text: str,
+    *,
+    state: str = ConversationState.OPEN_CONVERSATION.value,
+    pending_offer: SupportOffer | None = None,
+    support: SupportDiagnostic | None = None,
+    support_status: DiagnosticStatus = DiagnosticStatus.COMPLETED,
+    local_risk: RiskAssessment | None = None,
+) -> PolicyContext:
+    signals = extract_signals(text, pending_offer=pending_offer)
+    return PolicyContext(
+        state=state,
+        signals=signals,
+        local_risk=local_risk or assess_local_risk_from_signals(signals),
+        safety_status=DiagnosticStatus.INVALID,
+        support_status=support_status,
+        safety=None,
+        support=support,
+        pending_offer=pending_offer,
+        workflow_value=text,
     )
 
 
 @pytest.mark.parametrize(
-    ("text", "intent", "action"),
-    [
-        ("мне хочется выговориться", "open_conversation", "continue_conversation"),
-        ("можешь меня выслушать?", "open_conversation", "continue_conversation"),
-        ("мне плохо", "open_conversation", "continue_conversation"),
-    ],
+    ("text", "state", "expected_effect", "expected_choices"),
+    (
+        ("не хочу жить", ConversationState.COLLECTING_CONTACT_METHOD.value, PolicyEffect.CRITICAL_ESCALATION, ChoiceSet.SAFE_CONTINUE),
+        ("Позовите человека", ConversationState.COLLECTING_CONTACT_METHOD.value, PolicyEffect.HUMAN_HANDOFF, ChoiceSet.SAFE_CONTINUE),
+        ("город Москва", ConversationState.COLLECTING_LOCATION.value, PolicyEffect.CAPTURE_LOCATION, ChoiceSet.CONTACT_METHODS),
+        ("хочу поговорить с психологом", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.START_PSYCHOLOGIST_REQUEST, ChoiceSet.CONTACT_METHODS),
+        ("мне нужны продукты", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.OFFER_AID, ChoiceSet.AID_CATALOG),
+        ("какую помощь можно получить", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.START_NEED_DISCOVERY, ChoiceSet.NEED_CATEGORIES),
+        ("мне хочется выговориться", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.NONE, ChoiceSet.NONE),
+    ),
 )
-def test_open_conversation_never_gets_need_menu(text: str, intent: str, action: str) -> None:
-    decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(intent=intent, next_action=action, text=text, choice_set="need_categories"),
-        "open_conversation",
-    )
-
-    assert decision.choice_set is ChoiceSet.NONE
-    assert decision.effect is PolicyEffect.NONE
-
-
-def test_explicit_human_request_is_not_a_risk_but_becomes_handoff() -> None:
-    decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(
-            intent="explicit_human_request",
-            next_action="request_human",
-            text="Позову человека.",
-        ),
-        "open_conversation",
-    )
-
-    assert decision.effect is PolicyEffect.HUMAN_HANDOFF
-    assert decision.choice_set is ChoiceSet.SAFE_CONTINUE
-
-
-def test_direct_psychologist_request_owns_contact_choice_set() -> None:
-    decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(
-            intent="psychologist_request",
-            next_action="start_psychologist_request",
-            text="Начинаю запрос к психологу.",
-        ),
-        ConversationState.OPEN_CONVERSATION.value,
-    )
-
-    assert decision.effect is PolicyEffect.START_PSYCHOLOGIST_REQUEST
-    assert decision.choice_set is ChoiceSet.CONTACT_METHODS
-
-
-def test_critical_risk_discards_support_plan() -> None:
-    decision = resolve_turn(critical_suicide_risk(), aid_plan(), "open_conversation")
-
-    assert decision.effect is PolicyEffect.CRITICAL_ESCALATION
-    assert "8-800-2000-122" in decision.text
-
-
-def test_unknown_risk_blocks_a_valid_support_plan() -> None:
-    decision = resolve_turn(
-        RiskAssessment(level=RiskLevel.UNKNOWN, detector="test"), aid_plan(), "open_conversation"
-    )
-
-    assert decision.effect is PolicyEffect.NONE
-    assert decision.choice_set is ChoiceSet.SAFE_CONTINUE
-    assert decision.fallback_reason == "risk_unknown"
-
-
-def test_missing_plan_falls_back_to_open_conversation_without_a_menu() -> None:
-    decision = resolve_turn(safe_risk(), None, "open_conversation")
-
-    assert decision.effect is PolicyEffect.NONE
-    assert decision.choice_set is ChoiceSet.NONE
-    assert decision.fallback_reason == "support_plan_missing"
-
-
-@pytest.mark.parametrize(
-    ("intent", "next_action"),
-    [
-        ("explicit_human_request", "continue_conversation"),
-        ("psychologist_request", "clarify"),
-    ],
-)
-def test_inconsistent_side_effect_plan_has_no_effect(
-    intent: str, next_action: str
+def test_policy_truth_table_has_the_required_deterministic_precedence(
+    text: str, state: str, expected_effect: PolicyEffect, expected_choices: ChoiceSet
 ) -> None:
-    decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(intent=intent, next_action=next_action, text="Небезопасное обещание."),
-        "open_conversation",
+    decision = resolve_turn(context(text, state=state, support=SupportDiagnostic(intent="aid_interest", draft_text="Я рядом.")))
+
+    assert decision.effect is expected_effect
+    assert decision.choice_set is expected_choices
+
+
+def test_critical_wins_over_human_even_when_diagnostics_are_wrong_but_valid() -> None:
+    text = "Позовите человека, но я не хочу жить"
+    local_risk = RiskAssessment(level=RiskLevel.CRITICAL, categories=("suicide",), detector="test")
+    baseline = resolve_turn(context(text, local_risk=local_risk))
+    mutated = resolve_turn(
+        context(
+            text,
+            local_risk=local_risk,
+            support=SupportDiagnostic(
+                intent="concrete_need",
+                need_hint="legal",
+                draft_text="Я оформила заявку и передала контакт.",
+            ),
+        ).model_copy(
+            update={
+                "safety_status": DiagnosticStatus.COMPLETED,
+                "safety": SafetyDiagnostic(level="none", confidence=0.99, rationale="wrong"),
+            }
+        )
     )
 
-    assert decision.effect is PolicyEffect.NONE
-    assert decision.choice_set is ChoiceSet.NONE
-    assert decision.fallback_reason == "inconsistent_plan"
+    assert baseline.effect is PolicyEffect.CRITICAL_ESCALATION
+    assert baseline.text == mutated.text
+    assert baseline.choice_set is mutated.choice_set
+    assert baseline.side_effects == mutated.side_effects
 
 
-def test_psychologist_considering_offers_only_confirmed_interest_choice_set() -> None:
+def test_explicit_human_request_survives_invalid_diagnostics_and_finite_workflow() -> None:
     decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(
-            intent="psychologist_considering",
-            next_action="clarify",
-            text="Могу рассказать о поддержке психолога.",
-        ),
-        "open_conversation",
-    )
-
-    assert decision.effect is PolicyEffect.NONE
-    assert decision.choice_set is ChoiceSet.PSYCHOLOGIST_INTEREST
-
-
-def test_psychologist_request_cannot_start_an_overlapping_contact_workflow() -> None:
-    decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(
-            intent="psychologist_request",
-            next_action="start_psychologist_request",
-            text="Начинаю запрос к психологу.",
-        ),
-        ConversationState.COLLECTING_CONTACT_METHOD.value,
-    )
-
-    assert decision.effect is PolicyEffect.NONE
-    assert decision.choice_set is ChoiceSet.NONE
-    assert decision.fallback_reason == "workflow_active"
-
-
-def test_offer_aid_cannot_start_an_overlapping_aid_workflow() -> None:
-    decision = resolve_turn(safe_risk(), aid_plan(), ConversationState.CHOOSING_AID.value)
-
-    assert decision.effect is PolicyEffect.NONE
-    assert decision.choice_set is ChoiceSet.NONE
-    assert decision.fallback_reason == "workflow_active"
-
-
-def test_explicit_human_request_remains_available_during_a_finite_workflow() -> None:
-    decision = resolve_turn(
-        safe_risk(),
-        SupportPlan(
-            intent="explicit_human_request",
-            next_action="request_human",
-            text="Позову человека.",
-        ),
-        ConversationState.COLLECTING_CONTACT_METHOD.value,
+        context(
+            "Позовите человека",
+            state=ConversationState.COLLECTING_CONTACT_VALUE.value,
+            support_status=DiagnosticStatus.UNAVAILABLE,
+        )
     )
 
     assert decision.effect is PolicyEffect.HUMAN_HANDOFF
 
 
-def test_critical_risk_overrides_an_active_finite_workflow() -> None:
+def test_local_inspection_failure_is_distinct_from_provider_failure() -> None:
     decision = resolve_turn(
-        critical_suicide_risk(), aid_plan(), ConversationState.COLLECTING_CONTACT_METHOD.value
+        PolicyContext(
+            state=ConversationState.OPEN_CONVERSATION.value,
+            signals=None,
+            local_risk=RiskAssessment(level=RiskLevel.UNKNOWN, detector="local-signals"),
+            safety_status=DiagnosticStatus.UNAVAILABLE,
+            support_status=DiagnosticStatus.UNAVAILABLE,
+        )
     )
 
-    assert decision.effect is PolicyEffect.CRITICAL_ESCALATION
-    assert "8-800-2000-122" in decision.text
+    assert decision.choice_set is ChoiceSet.SAFE_CONTINUE
+    assert decision.fallback_reason == "local_input_unavailable"
 
 
-@pytest.mark.parametrize("level", [RiskLevel.CONCERN, RiskLevel.URGENT])
-def test_noncritical_risk_preserves_valid_conversation_plan(level: RiskLevel) -> None:
-    decision = resolve_turn(
-        RiskAssessment(level=level, detector="test"),
-        SupportPlan(
-            intent="open_conversation",
-            next_action="continue_conversation",
-            text="Я рядом.",
-        ),
-        "open_conversation",
+@pytest.mark.parametrize(
+    "text",
+    (
+        "не хочу жить",
+        "Позовите человека",
+        "хочу поговорить с психологом",
+        "мне нужны продукты",
+        "какую помощь можно получить",
+    ),
+)
+def test_wrong_or_missing_diagnostics_do_not_mutate_hard_local_projection(text: str) -> None:
+    baseline = resolve_turn(context(text, support_status=DiagnosticStatus.UNAVAILABLE))
+    mutated = resolve_turn(
+        context(
+            text,
+            support=SupportDiagnostic(
+                intent="explicit_human_request",
+                need_hint="legal",
+                draft_text="Я оформила заявку и передала контакт.",
+            ),
+        ).model_copy(
+            update={
+                "safety_status": DiagnosticStatus.COMPLETED,
+                "safety": SafetyDiagnostic(level="none", confidence=0.99, rationale="wrong"),
+            }
+        )
     )
 
-    assert decision.text == "Я рядом."
+    assert (baseline.effect, baseline.choice_set, baseline.side_effects) == (
+        mutated.effect,
+        mutated.choice_set,
+        mutated.side_effects,
+    )
+
+
+def test_pending_offer_requires_a_verified_followup_before_a_psychologist_button() -> None:
+    offer_turn = resolve_turn(
+        context(
+            "мне трудно",
+            support=SupportDiagnostic(
+                intent="psychologist_considering",
+                draft_text="Я рядом. Могу рассказать о психологе.",
+                suggested_support=SupportOffer.PSYCHOLOGIST,
+            ),
+        )
+    )
+    interest_turn = resolve_turn(
+        context("расскажите, пожалуйста", pending_offer=SupportOffer.PSYCHOLOGIST)
+    )
+
+    assert offer_turn.choice_set is ChoiceSet.NONE
+    assert offer_turn.offered_support is SupportOffer.PSYCHOLOGIST
+    assert interest_turn.choice_set is ChoiceSet.PSYCHOLOGIST_INTEREST
+
+
+@pytest.mark.parametrize(
+    "draft",
+    (
+        "",
+        "Я оформила заявку и передала контакт.",
+        "Ваша заявка уже принята, с вами свяжутся.",
+    ),
+)
+def test_open_conversation_draft_guard_rejects_empty_or_external_action_claims(draft: str) -> None:
+    if draft:
+        support = SupportDiagnostic(intent="open_conversation", draft_text=draft)
+        status = DiagnosticStatus.COMPLETED
+    else:
+        support = None
+        status = DiagnosticStatus.INVALID
+    decision = resolve_turn(context("мне хочется выговориться", support=support, support_status=status))
+
+    assert decision.choice_set is ChoiceSet.NONE
+    assert decision.text != draft
+    assert decision.fallback_reason in {"support_diagnostic_unavailable", "support_draft_guard"}
+
+
+def test_concern_narrative_without_request_has_no_aid_menu_but_records_safety() -> None:
+    decision = resolve_turn(context("я боюсь возвращаться домой", support=SupportDiagnostic(intent="aid_interest", draft_text="Я рядом.")))
+
     assert decision.effect is PolicyEffect.NONE
-    assert decision.fallback_reason is None
+    assert decision.choice_set is ChoiceSet.NONE
+    assert [effect.value for effect in decision.side_effects] == ["record_safety"]
+
+
+def test_all_53_final_user_turns_have_a_deterministic_route_and_open_rows_stay_open() -> None:
+    rows = [json.loads(line) for line in FIXTURE_PATH.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 53
+
+    for row in rows:
+        history = tuple((str(role), str(text)) for role, text in row["history"])
+        final_text = next(text for role, text in reversed(history) if role == "user")
+        pending_offer = (
+            SupportOffer.PSYCHOLOGIST
+            if any(role == "assistant" and "психолог" in text.casefold() for role, text in history[:-1])
+            else None
+        )
+        signals = extract_signals(final_text, pending_offer=pending_offer)
+        decision = resolve_turn(
+            PolicyContext(
+                state=ConversationState.OPEN_CONVERSATION.value,
+                signals=signals,
+                local_risk=assess_local_risk_from_signals(signals),
+                support_status=DiagnosticStatus.COMPLETED,
+                support=SupportDiagnostic(intent="open_conversation", draft_text="Я рядом."),
+                pending_offer=pending_offer,
+                workflow_value=final_text,
+            )
+        )
+
+        assert decision.text
+        if row["group"] in {"open_conversation", "human_near_miss"}:
+            assert decision.choice_set is ChoiceSet.NONE
+            assert decision.effect is PolicyEffect.NONE

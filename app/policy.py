@@ -1,27 +1,32 @@
+"""Deterministic owner of text-turn effects, workflows, and contextual choices."""
+
 from __future__ import annotations
 
 from app.catalog import available_aid_for_need, get_aid_item
 from app.domain import (
     ChoiceSet,
     ConversationState,
+    DiagnosticStatus,
+    HardSignalKind,
     NeedKind,
+    PolicyContext,
     PolicyEffect,
     PolicySideEffect,
     ResolvedTurn,
     RiskAssessment,
     RiskLevel,
-    SupportAction,
-    SupportIntent,
-    SupportPlan,
+    SupportOffer,
 )
 
+POLICY_VERSION = "deterministic-policy-v2"
 _SAFE_FALLBACK = "Я рядом и готова продолжить. Можно написать, что сейчас важно."
-_UNKNOWN_PROMPT = "Я здесь. Можно продолжить разговор или позвать человека."
+_LOCAL_UNAVAILABLE_PROMPT = "Я здесь. Можно продолжить разговор или позвать человека."
 HUMAN_HANDOFF_PROMPT = (
     "Слышу вас. Зову человека, который работает с этим ресурсом. Здесь можно продолжать писать."
 )
 CONTACT_PROMPT = "Чтобы это передать, нужен удобный способ связи. Что вам подходит?"
 MORE_HELP_PROMPT = "Хорошо, запрос сохранён. Нужно что-то ещё?"
+NEED_DISCOVERY_PROMPT = "Что сейчас важнее всего? Можно выбрать или написать своими словами."
 _FINITE_WORKFLOW_STATES = frozenset(
     {
         ConversationState.CHOOSING_AID.value,
@@ -34,132 +39,156 @@ _FINITE_WORKFLOW_STATES = frozenset(
         ConversationState.FOLLOWUP_ANSWERED.value,
     }
 )
+_EXTERNAL_ACTION_MARKERS = (
+    "позвал",
+    "позвала",
+    "связал",
+    "связала",
+    "заявка сохранена",
+    "сохранил заявку",
+    "сохранила заявку",
+    "оформил заявку",
+    "оформила заявку",
+    "организовал помощь",
+    "организовала помощь",
+    "передал контакт",
+    "передала контакт",
+    "заявка принята",
+    "запрос принят",
+    "запрос отправлен",
+    "запись подтверждена",
+    "вы уже записаны",
+    "с вами свяжутся",
+    "с тобой свяжутся",
+    "контакт получен",
+)
 
 
-def resolve_turn(
-    risk: RiskAssessment,
-    plan: SupportPlan | None,
-    state: str,
-) -> ResolvedTurn:
-    """Resolve model outputs to the only permitted UI and workflow decision."""
-    if risk.level is RiskLevel.CRITICAL:
-        return _finalize_turn(risk, state, critical_resolved_turn(risk))
-    if risk.level is RiskLevel.UNKNOWN:
+def resolve_turn(context: PolicyContext) -> ResolvedTurn:
+    """Resolve the one permitted deterministic projection for a text turn.
+
+    Agent labels are deliberately absent from authorization conditions. A completed support
+    diagnostic can contribute only guarded conversational wording and a soft pending offer.
+    """
+    if context.local_risk.level is RiskLevel.CRITICAL:
+        return _finalize_turn(context, critical_resolved_turn(context.local_risk))
+    if _has_signal(context, HardSignalKind.EXPLICIT_HUMAN_REQUEST):
         return _finalize_turn(
-            risk,
-            state,
+            context,
             ResolvedTurn(
-                text=_UNKNOWN_PROMPT,
+                text=HUMAN_HANDOFF_PROMPT,
                 choice_set=ChoiceSet.SAFE_CONTINUE,
-                fallback_reason="risk_unknown",
+                effect=PolicyEffect.HUMAN_HANDOFF,
             ),
         )
-    if plan is None:
+    if context.signals is None or context.local_risk.level is RiskLevel.UNKNOWN:
         return _finalize_turn(
-            risk,
-            state,
-            ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_plan_missing"),
+            context,
+            ResolvedTurn(
+                text=_LOCAL_UNAVAILABLE_PROMPT,
+                choice_set=ChoiceSet.SAFE_CONTINUE,
+                fallback_reason="local_input_unavailable",
+            ),
         )
-    if not _is_consistent(plan):
+    if context.state in _FINITE_WORKFLOW_STATES:
+        return resolve_workflow_turn(context)
+    if _has_signal(context, HardSignalKind.PSYCHOLOGIST_REQUEST):
         return _finalize_turn(
-            risk,
-            state,
-            ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="inconsistent_plan"),
+            context,
+            ResolvedTurn(
+                text=CONTACT_PROMPT,
+                choice_set=ChoiceSet.CONTACT_METHODS,
+                effect=PolicyEffect.START_PSYCHOLOGIST_REQUEST,
+            ),
         )
-    if _starts_new_workflow(plan) and state in _FINITE_WORKFLOW_STATES:
-        return _finalize_turn(
-            risk,
-            state,
-            ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="workflow_active"),
-        )
-
-    if plan.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST:
-        decision = ResolvedTurn(
-            text=HUMAN_HANDOFF_PROMPT,
-            choice_set=ChoiceSet.SAFE_CONTINUE,
-            effect=PolicyEffect.HUMAN_HANDOFF,
-        )
-    elif plan.intent is SupportIntent.OPEN_CONVERSATION:
-        decision = ResolvedTurn(text=plan.text, offered_support=plan.offered_support)
-    elif plan.intent is SupportIntent.PSYCHOLOGIST_CONSIDERING:
-        decision = ResolvedTurn(text=plan.text, choice_set=ChoiceSet.PSYCHOLOGIST_INTEREST)
-    elif plan.intent is SupportIntent.PSYCHOLOGIST_REQUEST:
-        decision = ResolvedTurn(
-            text=plan.text,
-            choice_set=ChoiceSet.CONTACT_METHODS,
-            effect=PolicyEffect.START_PSYCHOLOGIST_REQUEST,
-        )
-    elif plan.next_action is SupportAction.OFFER_AID:
-        item_ids = _catalog_item_ids(plan.need, plan.catalog_item_ids)
-        if not item_ids:
-            decision = ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="catalog_items_missing")
-        else:
-            decision = ResolvedTurn(
-                text=_aid_offer_text(plan.text, item_ids),
-                choice_set=ChoiceSet.AID_CATALOG,
-                effect=PolicyEffect.OFFER_AID,
-                need=plan.need,
-                catalog_item_ids=item_ids,
+    if _has_signal(context, HardSignalKind.CONCRETE_AID):
+        need = _concrete_need(context)
+        item_ids = _catalog_item_ids(need)
+        if need is not None and item_ids:
+            return _finalize_turn(
+                context,
+                ResolvedTurn(
+                    text=_aid_offer_text(item_ids),
+                    choice_set=ChoiceSet.AID_CATALOG,
+                    effect=PolicyEffect.OFFER_AID,
+                    need=need,
+                    catalog_item_ids=item_ids,
+                ),
             )
-    elif plan.next_action is SupportAction.CLOSE:
-        decision = ResolvedTurn(text=plan.text, effect=PolicyEffect.CLOSE)
-    else:
-        decision = ResolvedTurn(text=plan.text, offered_support=plan.offered_support)
-    return _finalize_turn(risk, state, decision)
+    if _has_signal(context, HardSignalKind.GENERIC_AID_INTEREST):
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text=NEED_DISCOVERY_PROMPT,
+                choice_set=ChoiceSet.NEED_CATEGORIES,
+                effect=PolicyEffect.START_NEED_DISCOVERY,
+            ),
+        )
+    if (
+        context.pending_offer is SupportOffer.PSYCHOLOGIST
+        and _has_signal(context, HardSignalKind.PSYCHOLOGIST_CONSIDERING)
+    ):
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text="Могу рассказать о поддержке психолога. Если захотите, можно оставить удобный контакт.",
+                choice_set=ChoiceSet.PSYCHOLOGIST_INTEREST,
+            ),
+        )
+    return _finalize_turn(context, _open_conversation_turn(context))
 
 
-def resolve_workflow_turn(
-    risk: RiskAssessment,
-    state: str,
-    workflow_value: str,
-    need: str | None,
-) -> ResolvedTurn:
-    """Normalize a deterministic finite-workflow text input before execution."""
-    if state == ConversationState.COLLECTING_LOCATION.value:
+def resolve_workflow_turn(context: PolicyContext) -> ResolvedTurn:
+    """Replay the active finite workflow without reinterpreting the input as a new flow."""
+    if context.state == ConversationState.COLLECTING_LOCATION.value:
         decision = ResolvedTurn(
             text=CONTACT_PROMPT,
             choice_set=ChoiceSet.CONTACT_METHODS,
             effect=PolicyEffect.CAPTURE_LOCATION,
-            workflow_value=workflow_value[:120],
+            workflow_value=context.workflow_value[:120],
         )
-    elif state == ConversationState.COLLECTING_CONTACT_VALUE.value:
+    elif context.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
         decision = ResolvedTurn(
             text=MORE_HELP_PROMPT,
             choice_set=ChoiceSet.MORE_HELP,
             effect=PolicyEffect.COMPLETE_CONTACT,
-            workflow_value=workflow_value.strip()[:320],
+            workflow_value=context.workflow_value.strip()[:320],
         )
-    elif state == ConversationState.CHOOSING_AID.value:
+    elif context.state == ConversationState.CHOOSING_AID.value:
         try:
-            item_ids = _catalog_item_ids(NeedKind(need or ""), ())
+            item_ids = _catalog_item_ids(NeedKind(context.need or ""))
         except ValueError:
             item_ids = ()
         decision = ResolvedTurn(
-            text=_aid_offer_text("", item_ids) if item_ids else _SAFE_FALLBACK,
+            text=_aid_offer_text(item_ids) if item_ids else _SAFE_FALLBACK,
             choice_set=ChoiceSet.AID_CATALOG if item_ids else ChoiceSet.NONE,
             effect=PolicyEffect.REPLAY_WORKFLOW,
             catalog_item_ids=item_ids,
             fallback_reason=None if item_ids else "workflow_invalid",
         )
-    elif state == ConversationState.COLLECTING_CONTACT_METHOD.value:
+    elif context.state == ConversationState.COLLECTING_CONTACT_METHOD.value:
         decision = ResolvedTurn(
             text=CONTACT_PROMPT,
             choice_set=ChoiceSet.CONTACT_METHODS,
             effect=PolicyEffect.REPLAY_WORKFLOW,
         )
-    elif state == ConversationState.AID_REQUESTED.value:
+    elif context.state == ConversationState.AID_REQUESTED.value:
         decision = ResolvedTurn(
             text=MORE_HELP_PROMPT,
             choice_set=ChoiceSet.MORE_HELP,
             effect=PolicyEffect.REPLAY_WORKFLOW,
         )
+    elif context.state == ConversationState.FOLLOWUP_SENT.value:
+        # A text reply completes the reminder before returning to the ordinary conversation.
+        # The finalizer attaches COMPLETE_FOLLOWUP; no model label can alter this route.
+        decision = ResolvedTurn(text=_SAFE_FALLBACK)
     else:
         decision = ResolvedTurn(
             text=_SAFE_FALLBACK,
             effect=PolicyEffect.REPLAY_WORKFLOW,
             fallback_reason="workflow_active",
         )
-    return _finalize_turn(risk, state, decision)
+    return _finalize_turn(context, decision)
 
 
 def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
@@ -183,59 +212,56 @@ def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
     )
 
 
-def _catalog_item_ids(need: NeedKind | None, requested: tuple[str, ...]) -> tuple[str, ...]:
+def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
+    if context.support_status is not DiagnosticStatus.COMPLETED or context.support is None:
+        return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_diagnostic_unavailable")
+    draft = context.support.draft_text.strip()
+    if not draft or _claims_external_action(draft):
+        return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_draft_guard")
+    return ResolvedTurn(
+        text=draft,
+        offered_support=context.support.suggested_support,
+    )
+
+
+def _claims_external_action(draft: str) -> bool:
+    normalized = draft.casefold().replace("ё", "е")
+    return any(marker in normalized for marker in _EXTERNAL_ACTION_MARKERS)
+
+
+def _has_signal(context: PolicyContext, kind: HardSignalKind) -> bool:
+    return context.signals is not None and any(match.kind is kind for match in context.signals.matches)
+
+
+def _concrete_need(context: PolicyContext) -> NeedKind | None:
+    if context.signals is None:
+        return None
+    return next((match.need for match in context.signals.matches if match.kind is HardSignalKind.CONCRETE_AID), None)
+
+
+def _catalog_item_ids(need: NeedKind | None) -> tuple[str, ...]:
     if need is None:
         return ()
-    allowed = tuple(item.id for item in available_aid_for_need(need))
-    requested_ids = requested or allowed
-    return tuple(item_id for item_id in requested_ids if item_id in allowed and get_aid_item(item_id))
+    return tuple(item.id for item in available_aid_for_need(need) if get_aid_item(item.id) is not None)
 
 
-def _aid_offer_text(prefix: str, item_ids: tuple[str, ...]) -> str:
+def _aid_offer_text(item_ids: tuple[str, ...]) -> str:
     descriptions = "\n".join(
         f"— {item.label}" for item_id in item_ids if (item := get_aid_item(item_id)) is not None
     )
-    lead = f"{prefix.strip()}\n\n" if prefix.strip() else ""
-    return f"{lead}Вот что можем предложить сейчас:\n\n{descriptions}\n\nЧто сейчас ближе?"
+    return f"Вот что можем предложить сейчас:\n\n{descriptions}\n\nЧто сейчас ближе?"
 
 
-def _with_safety_side_effect(risk: RiskAssessment, decision: ResolvedTurn) -> ResolvedTurn:
-    if risk.level not in {RiskLevel.CONCERN, RiskLevel.URGENT}:
-        return decision
-    return decision.model_copy(
-        update={"side_effects": (*decision.side_effects, PolicySideEffect.RECORD_SAFETY)}
-    )
-
-
-def _finalize_turn(risk: RiskAssessment, state: str, decision: ResolvedTurn) -> ResolvedTurn:
-    decision = _with_safety_side_effect(risk, decision)
-    if state != ConversationState.FOLLOWUP_SENT.value:
-        return decision
-    return decision.model_copy(
-        update={"side_effects": (*decision.side_effects, PolicySideEffect.COMPLETE_FOLLOWUP)}
-    )
-
-
-def _is_consistent(plan: SupportPlan) -> bool:
-    expected_actions = {
-        SupportIntent.OPEN_CONVERSATION: (SupportAction.CONTINUE_CONVERSATION,),
-        SupportIntent.CONCRETE_NEED: (SupportAction.OFFER_AID,),
-        SupportIntent.AID_INTEREST: (SupportAction.OFFER_AID,),
-        SupportIntent.PSYCHOLOGIST_CONSIDERING: (SupportAction.CLARIFY,),
-        SupportIntent.PSYCHOLOGIST_REQUEST: (SupportAction.START_PSYCHOLOGIST_REQUEST,),
-        SupportIntent.VERIFIED_INFORMATION: (SupportAction.PROVIDE_VERIFIED_INFO,),
-        SupportIntent.EXPLICIT_HUMAN_REQUEST: (SupportAction.REQUEST_HUMAN,),
-        SupportIntent.CLOSE: (SupportAction.CLOSE,),
-    }
-    if plan.next_action not in expected_actions[plan.intent]:
-        return False
-    if plan.next_action is SupportAction.OFFER_AID:
-        return plan.need is not None
-    return True
-
-
-def _starts_new_workflow(plan: SupportPlan) -> bool:
-    return plan.next_action in {
-        SupportAction.OFFER_AID,
-        SupportAction.START_PSYCHOLOGIST_REQUEST,
-    }
+def _finalize_turn(context: PolicyContext, decision: ResolvedTurn) -> ResolvedTurn:
+    side_effects = decision.side_effects
+    if (
+        context.local_risk.level in {RiskLevel.CONCERN, RiskLevel.URGENT}
+        and PolicySideEffect.RECORD_SAFETY not in side_effects
+    ):
+        side_effects = (*side_effects, PolicySideEffect.RECORD_SAFETY)
+    if (
+        context.state == ConversationState.FOLLOWUP_SENT.value
+        and PolicySideEffect.COMPLETE_FOLLOWUP not in side_effects
+    ):
+        side_effects = (*side_effects, PolicySideEffect.COMPLETE_FOLLOWUP)
+    return decision.model_copy(update={"side_effects": side_effects})

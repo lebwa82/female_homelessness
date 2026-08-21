@@ -7,21 +7,29 @@ from pydantic_ai import PromptedOutput
 from app.agents import (
     AgentCallResult,
     AgentContext,
-    AgentEvaluation,
+    ProviderSettings,
     YandexAgentGateway,
-    parse_risk,
+    parse_safety_diagnostic,
+    parse_support_diagnostic,
     usage_audit,
     yandex_model_settings,
     yandex_output_type,
 )
-from app.domain import ChoiceSet, RiskAssessment, RiskLevel, SupportIntent, SupportPlan
+from app.domain import DiagnosticStatus, SafetyDiagnostic, SupportDiagnostic
 
 
-def test_qwen_uses_deterministic_prompted_typed_output() -> None:
+def test_qwen_uses_typed_diagnostics_and_one_provider_settings_source() -> None:
+    provider_settings = ProviderSettings(temperature=0.2, max_tokens=111, reasoning_effort="low")
+
     assert isinstance(yandex_output_type("risk"), PromptedOutput)
-    assert yandex_output_type("support").outputs is SupportPlan
-    assert yandex_model_settings()["temperature"] == 0.0
-    assert yandex_model_settings()["openai_reasoning_effort"] == "none"
+    assert yandex_output_type("risk").outputs is SafetyDiagnostic
+    assert yandex_output_type("support").outputs is SupportDiagnostic
+    assert yandex_model_settings(provider_settings) == {
+        "temperature": 0.2,
+        "max_tokens": 111,
+        "openai_reasoning_effort": "low",
+    }
+    assert provider_settings.audit_fields()["max_tokens"] == 111
 
 
 def test_usage_audit_reads_the_pydantic_ai_usage_object() -> None:
@@ -35,42 +43,93 @@ def test_usage_audit_reads_the_pydantic_ai_usage_object() -> None:
     }
 
 
-def test_parse_risk_accepts_the_model_rationale_short_alias() -> None:
-    risk, audit = parse_risk(
+def test_safety_alias_is_one_way_and_evidence_audit_never_retains_quotes() -> None:
+    diagnostic, status, audit = parse_safety_diagnostic(
         AgentCallResult(
             payload={
                 "level": "none",
                 "categories": [],
                 "confidence": 0.98,
-                "rationale_short": "no concrete danger",
+                "rationale": "canonical rationale",
+                "rationale_short": "ignored provider alias",
+                "evidence_claims": ["не хочу жить", "invented quote"],
             },
             audit={"status": "completed"},
-        )
+        ),
+        "не хочу жить",
     )
 
-    assert risk.level is RiskLevel.NONE
-    assert risk.rationale == "no concrete danger"
-    assert audit["status"] == "completed"
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None and diagnostic.rationale == "canonical rationale"
+    assert diagnostic.evidence_claims == ()
+    assert audit["rationale_alias_used"] is False
+    assert audit["evidence"]["claims"] == 2
+    assert audit["evidence"]["valid"] == 1
+    assert audit["evidence"]["invalid"] == 1
+    assert "invented quote" not in repr(audit)
+    assert "canonical rationale" not in repr(audit)
 
 
-def test_agent_evaluation_rejects_non_support_plan() -> None:
-    with pytest.raises(TypeError, match="plan must be a SupportPlan or None"):
-        AgentEvaluation(
-            risk=RiskAssessment(level=RiskLevel.NONE),
-            plan=object(),  # type: ignore[arg-type]
-            risk_audit={"status": "completed"},
-            support_audit={"status": "completed"},
-        )
+def test_safety_alias_audit_flag_does_not_require_the_excluded_provider_field() -> None:
+    """A live typed output may retain the alias audit flag but exclude its source field."""
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(
+            payload={
+                "level": "none",
+                "categories": [],
+                "confidence": 0.98,
+                "rationale": "normalized rationale",
+            },
+            audit={"status": "completed", "rationale_alias_used": True},
+        ),
+        "безопасно",
+    )
+
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None and diagnostic.rationale == "normalized rationale"
+    assert audit["rationale_alias_used"] is True
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    (
+        ({}, DiagnosticStatus.INVALID),
+        ({"intent": "open_conversation", "draft_text": "Я рядом.", "choice_set": "none"}, DiagnosticStatus.INVALID),
+    ),
+)
+def test_invalid_support_diagnostic_never_becomes_a_semantic_risk(
+    payload: dict[str, object], expected: DiagnosticStatus
+) -> None:
+    diagnostic, status, audit = parse_support_diagnostic(
+        AgentCallResult(payload=payload, audit={"status": "completed"}),
+        "мне нужно выговориться",
+    )
+
+    assert diagnostic is None
+    assert status is expected
+    assert audit["diagnostic_status"] == "invalid"
+
+
+def test_transport_failure_is_unavailable_not_a_synthetic_unknown_risk() -> None:
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(payload={}, audit={"status": "error", "error_type": "TimeoutError"}),
+        "мне нужна еда",
+    )
+
+    assert diagnostic is None
+    assert status is DiagnosticStatus.UNAVAILABLE
+    assert audit["diagnostic_status"] == "unavailable"
 
 
 @pytest.mark.asyncio
-async def test_evaluate_starts_risk_and_support_calls_concurrently() -> None:
+async def test_evaluate_starts_exactly_two_calls_concurrently_and_keeps_actions_out_of_schema() -> None:
     started: set[str] = set()
     in_flight = 0
     max_in_flight = 0
 
     async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
         nonlocal in_flight, max_in_flight
+        del instructions, input_text
         started.add(agent_name)
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
@@ -79,95 +138,25 @@ async def test_evaluate_starts_risk_and_support_calls_concurrently() -> None:
         payload = (
             {"level": "none", "categories": [], "confidence": 0.98, "rationale": "safe"}
             if agent_name == "risk"
-            else {
-                "intent": "open_conversation",
-                "next_action": "continue_conversation",
-                "text": "Я могу вас выслушать. Что сейчас особенно тяжело?",
-                "choice_set": "none",
-                "catalog_item_ids": [],
-            }
+            else {"intent": "open_conversation", "draft_text": "Я могу вас выслушать."}
         )
         return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
 
-    result = await YandexAgentGateway(call=call).evaluate(
-        AgentContext(history=(("user", "Мне нужна еда"),), state="discovering_need")
+    gateway = YandexAgentGateway(
+        call=call,
+        provider_settings=ProviderSettings(max_tokens=271, data_logging_enabled=False),
+    )
+    result = await gateway.evaluate(
+        AgentContext(history=(("user", "Мне нужна еда"),), state="open_conversation")
     )
 
     assert started == {"risk", "support"}
     assert max_in_flight == 2
-    assert result.risk.level is RiskLevel.NONE
-    assert result.plan.intent is SupportIntent.OPEN_CONVERSATION
-    assert result.plan.choice_set is ChoiceSet.NONE
-
-
-@pytest.mark.asyncio
-async def test_human_request_is_instructed_and_parsed_as_no_safety_risk() -> None:
-    captured_risk_instruction = ""
-
-    async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
-        nonlocal captured_risk_instruction
-        if agent_name == "risk":
-            captured_risk_instruction = instructions
-            assert "хочу поговорить с человеком" in input_text
-            payload = {"level": "none", "categories": [], "confidence": 0.98, "rationale": "safe"}
-        else:
-            payload = {
-                "intent": "open_conversation",
-                "next_action": "continue_conversation",
-                "text": "Я рядом.",
-                "choice_set": "none",
-                "catalog_item_ids": [],
-            }
-        return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
-
-    result = await YandexAgentGateway(call=call).evaluate(
-        AgentContext(history=(("user", "хочу поговорить с человеком"),), state="open_conversation")
-    )
-
-    assert "human_requested" not in captured_risk_instruction
-    assert "Просьба поговорить с человеком не является риском." in captured_risk_instruction
-    assert result.risk.level is RiskLevel.NONE
-
-
-@pytest.mark.asyncio
-async def test_gateway_instructions_keep_safety_and_support_plans_high_precision() -> None:
-    captured: dict[str, str] = {}
-
-    async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
-        del input_text
-        captured[agent_name] = " ".join(instructions.split())
-        if agent_name == "risk":
-            payload = {"level": "none", "categories": [], "confidence": 0.98, "rationale": "safe"}
-        else:
-            payload = {
-                "intent": "open_conversation",
-                "next_action": "continue_conversation",
-                "text": "Я рядом.",
-                "choice_set": "none",
-                "catalog_item_ids": [],
-            }
-        return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
-
-    result = await YandexAgentGateway(call=call).evaluate(
-        AgentContext(history=(("user", "мне нужна поддержка"),), state="open_conversation")
-    )
-
-    assert result.risk_audit["status"] == "completed"
-    assert result.support_audit["status"] == "completed"
-    assert result.risk_audit["request"]["temperature"] == 0.0
-    assert result.support_audit["request"]["temperature"] == 0.0
-    assert result.plan is not None
-    assert "Не выводи concern из одиночества, усталости, горя, просьбы выслушать" in captured["risk"]
-    assert "Без прямого указания на угрозу, страх насилия или нестабильное жильё выбирай none." in captured["risk"]
-    assert "Верни поля level, categories, confidence и rationale; не используй rationale_short." in captured["risk"]
-    assert "Нехватка еды или денег сама по себе — none, а не concern." in captured["risk"]
-    assert "Urgent выбирай только при явно негде ночевать сегодня или выселении прямо сейчас." in captured["risk"]
-    assert "без need не выбирай offer_aid" in captured["support"]
-    assert "psychologist_considering/clarify и choice_set=psychologist_interest" in captured["support"]
-    assert "Выраженная потребность в помощи или интерес к доступным вариантам" in captured["support"]
-    assert "Даже при urgent жилье верни concrete_need/offer_aid с need=housing." in captured["support"]
-    assert "Вопрос об условиях или возможности психолога не возвращай как open_conversation." in captured["support"]
-    assert "Описание опасности без практической просьбы о помощи остаётся open_conversation." in captured["support"]
+    assert result.safety_status is DiagnosticStatus.COMPLETED
+    assert result.support_status is DiagnosticStatus.COMPLETED
+    assert result.support is not None and result.support.draft_text == "Я могу вас выслушать."
+    assert result.safety_audit["request"]["max_tokens"] == 271
+    assert result.support_audit["request"] == result.safety_audit["request"]
 
 
 @pytest.mark.asyncio
@@ -175,47 +164,24 @@ async def test_gateway_masks_transcript_and_audit_excludes_raw_message() -> None
     captured: list[str] = []
 
     async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
+        del instructions
         captured.append(input_text)
         payload = (
             {"level": "none", "categories": [], "confidence": 0.98, "rationale": "safe"}
             if agent_name == "risk"
-            else {
-                "intent": "open_conversation",
-                "next_action": "continue_conversation",
-                "text": "Что сейчас важнее всего?",
-                "choice_set": "none",
-                "catalog_item_ids": [],
-            }
+            else {"intent": "open_conversation", "draft_text": "Я рядом."}
         )
         return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
 
     result = await YandexAgentGateway(call=call).evaluate(
         AgentContext(
             history=(("user", "Меня зовут Анна Иванова, телефон +7 999 123-45-67"),),
-            state="discovering_need",
+            state="open_conversation",
         )
     )
 
     assert len(captured) == 2
     assert all("Анна" not in text and "999" not in text for text in captured)
-    assert all("input_text" not in audit for audit in (result.risk_audit, result.support_audit))
-    assert result.risk_audit["input_hash"]
+    assert all("input_text" not in audit for audit in (result.safety_audit, result.support_audit))
+    assert result.safety_audit["input_hash"]
     assert result.support_audit["input_hash"]
-    assert result.support_audit["request"]["max_tokens"] == 300
-    assert result.support_audit["request"]["reasoning_effort"] == "none"
-    assert result.support_audit["request"]["data_logging_enabled"] is False
-
-
-@pytest.mark.asyncio
-async def test_invalid_support_payload_is_reported_without_exposing_provider_error() -> None:
-    async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
-        payload = {"level": "none"} if agent_name == "risk" else {"intent": "invented", "text": "x"}
-        return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
-
-    result = await YandexAgentGateway(call=call).evaluate(
-        AgentContext(history=(("user", "еда"),), state="discovering_need")
-    )
-
-    assert result.plan is None
-    assert result.support_audit["status"] == "validation_error"
-    assert "error_message" not in result.support_audit

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from app.agents import AgentEvaluation
-from app.domain import RiskAssessment, RiskLevel, SupportPlan
+from app.domain import DiagnosticStatus, RiskLevel, SafetyDiagnostic, SupportDiagnostic
 from scripts.llm_health_check import check_structured
 
 
@@ -11,13 +11,14 @@ from scripts.llm_health_check import check_structured
 class HealthyGateway:
     async def evaluate(self, context):  # type: ignore[no-untyped-def]
         return AgentEvaluation(
-            risk=RiskAssessment(level=RiskLevel.NONE, detector="model"),
-            plan=SupportPlan(
+            safety=SafetyDiagnostic(level=RiskLevel.NONE, confidence=1.0, rationale="diagnostic"),
+            support=SupportDiagnostic(
                 intent="open_conversation",
-                next_action="continue_conversation",
-                text="Я рядом.",
+                draft_text="Я рядом.",
             ),
-            risk_audit={"status": "completed"},
+            safety_status=DiagnosticStatus.COMPLETED,
+            support_status=DiagnosticStatus.COMPLETED,
+            safety_audit={"status": "completed"},
             support_audit={"status": "completed"},
         )
 
@@ -26,9 +27,11 @@ class HealthyGateway:
 class UnhealthyGateway:
     async def evaluate(self, context):  # type: ignore[no-untyped-def]
         return AgentEvaluation(
-            risk=RiskAssessment(level=RiskLevel.UNKNOWN, detector="model"),
-            plan=None,
-            risk_audit={"status": "validation_error"},
+            safety=None,
+            support=None,
+            safety_status=DiagnosticStatus.INVALID,
+            support_status=DiagnosticStatus.INVALID,
+            safety_audit={"status": "validation_error"},
             support_audit={"status": "validation_error"},
         )
 

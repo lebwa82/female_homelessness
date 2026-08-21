@@ -15,17 +15,18 @@ from app.domain import (
     EscalationRequest,
     IncomingMessage,
     NeedKind,
+    PolicyContext,
     PolicyEffect,
     PolicySideEffect,
     ResolvedTurn,
     RiskAssessment,
     RiskLevel,
-    SupportIntent,
     SupportOffer,
 )
 from app.knowledge import find_verified_articles, format_verified_context
-from app.policy import HUMAN_HANDOFF_PROMPT, resolve_turn, resolve_workflow_turn
-from app.safety import assess_local_risk, merge_risk
+from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, resolve_turn
+from app.safety import assess_local_risk_from_signals
+from app.signals import MATCHER_VERSION, extract_signals
 from app.store import ConversationRecord, PostgresConversationStore
 from app.ui import (
     CONTACT_CHOICES,
@@ -223,51 +224,43 @@ class ConversationService:
         )
         await self.store.record_agent_run(record, "risk", evaluation.risk_audit)
         await self.store.record_agent_run(record, "support", evaluation.support_audit)
-        merged = merge_risk(assess_local_risk(incoming.text), evaluation.risk)
-        await self.store.record_risk(record, merged)
-        state_before = record.state
-        decision = resolve_turn(merged, evaluation.plan, state_before)
-
-        if (
-            evaluation.plan is None
-            or evaluation.plan.intent is not SupportIntent.OPEN_CONVERSATION
-        ):
-            decision = decision.model_copy(update={"offered_support": None})
-
-        if (
-            decision.effect is PolicyEffect.NONE
-            and merged.level is not RiskLevel.UNKNOWN
-            and record.state
-            in {
-                ConversationState.CHOOSING_AID.value,
-                ConversationState.COLLECTING_LOCATION.value,
-                ConversationState.COLLECTING_CONTACT_METHOD.value,
-                ConversationState.COLLECTING_CONTACT_VALUE.value,
-                ConversationState.AID_REQUESTED.value,
-            }
-        ):
-            decision = resolve_workflow_turn(merged, state_before, incoming.text, record.need)
-
-        if (
-            decision.choice_set is ChoiceSet.PSYCHOLOGIST_INTEREST
-            and record.pending_offer != SupportOffer.PSYCHOLOGIST.value
-        ):
-            decision = decision.model_copy(
-                update={"choice_set": ChoiceSet.NONE, "fallback_reason": "pending_offer_required"}
+        try:
+            pending_offer = SupportOffer(record.pending_offer) if record.pending_offer else None
+            signals = extract_signals(incoming.text, pending_offer=pending_offer)
+            local_risk = assess_local_risk_from_signals(signals)
+        except Exception:  # noqa: BLE001 - a local inspection failure has its own deterministic route
+            signals = None
+            local_risk = RiskAssessment(
+                level=RiskLevel.UNKNOWN,
+                rationale="local inspection unavailable",
+                detector="local-signals",
             )
-
-        turn = await self._execute_resolved_turn(record, decision, merged)
-        audit_plan = (
-            None
-            if decision.effect
-            in {
-                PolicyEffect.CAPTURE_LOCATION,
-                PolicyEffect.COMPLETE_CONTACT,
-                PolicyEffect.REPLAY_WORKFLOW,
-            }
-            else evaluation.plan
+        await self.store.record_risk(record, local_risk)
+        state_before = record.state
+        decision = resolve_turn(
+            PolicyContext(
+                state=state_before,
+                signals=signals,
+                local_risk=local_risk,
+                safety_status=evaluation.safety_status,
+                support_status=evaluation.support_status,
+                safety=evaluation.safety,
+                support=evaluation.support,
+                pending_offer=pending_offer,
+                workflow_value=incoming.text,
+                need=record.need,
+            )
         )
-        await self._record_policy_decision(record, state_before, merged, audit_plan, decision, turn)
+        turn = await self._execute_resolved_turn(record, decision, local_risk)
+        await self._record_policy_decision(
+            record,
+            state_before,
+            local_risk,
+            signals,
+            evaluation,
+            decision,
+            turn,
+        )
         return turn
 
     async def _handle_need_choice(self, record: ConversationRecord, raw_need: str) -> AgentTurn:
@@ -384,7 +377,7 @@ class ConversationService:
             await self.store.create_escalation(
                 record,
                 handoff_request
-                or EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason="support_plan"),
+                or EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason="verified_signal"),
             )
             await self.store.update(record, state=ConversationState.OPEN_CONVERSATION.value)
             await self.store.record_action(record, "human_handoff", "simulated")
@@ -395,6 +388,13 @@ class ConversationService:
                 need=decision.need.value,
                 pending_offer=None,
                 state=ConversationState.CHOOSING_AID.value,
+            )
+            return self._render_resolved_turn(decision)
+        if decision.effect is PolicyEffect.START_NEED_DISCOVERY:
+            await self.store.update(
+                record,
+                pending_offer=None,
+                state=ConversationState.DISCOVERING_NEED.value,
             )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.START_PSYCHOLOGIST_REQUEST:
@@ -420,7 +420,17 @@ class ConversationService:
             await self.store.update(record, pending_offer=None, state=ConversationState.CLOSED.value)
             return self._render_resolved_turn(decision)
 
-        update_values: dict[str, str | None] = {"state": ConversationState.OPEN_CONVERSATION.value}
+        update_values: dict[str, str | None] = {
+            "state": ConversationState.OPEN_CONVERSATION.value,
+            # A diagnostic offer only authorizes interpretation of the immediately following
+            # acknowledgement.  Keep it for the rendered callback, but never let it drift
+            # through an unrelated later text turn.
+            "pending_offer": (
+                record.pending_offer
+                if decision.choice_set is ChoiceSet.PSYCHOLOGIST_INTEREST
+                else None
+            ),
+        }
         if decision.offered_support is not None:
             update_values["pending_offer"] = decision.offered_support.value
         await self.store.update(record, **update_values)
@@ -438,7 +448,8 @@ class ConversationService:
         record: ConversationRecord,
         state_before: str,
         assessment: RiskAssessment,
-        plan: Any,
+        signals: Any,
+        evaluation: Any,
         decision: ResolvedTurn,
         turn: AgentTurn,
     ) -> None:
@@ -447,11 +458,16 @@ class ConversationService:
             "policy_decision",
             "completed",
             {
+                "policy_version": POLICY_VERSION,
+                "matcher_version": signals.matcher_version if signals is not None else MATCHER_VERSION,
                 "state_before": state_before,
                 "state_after": record.state,
-                "risk": assessment.level.value,
-                "intent": plan.intent.value if plan else None,
-                "next_action": plan.next_action.value if plan else None,
+                "local_risk": assessment.level.value,
+                "safety_label": evaluation.safety.level.value if evaluation.safety else None,
+                "safety_status": evaluation.safety_status.value,
+                "support_intent": evaluation.support.intent.value if evaluation.support else None,
+                "support_status": evaluation.support_status.value,
+                "rule_ids": [match.rule_id for match in signals.matches] if signals is not None else [],
                 "choice_set": decision.choice_set.value,
                 "rendered_callback_ids": [choice.id for choice in turn.choices],
                 "effect": decision.effect.value,

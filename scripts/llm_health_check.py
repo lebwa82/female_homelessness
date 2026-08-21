@@ -10,7 +10,7 @@ import asyncio
 from typing import Protocol
 
 from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
-from app.domain import RiskLevel
+from app.domain import DiagnosticStatus
 
 
 class AgentGateway(Protocol):
@@ -25,10 +25,10 @@ async def check_structured(gateway: AgentGateway | None = None) -> int:
         )
     )
     healthy = (
-        evaluation.risk_audit.get("status") == "completed"
-        and evaluation.support_audit.get("status") == "completed"
-        and evaluation.risk.level is not RiskLevel.UNKNOWN
-        and evaluation.plan is not None
+        evaluation.safety_status is DiagnosticStatus.COMPLETED
+        and evaluation.support_status is DiagnosticStatus.COMPLETED
+        and evaluation.safety is not None
+        and evaluation.support is not None
     )
     if healthy:
         print("LLM health-check: structured agents ok")

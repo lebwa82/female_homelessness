@@ -1,4 +1,4 @@
-"""Two independent, structured Yandex AI Studio calls for one user message."""
+"""Two concurrent Yandex calls that produce diagnostics, never product actions."""
 
 from __future__ import annotations
 
@@ -19,39 +19,58 @@ from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from app.config import settings
-from app.domain import RiskAssessment, RiskLevel, SupportPlan
+from app.domain import (
+    DiagnosticStatus,
+    RiskAssessment,
+    RiskLevel,
+    SafetyDiagnostic,
+    SupportDiagnostic,
+    SupportPlan,
+)
 from app.pii import redact_with_audit
 from app.skills import load_support_skills
 
-RISK_INSTRUCTIONS = """Ты классифицируешь только опасность в русскоязычном обращении.
-Верни JSON: critical — непосредственная угроза жизни, суицид или насилие сейчас;
-urgent — сегодня негде ночевать или выселение прямо сейчас; concern — страх,
-угроза или нестабильное жильё без непосредственной опасности; none — опасности
-не видно. Просьба поговорить с человеком не является риском. Не выводи concern из
-одиночества, усталости, горя, просьбы выслушать, просьбы о человеке или психологе,
-либо обычной потребности в помощи. Без прямого указания на угрозу, страх насилия или
-нестабильное жильё выбирай none. Верни поля level, categories, confidence и rationale;
-не используй rationale_short. Нехватка еды или денег сама по себе — none, а не concern.
-Urgent выбирай только при явно негде ночевать сегодня или выселении прямо сейчас.
-Страх или нестабильное жильё без этого — concern."""
+RISK_INSTRUCTIONS = """Ты даёшь только диагностическую оценку опасности в русскоязычном обращении.
+Верни JSON с level: critical для непосредственной угрозы жизни, суицида или насилия сейчас;
+urgent для ситуации «сегодня негде ночевать» или выселения прямо сейчас; concern для страха,
+угрозы или нестабильного жилья без непосредственной опасности; none если опасности не видно.
+Просьба поговорить с человеком, ботом или психологом не является риском. Верни только поля
+level, categories, confidence, rationale и optional evidence_claims. evidence_claims — точные
+короткие фрагменты текущего сообщения, без пересказа. Не предлагай действий, кнопок или переходов."""
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
-Верни SupportPlan. Просьбы «выслушай», «хочу выговориться» и «можно с тобой
-поговорить» — open_conversation/continue_conversation, не handoff. Только явные
-«позовите человека», «хочу живого специалиста», «не хочу говорить с ботом» —
-explicit_human_request/request_human. Не показывай need_categories в обычном
-разговоре. Психолога сначала мягко предложи текстом с offered_support=psychologist;
-при осторожном интересе используй psychologist_considering, а при однозначном
-согласии — psychologist_request/start_psychologist_request. Если пользователь
-спрашивает о психологе или отвечает осторожным интересом, используй
-psychologist_considering/clarify и choice_set=psychologist_interest. Для concrete_need
-или aid_interest обязательно укажи need: housing, food_money, legal, support, children
-или other; без need не выбирай offer_aid. Выраженная потребность в помощи или интерес
-к доступным вариантам — concrete_need либо aid_interest с offer_aid и подходящим need,
-а не open_conversation. Даже при urgent жилье верни concrete_need/offer_aid с
-need=housing. Вопрос об условиях или возможности психолога не возвращай как
-open_conversation. Описание опасности без практической просьбы о помощи остаётся
-open_conversation. Не создавай callback ID."""
+Верни только диагностический JSON: intent, optional need_hint, optional evidence_claims,
+draft_text и optional suggested_support=psychologist. draft_text — честная разговорная реплика,
+без обещаний, что человек уже позван, заявка сохранена, помощь организована или контакт передан.
+Не возвращай action, next_action, choice_set, catalog_item_ids, callback IDs, workflow state,
+effect, переход или описание выполненного внешнего действия. Просьбы «выслушай», «хочу
+выговориться» и «можно с тобой поговорить» — разговор, а не handoff."""
+
+
+@dataclass(frozen=True)
+class ProviderSettings:
+    temperature: float = 0.0
+    max_tokens: int = 300
+    reasoning_effort: str = "none"
+    data_logging_enabled: bool = False
+
+    def model_settings(self) -> OpenAIResponsesModelSettings:
+        return OpenAIResponsesModelSettings(
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            openai_reasoning_effort=self.reasoning_effort,
+        )
+
+    def audit_fields(self) -> dict[str, Any]:
+        return {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "reasoning_effort": self.reasoning_effort,
+            "data_logging_enabled": self.data_logging_enabled,
+        }
+
+
+DEFAULT_PROVIDER_SETTINGS = ProviderSettings()
 
 
 @dataclass(frozen=True)
@@ -68,35 +87,90 @@ class AgentCallResult:
     audit: dict[str, Any]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class AgentEvaluation:
-    risk: RiskAssessment
-    plan: SupportPlan | None
-    risk_audit: dict[str, Any]
+    """Gateway result with transport health isolated from semantic model labels.
+
+    Legacy fixture inputs are converted at construction, but the result exposes only
+    diagnostics and their statuses. Production text handling consumes those values only.
+    """
+
+    safety: SafetyDiagnostic | None
+    support: SupportDiagnostic | None
+    safety_status: DiagnosticStatus
+    support_status: DiagnosticStatus
+    safety_audit: dict[str, Any]
     support_audit: dict[str, Any]
 
-    def __post_init__(self) -> None:
-        if self.plan is not None and not isinstance(self.plan, SupportPlan):
+    def __init__(
+        self,
+        *,
+        safety: SafetyDiagnostic | None = None,
+        support: SupportDiagnostic | None = None,
+        safety_status: DiagnosticStatus | None = None,
+        support_status: DiagnosticStatus | None = None,
+        safety_audit: dict[str, Any] | None = None,
+        support_audit: dict[str, Any] | None = None,
+        risk: RiskAssessment | None = None,
+        plan: SupportPlan | None = None,
+        risk_audit: dict[str, Any] | None = None,
+    ) -> None:
+        if safety is not None and not isinstance(safety, SafetyDiagnostic):
+            raise TypeError("safety must be a SafetyDiagnostic or None")
+        if support is not None and not isinstance(support, SupportDiagnostic):
+            raise TypeError("support must be a SupportDiagnostic or None")
+        if risk is not None and not isinstance(risk, RiskAssessment):
+            raise TypeError("risk must be a RiskAssessment or None")
+        if plan is not None and not isinstance(plan, SupportPlan):
             raise TypeError("plan must be a SupportPlan or None")
+        if safety is None and risk is not None:
+            safety = SafetyDiagnostic(
+                level=risk.level,
+                categories=risk.categories,
+                confidence=risk.confidence,
+                rationale=risk.rationale or "legacy diagnostic",
+            )
+        if support is None and plan is not None:
+            support = SupportDiagnostic(
+                intent=plan.intent,
+                need_hint=plan.need,
+                draft_text=plan.text,
+                suggested_support=plan.offered_support,
+            )
+        object.__setattr__(self, "safety", safety)
+        object.__setattr__(self, "support", support)
+        object.__setattr__(
+            self,
+            "safety_status",
+            safety_status or (DiagnosticStatus.COMPLETED if safety is not None else DiagnosticStatus.UNAVAILABLE),
+        )
+        object.__setattr__(
+            self,
+            "support_status",
+            support_status or (DiagnosticStatus.COMPLETED if support is not None else DiagnosticStatus.UNAVAILABLE),
+        )
+        object.__setattr__(self, "safety_audit", dict(safety_audit or risk_audit or {}))
+        object.__setattr__(self, "support_audit", dict(support_audit or {}))
+
+    @property
+    def risk_audit(self) -> dict[str, Any]:
+        return self.safety_audit
 
 
 Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
 
 
-def yandex_model_settings() -> OpenAIResponsesModelSettings:
-    """Use Qwen without reasoning to preserve a bounded conversational response."""
-    return OpenAIResponsesModelSettings(
-        temperature=0.0,
-        max_tokens=300,
-        openai_reasoning_effort="none",
-    )
+def yandex_model_settings(
+    provider_settings: ProviderSettings = DEFAULT_PROVIDER_SETTINGS,
+) -> OpenAIResponsesModelSettings:
+    return provider_settings.model_settings()
 
 
 def yandex_output_type(agent_name: str) -> PromptedOutput[Any]:
-    """Keep Pydantic validation while avoiding Qwen's unsupported native JSON schema mode."""
+    output = SafetyDiagnostic if agent_name == "risk" else SupportDiagnostic
     return PromptedOutput(
-        RiskAssessment if agent_name == "risk" else SupportPlan,
-        name=f"{agent_name}_result",
+        output,
+        name=f"{agent_name}_diagnostic",
         description="Верни только один JSON-объект, соответствующий этой схеме.",
     )
 
@@ -111,30 +185,40 @@ def usage_audit(usage: Any) -> dict[str, int]:
 
 
 class YandexAgentGateway:
-    """Owns provider transport; product state and side effects remain outside it."""
+    """Provider boundary. Product behavior is resolved after both calls complete."""
 
-    def __init__(self, call: Call | None = None) -> None:
+    def __init__(
+        self,
+        call: Call | None = None,
+        provider_settings: ProviderSettings = DEFAULT_PROVIDER_SETTINGS,
+    ) -> None:
         self._call = call or self._call_live
+        self._provider_settings = provider_settings
 
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
         transcript, pii_audit = format_redacted_transcript(context.history)
-        context_text = format_agent_context(context, transcript)
-        risk_task = asyncio.create_task(self._run("risk", RISK_INSTRUCTIONS, context_text, pii_audit))
+        current_user_text = _current_user_text(context.history)
+        current_redacted = redact_with_audit(current_user_text).text
+        safety_task = asyncio.create_task(
+            self._run("risk", RISK_INSTRUCTIONS, format_safety_context(context, current_redacted), pii_audit)
+        )
         support_task = asyncio.create_task(
             self._run(
                 "support",
                 f"{SUPPORT_INSTRUCTIONS}\n\n{load_support_skills()}",
-                context_text,
+                format_agent_context(context, transcript),
                 pii_audit,
             )
         )
-        risk_result, support_result = await asyncio.gather(risk_task, support_task)
-        risk, risk_audit = parse_risk(risk_result)
-        plan, support_audit = parse_support_plan(support_result)
+        safety_result, support_result = await asyncio.gather(safety_task, support_task)
+        safety, safety_status, safety_audit = parse_safety_diagnostic(safety_result, current_user_text)
+        support, support_status, support_audit = parse_support_diagnostic(support_result, current_user_text)
         return AgentEvaluation(
-            risk=risk,
-            plan=plan,
-            risk_audit=risk_audit,
+            safety=safety,
+            support=support,
+            safety_status=safety_status,
+            support_status=support_status,
+            safety_audit=safety_audit,
             support_audit=support_audit,
         )
 
@@ -144,25 +228,19 @@ class YandexAgentGateway:
         input_hash = hashlib.sha256(input_text.encode()).hexdigest()
         try:
             result = await self._call(agent_name, instructions, input_text)
-        except Exception as error:  # noqa: BLE001 - provider boundary must degrade without exposing content
-            result = AgentCallResult(
-                payload={},
-                audit={"status": "error", "error_type": type(error).__name__},
-            )
-        audit = {
-            "provider": "yandex_ai_studio",
-            "agent": agent_name,
-            "input_hash": input_hash,
-            "request": {
-                "temperature": 0.0,
-                "max_tokens": 300,
-                "reasoning_effort": "none",
-                "data_logging_enabled": False,
+        except Exception as error:  # noqa: BLE001 - provider boundary must not expose provider content
+            result = AgentCallResult(payload={}, audit={"status": "error", "error_type": type(error).__name__})
+        return AgentCallResult(
+            payload=result.payload,
+            audit={
+                "provider": "yandex_ai_studio",
+                "agent": agent_name,
+                "input_hash": input_hash,
+                "request": self._provider_settings.audit_fields(),
+                "pii_redaction": pii_audit,
+                **result.audit,
             },
-            "pii_redaction": pii_audit,
-            **result.audit,
-        }
-        return AgentCallResult(payload=result.payload, audit=audit)
+        )
 
     async def _call_live(self, agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
         if not settings.llm_enabled or not settings.yandex_ai_api_key:
@@ -173,7 +251,7 @@ class YandexAgentGateway:
             project=settings.yandex_cloud_folder_id,
             default_headers={"x-data-logging-enabled": "false"},
             timeout=12.0,
-            max_retries=1,
+            max_retries=0,
         )
         started = perf_counter()
         try:
@@ -186,25 +264,26 @@ class YandexAgentGateway:
                 model,
                 output_type=yandex_output_type(agent_name),
                 instructions=instructions,
-                model_settings=yandex_model_settings(),
+                model_settings=yandex_model_settings(self._provider_settings),
                 retries=0,
             )
             result = await agent.run(input_text)
             output = result.output
-            payload = output.model_dump(mode="json")
-            usage = result.usage
             response = result.response
             return AgentCallResult(
-                payload=payload,
+                payload=output.model_dump(mode="json"),
                 audit={
                     "status": "completed",
+                    "rationale_alias_used": bool(
+                        getattr(output, "rationale_alias_used", False)
+                    ),
                     "response_id": getattr(response, "provider_response_id", None),
                     "model": getattr(response, "model_name", None),
                     "latency_ms": round((perf_counter() - started) * 1000),
-                    "usage": usage_audit(usage),
+                    "usage": usage_audit(result.usage),
                 },
             )
-        except Exception as error:  # noqa: BLE001 - SDK/provider errors share no stable base exception
+        except Exception as error:  # noqa: BLE001 - SDK/provider errors have no stable common base
             origin = traceback.extract_tb(error.__traceback__)[-1]
             return AgentCallResult(
                 payload={},
@@ -238,34 +317,85 @@ def format_redacted_transcript(history: tuple[tuple[str, str], ...]) -> tuple[st
     }
 
 
+def format_safety_context(context: AgentContext, current_user_text: str) -> str:
+    return f"Состояние диалога: {context.state}\n\nТекущее сообщение пользователя:\n{current_user_text}"
+
+
 def format_agent_context(context: AgentContext, transcript: str) -> str:
     catalog = "\n".join(f"- {item}" for item in context.catalog) or "- каталог пока не нужен"
     knowledge = "\n".join(f"- {item}" for item in context.knowledge) or "- проверенной справки нет"
     return (
-        f"Состояние диалога: {context.state}\n\n"
-        f"Доступная помощь:\n{catalog}\n\n"
-        f"Проверенная информация:\n{knowledge}\n\n"
-        f"История:\n{transcript}"
+        f"Состояние диалога: {context.state}\n\nДоступная помощь:\n{catalog}\n\n"
+        f"Проверенная информация:\n{knowledge}\n\nИстория:\n{transcript}"
     )
 
 
-def parse_risk(result: AgentCallResult) -> tuple[RiskAssessment, dict[str, Any]]:
+def parse_safety_diagnostic(
+    result: AgentCallResult,
+    current_user_text: str,
+) -> tuple[SafetyDiagnostic | None, DiagnosticStatus, dict[str, Any]]:
+    if result.audit.get("status") != "completed":
+        return None, DiagnosticStatus.UNAVAILABLE, _diagnostic_audit(result.audit, DiagnosticStatus.UNAVAILABLE)
     payload = dict(result.payload)
-    rationale_short = payload.pop("rationale_short", None)
-    if "rationale" not in payload and rationale_short is not None:
-        payload["rationale"] = rationale_short
+    alias_used = bool(result.audit.get("rationale_alias_used")) or (
+        "rationale" not in payload and "rationale_short" in payload
+    )
+    alias_value = payload.pop("rationale_short", None)
+    if "rationale" not in payload and alias_value is not None:
+        payload["rationale"] = alias_value
     try:
-        assessment = RiskAssessment.model_validate({**payload, "detector": "model"})
+        diagnostic = SafetyDiagnostic.model_validate(payload)
     except ValidationError:
-        return (
-            RiskAssessment(level=RiskLevel.UNKNOWN, detector="model", rationale="model response unavailable"),
-            {**result.audit, "status": "validation_error"},
-        )
-    return assessment, result.audit
+        return None, DiagnosticStatus.INVALID, _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+    audit = _diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED)
+    audit["rationale_alias_used"] = alias_used
+    audit["evidence"] = _validate_evidence_claims(diagnostic.evidence_claims, current_user_text)
+    return diagnostic.model_copy(update={"evidence_claims": ()}), DiagnosticStatus.COMPLETED, audit
 
 
-def parse_support_plan(result: AgentCallResult) -> tuple[SupportPlan | None, dict[str, Any]]:
+def parse_support_diagnostic(
+    result: AgentCallResult,
+    current_user_text: str,
+) -> tuple[SupportDiagnostic | None, DiagnosticStatus, dict[str, Any]]:
+    if result.audit.get("status") != "completed":
+        return None, DiagnosticStatus.UNAVAILABLE, _diagnostic_audit(result.audit, DiagnosticStatus.UNAVAILABLE)
+    payload = dict(result.payload)
     try:
-        return SupportPlan.model_validate(result.payload), result.audit
+        diagnostic = SupportDiagnostic.model_validate(payload)
     except ValidationError:
-        return None, {**result.audit, "status": "validation_error"}
+        return None, DiagnosticStatus.INVALID, _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+    audit = _diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED)
+    audit["evidence"] = _validate_evidence_claims(diagnostic.evidence_claims, current_user_text)
+    return diagnostic.model_copy(update={"evidence_claims": ()}), DiagnosticStatus.COMPLETED, audit
+
+
+def parse_risk(result: AgentCallResult) -> tuple[RiskAssessment, dict[str, Any]]:
+    """Compatibility adapter; production flow uses `parse_safety_diagnostic`."""
+    diagnostic, _, audit = parse_safety_diagnostic(result, "")
+    if diagnostic is None:
+        return RiskAssessment(level=RiskLevel.NONE, detector="diagnostic-unavailable"), audit
+    return RiskAssessment(
+        level=diagnostic.level,
+        categories=diagnostic.categories,
+        confidence=diagnostic.confidence,
+        rationale=diagnostic.rationale,
+        detector="model-diagnostic",
+    ), audit
+
+
+def _current_user_text(history: tuple[tuple[str, str], ...]) -> str:
+    return next((content for role, content in reversed(history) if role == "user"), "")
+
+
+def _validate_evidence_claims(claims: tuple[str, ...], current_user_text: str) -> dict[str, Any]:
+    valid = tuple(claim for claim in claims if claim and claim in current_user_text)
+    return {
+        "claims": len(claims),
+        "valid": len(valid),
+        "invalid": len(claims) - len(valid),
+        "hashes": [hashlib.sha256(claim.encode()).hexdigest() for claim in claims],
+    }
+
+
+def _diagnostic_audit(audit: dict[str, Any], status: DiagnosticStatus) -> dict[str, Any]:
+    return {**audit, "status": status.value, "diagnostic_status": status.value}

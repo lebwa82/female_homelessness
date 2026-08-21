@@ -6,7 +6,13 @@ import asyncio
 from dataclasses import dataclass
 
 from app.agents import AgentContext, AgentEvaluation
-from app.domain import IncomingMessage, RiskAssessment, RiskLevel, SupportPlan
+from app.domain import (
+    DiagnosticStatus,
+    IncomingMessage,
+    RiskLevel,
+    SafetyDiagnostic,
+    SupportDiagnostic,
+)
 from app.service import ConversationService
 from app.store import InMemoryConversationStore
 
@@ -15,13 +21,14 @@ from app.store import InMemoryConversationStore
 class SmokeGateway:
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
         return AgentEvaluation(
-            risk=RiskAssessment(level=RiskLevel.NONE, detector="smoke"),
-            plan=SupportPlan(
+            safety=SafetyDiagnostic(level=RiskLevel.NONE, confidence=1.0, rationale="smoke"),
+            support=SupportDiagnostic(
                 intent="open_conversation",
-                next_action="continue_conversation",
-                text="Что сейчас важнее всего?",
+                draft_text="Что сейчас важнее всего?",
             ),
-            risk_audit={"status": "completed"},
+            safety_status=DiagnosticStatus.COMPLETED,
+            support_status=DiagnosticStatus.COMPLETED,
+            safety_audit={"status": "completed"},
             support_audit={"status": "completed"},
         )
 
@@ -30,13 +37,14 @@ class SmokeGateway:
 class PsychologistSmokeGateway:
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
         return AgentEvaluation(
-            risk=RiskAssessment(level=RiskLevel.NONE, detector="smoke"),
-            plan=SupportPlan(
+            safety=SafetyDiagnostic(level=RiskLevel.NONE, confidence=1.0, rationale="smoke"),
+            support=SupportDiagnostic(
                 intent="psychologist_request",
-                next_action="start_psychologist_request",
-                text="Начинаю запрос к психологу.",
+                draft_text="Начинаю запрос к психологу.",
             ),
-            risk_audit={"status": "completed"},
+            safety_status=DiagnosticStatus.COMPLETED,
+            support_status=DiagnosticStatus.COMPLETED,
+            safety_audit={"status": "completed"},
             support_audit={"status": "completed"},
         )
 

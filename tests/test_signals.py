@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.domain import HardSignalKind, NeedKind, SignalMatch
+from app.domain import HardSignalKind, NeedKind, SignalMatch, SupportOffer
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
 
@@ -19,10 +19,17 @@ def _fixture_text(case_id: str) -> str:
     raise AssertionError(f"missing fixture case: {case_id}")
 
 
-def _matches(text: str) -> tuple[tuple[str, str, NeedKind | None], ...]:
+def _matches(
+    text: str,
+    *,
+    pending_offer: SupportOffer | None = None,
+) -> tuple[tuple[str, str, NeedKind | None], ...]:
     from app.signals import extract_signals
 
-    return tuple((match.kind.value, match.rule_id, match.need) for match in extract_signals(text).matches)
+    return tuple(
+        (match.kind.value, match.rule_id, match.need)
+        for match in extract_signals(text, pending_offer=pending_offer).matches
+    )
 
 
 @pytest.mark.parametrize(
@@ -132,6 +139,18 @@ def test_psychologist_rows_that_require_pending_offer_context_have_no_text_only_
         "psychologist_considering",
         "psychologist_request",
     }.intersection(kinds)
+
+
+def test_pending_psychologist_acceptance_is_an_exact_next_turn_acknowledgement() -> None:
+    assert (
+        "psychologist_request",
+        "psychologist.pending.accept",
+        None,
+    ) in _matches("да, хочу", pending_offer=SupportOffer.PSYCHOLOGIST)
+    assert "psychologist_request" not in {
+        kind
+        for kind, _, _ in _matches("да, хочу продукты", pending_offer=SupportOffer.PSYCHOLOGIST)
+    }
 
 
 @pytest.mark.parametrize(
@@ -305,3 +324,22 @@ def test_audit_model_contains_hash_and_offsets_but_never_raw_input() -> None:
         }
     ]
     assert "private-audit-marker-7F3D" not in repr(dump)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_kind", "expected_rule"),
+    (
+        ("расскажите, пожалуйста", "psychologist_considering", "psychologist.pending.explain"),
+        ("да, хочу", "psychologist_request", "psychologist.pending.accept"),
+    ),
+)
+def test_pending_psychologist_offer_authorizes_only_bounded_followup_signals(
+    text: str, expected_kind: str, expected_rule: str
+) -> None:
+    from app.domain import SupportOffer
+    from app.signals import extract_signals
+
+    matches = extract_signals(text, pending_offer=SupportOffer.PSYCHOLOGIST)
+
+    assert (expected_kind, expected_rule, None) in _matches(text, pending_offer=SupportOffer.PSYCHOLOGIST)
+    assert matches.matches

@@ -5,6 +5,13 @@ from app.domain import AgentTurn, Choice, ChoiceSet
 from app.ui import choices_for
 
 
+def test_none_has_no_contextual_buttons_but_renders_the_global_human_affordance() -> None:
+    from app.ui import contextual_choices_for
+
+    assert contextual_choices_for(ChoiceSet.NONE) == ()
+    assert [choice.id for choice in choices_for(ChoiceSet.NONE)] == ["human"]
+
+
 def test_all_concrete_choices_render_as_stable_inline_callbacks() -> None:
     turn = AgentTurn(
         text="Что выбрать?",

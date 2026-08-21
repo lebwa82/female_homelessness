@@ -55,25 +55,32 @@ PSYCHOLOGIST_INTEREST_CHOICES = (
 )
 
 _CHOICES_BY_SET = {
-    ChoiceSet.NONE: (HUMAN_CHOICE,),
-    ChoiceSet.SAFE_CONTINUE: SAFE_CONTINUE_CHOICES,
-    ChoiceSet.NEED_CATEGORIES: (*NEED_CHOICES, HUMAN_CHOICE),
-    ChoiceSet.PSYCHOLOGIST_INTEREST: PSYCHOLOGIST_INTEREST_CHOICES,
-    ChoiceSet.CONTACT_METHODS: (*CONTACT_CHOICES, HUMAN_CHOICE),
-    ChoiceSet.MORE_HELP: (*MORE_HELP_CHOICES, HUMAN_CHOICE),
+    ChoiceSet.NONE: (),
+    ChoiceSet.SAFE_CONTINUE: (Choice(id="continue_bot", label="Продолжить здесь"),),
+    ChoiceSet.NEED_CATEGORIES: NEED_CHOICES,
+    ChoiceSet.PSYCHOLOGIST_INTEREST: (Choice(id="support:psychologist", label="Хочу поговорить с психологом"),),
+    ChoiceSet.CONTACT_METHODS: CONTACT_CHOICES,
+    ChoiceSet.MORE_HELP: MORE_HELP_CHOICES,
 }
+
+
+def contextual_choices_for(
+    choice_set: ChoiceSet,
+    catalog_item_ids: tuple[str, ...] = (),
+) -> tuple[Choice, ...]:
+    """Render only the contextual backend-owned callbacks for a symbolic choice set."""
+    if choice_set is ChoiceSet.AID_CATALOG:
+        return tuple(
+            Choice(id=f"aid:{item.id}", label=item.label)
+            for item_id in catalog_item_ids
+            if (item := get_aid_item(item_id)) is not None
+        )
+    return _CHOICES_BY_SET[choice_set]
 
 
 def choices_for(
     choice_set: ChoiceSet,
     catalog_item_ids: tuple[str, ...] = (),
 ) -> tuple[Choice, ...]:
-    """Render only backend-owned callback IDs for a symbolic choice set."""
-    if choice_set is ChoiceSet.AID_CATALOG:
-        choices = tuple(
-            Choice(id=f"aid:{item.id}", label=item.label)
-            for item_id in catalog_item_ids
-            if (item := get_aid_item(item_id)) is not None
-        )
-        return (*choices, HUMAN_CHOICE)
-    return _CHOICES_BY_SET[choice_set]
+    """Append the permanent human affordance independently of contextual policy choices."""
+    return (*contextual_choices_for(choice_set, catalog_item_ids), HUMAN_CHOICE)

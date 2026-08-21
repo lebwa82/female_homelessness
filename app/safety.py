@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.domain import CrisisAssessment, HardSignalKind, Risk, RiskAssessment, RiskLevel
+from app.domain import (
+    CrisisAssessment,
+    DeterministicSignals,
+    HardSignalKind,
+    Risk,
+    RiskAssessment,
+    RiskLevel,
+)
 from app.signals import extract_signals
 
 _SIGNAL_RISK: dict[HardSignalKind, tuple[RiskLevel, str]] = {
@@ -20,9 +27,14 @@ _PRECEDENCE = {
 
 
 def assess_local_risk(text: str) -> RiskAssessment:
+    return assess_local_risk_from_signals(extract_signals(text))
+
+
+def assess_local_risk_from_signals(signals: DeterministicSignals) -> RiskAssessment:
+    """Assess only reviewed local matches; provider health is a separate concern."""
     matches = [
         _SIGNAL_RISK[match.kind]
-        for match in extract_signals(text).matches
+        for match in signals.matches
         if match.kind in _SIGNAL_RISK
     ]
     if not matches:

@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
 from app.domain import (
     ChoiceSet,
+    PolicyContext,
     PolicyEffect,
     PolicySideEffect,
     RiskAssessment,
@@ -22,6 +23,8 @@ from app.domain import (
     SupportPlan,
 )
 from app.policy import resolve_turn
+from app.safety import assess_local_risk_from_signals
+from app.signals import extract_signals
 
 
 class DatasetError(ValueError):
@@ -144,12 +147,30 @@ def load_fixture_outputs(path: Path | str) -> dict[str, FixtureOutput]:
 
 
 async def evaluate_case(gateway: Gateway, case: DialogueCase) -> CaseReport:
-    """Evaluate the final turn from a case history against literal invariants."""
+    """Evaluate diagnostics against a backend-owned policy projection.
+
+    This is the Task 10-facing replacement point for legacy evaluator calls that passed
+    model risk/plan outputs into policy. Fixture diagnostics remain classification inputs;
+    only the final user text's deterministic signals can select an effect or choice set.
+    """
     evaluation = await gateway.evaluate(AgentContext(history=case.history, state="open_conversation"))
-    decision = resolve_turn(evaluation.risk, evaluation.plan, "open_conversation")
+    final_user_text = _final_user_text(case.history)
+    signals = extract_signals(final_user_text)
+    decision = resolve_turn(
+        PolicyContext(
+            state="open_conversation",
+            signals=signals,
+            local_risk=assess_local_risk_from_signals(signals),
+            safety_status=evaluation.safety_status,
+            support_status=evaluation.support_status,
+            safety=evaluation.safety,
+            support=evaluation.support,
+            workflow_value=final_user_text,
+        )
+    )
     classification = {
-        "risk": evaluation.risk.level.value,
-        "intent": evaluation.plan.intent.value if evaluation.plan is not None else None,
+        "risk": evaluation.safety.level.value if evaluation.safety is not None else None,
+        "intent": evaluation.support.intent.value if evaluation.support is not None else None,
         "choice_set": decision.choice_set.value,
         "effect": decision.effect.value,
         "escalation": _has_escalation(decision.effect, decision.side_effects),
@@ -285,10 +306,9 @@ def _check_expectations(
     classification: Mapping[str, Any],
 ) -> list[str]:
     failures: list[str] = []
-    if "risk" in expected and evaluation.risk.level.value not in expected["risk"]:
+    if "risk" in expected and classification["risk"] not in expected["risk"]:
         failures.append("risk")
-    intent = evaluation.plan.intent.value if evaluation.plan is not None else None
-    if "intent" in expected and intent not in expected["intent"]:
+    if "intent" in expected and classification["intent"] not in expected["intent"]:
         failures.append("intent")
     for key in ("choice_set", "effect", "escalation"):
         if key in expected and classification[key] != expected[key]:
@@ -296,6 +316,13 @@ def _check_expectations(
     if "contains" in expected and expected["contains"] not in decision.text:
         failures.append("contains")
     return failures
+
+
+def _final_user_text(history: tuple[tuple[str, str], ...]) -> str:
+    try:
+        return next(text for role, text in reversed(history) if role == "user")
+    except StopIteration as error:
+        raise DatasetError("case history must contain a user message") from error
 
 
 def _has_escalation(effect: PolicyEffect, side_effects: tuple[PolicySideEffect, ...]) -> bool:

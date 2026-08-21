@@ -64,14 +64,22 @@ flowchart LR
 
 ### SafetyAgent
 
-SafetyAgent отвечает только на вопрос об опасности и возвращает:
+SafetyAgent отвечает только диагностическим наблюдением об опасности:
 
 ```text
-risk: none | concern | urgent | critical | unknown
+level: none | concern | urgent | critical | unknown
 categories: string[]
 confidence: 0..1
-rationale_short: string
+rationale: string
+evidence_claims?: exact-current-user-span[]
 ```
+
+`rationale` — каноническое поле. `rationale_short` принимается только как
+односторонний alias старого провайдера и фиксируется в аудите без текста
+rationale. На gateway точные evidence claims валидируются относительно
+последнего сообщения пользователя; в аудит попадают только count/status/hash,
+не цитаты. Схемная или транспортная ошибка — `DiagnosticStatus.invalid` либо
+`unavailable`, а не локальный `RiskLevel.UNKNOWN`.
 
 `human_requested` удаляется из `RiskLevel`, risk prompt, локального risk detector
 и таблицы приоритетов. Локальные правила продолжают страховать явные кризисные
@@ -79,54 +87,56 @@ rationale_short: string
 
 ### SupportAgent
 
-SupportAgent свободно формулирует реплику в рамках системного промпта, но также
-возвращает проверяемый план:
+SupportAgent свободно формулирует реплику в рамках системного промпта, но
+возвращает только диагностические поля:
 
 ```text
-intent:
-  open_conversation | concrete_need | aid_interest | psychologist_considering |
-  psychologist_request | verified_information | explicit_human_request | close
-next_action:
-  continue_conversation | clarify | offer_aid | provide_verified_info |
-  request_human | start_psychologist_request | close
-text: string
-choice_set: none | need_categories | aid_catalog | psychologist_interest |
-            contact_methods | more_help
-need: optional enum
-catalog_item_ids: string[]
+intent: typed label
+need_hint?: enum
+evidence_claims?: exact-current-user-span[]
+draft_text: string
+suggested_support?: psychologist
 ```
 
-SupportAgent не создаёт callback ID и не исполняет side effects. `choice_set`
-является только символической просьбой к backend показать заранее известный
-набор кнопок. Для каталога дополнительно передаются допустимые item IDs.
+В его схеме отсутствуют action, choice set, catalog item IDs, callback IDs,
+workflow state и effect. Эти диагностические labels и `need_hint` не могут
+авторизовать UI, заявку, эскалацию или state transition. `draft_text` допустим
+только как guarded copy в открытом разговоре; обещания уже выполненного
+внешнего действия (включая принятую заявку или обещание обратной связи) заменяются backend fallback. `suggested_support=psychologist`
+может создать только мягкий pending offer без кнопки в этом же ходе.
 
 Примеры принципиальных решений:
 
-- «Мне хочется выговориться» → `open_conversation` +
-  `continue_conversation` + `choice_set=none`;
-- «Мне нужны продукты» → `concrete_need` + `offer_aid`;
-- «Можно поговорить с человеком?» → `explicit_human_request` + `request_human`;
-- осторожный интерес после предложения психолога →
-  `psychologist_considering` + `clarify` + `choice_set=psychologist_interest`;
+- «Мне хочется выговориться» → guarded `draft_text` и backend `choice_set=none`;
+- «Мне нужны продукты» → local concrete-aid signal и backend catalog;
+- «Можно поговорить с человеком?» → local human signal и backend handoff;
+- осторожный интерес после предложения психолога → bounded local signal и
+  backend `choice_set=psychologist_interest`;
 - однозначное согласие после предложения психолога →
   `psychologist_request` + `start_psychologist_request`.
 
 ### ConversationPolicy
 
-ConversationPolicy получает оба структурированных результата и текущий workflow.
-Она одна определяет итоговый переход, side effects и UI:
+`resolve_turn(PolicyContext)` — единственный владелец effect, side effect,
+контекстного choice set, state/workflow route, need и catalog selection. Context
+содержит состояние, pending offer, deterministic signals, local risk и
+диагностические payload/statuses. Политика применяет неизменяемый порядок:
 
-1. `critical` всегда отбрасывает обычный план и запускает кризисный ответ;
-2. `unknown` запрещает side effects и возвращает безопасную деградацию;
-3. активный конечный workflow обрабатывает допустимые для него ответы;
-4. явный `request_human` создаёт симулированную эскалацию;
-5. в остальных случаях исполняется валидный план SupportAgent;
-6. невалидный или несогласованный план превращается в свободную безопасную
-   реплику без меню, а не в экран первичного выбора.
+1. verified local critical;
+2. verified explicit human request;
+3. невозможность локального deterministic inspection;
+4. replay активного конечного workflow;
+5. verified concern/urgent side effect вместе с совместимым маршрутом;
+6. verified psychologist request;
+7. verified concrete aid;
+8. verified generic aid interest → backend need categories;
+9. narrow verified close rule, если он существует;
+10. открытый разговор по умолчанию.
 
-Политика проверяет соответствие текста и интерфейса. Кнопки рендерятся только из
-итогового `choice_set` в `ResolvedTurn`; отдельного legacy-контракта модели для
-кнопок нет.
+Два вызова модели остаются параллельными и обязательными на каждом text turn,
+но labels моделей не являются условием, которое авторизует продуктовое действие.
+Кнопки рендерятся только из итогового `ResolvedTurn`; `ChoiceSet.NONE` не имеет
+контекстных кнопок, а `app/ui.py` всегда добавляет глобальную кнопку человека.
 
 ## Состояние разговора и workflows
 
@@ -143,14 +153,18 @@ FSM используется только для конечных workflows:
 - follow-up;
 - симулированный handoff.
 
-Начало workflow происходит только после ясного намерения или согласия. Выход из
+Начало workflow происходит только после verified deterministic signal. Выход из
 workflow возвращает в `open_conversation`, не начинает discovery заново и не
-создаёт новую сессию.
+создаёт новую сессию. Generic aid interest запускает backend-owned discovery
+need categories; concrete aid сразу использует backend catalog для найденной need.
 
-Предложение психолога само по себе workflow не запускает. SupportAgent сохраняет
-разговорный контекст, а backend записывает безопасный маркер предложения. После
-явного интереса ConversationPolicy запускает обычный workflow контакта с типом
-заявки `psychologist`.
+Предложение психолога само по себе workflow не запускает. SupportAgent может
+сохранить только мягкий backend marker предложения. После следующего verified
+user signal (в том числе точного bounded acknowledgement `да, хочу` без
+дополнительной темы при pending context) политика
+показывает кнопку или запускает обычный workflow контакта с типом заявки
+`psychologist`. Несвязанная следующая реплика очищает marker; callback
+рендерится из marker, но позднее текстовое согласие его не продлевает.
 
 ## Кнопки и совместимость старых сообщений
 
@@ -171,30 +185,31 @@ workflow, либо сообщает, что вариант больше недо
 ## Хранение и наблюдаемость
 
 Текущие полные сообщения и model-run metadata продолжают сохраняться. Для
-каждого хода дополнительно записываются:
+каждого хода дополнительно записываются только структурированные поля:
 
 - состояние и workflow до решения;
-- SafetyAgent result;
-- SupportAgent intent и next action;
+- local risk и policy/matcher versions;
+- SafetyAgent label/status и SupportAgent intent/status;
+- rule IDs и state before/after;
 - итоговое policy decision;
 - состояние после решения;
 - показанный `choice_set` и callback IDs;
 - выполненные side effects;
-- причина fallback или отклонения модельного плана.
+- причина fallback.
 
-Сырые секреты и незамаскированный prompt в аудит не добавляются. Эта структура
+Сырые секреты, prompts, история, evidence quotes и model-owned `next_action` в
+аудит не добавляются. Эта структура
 позволит воспроизводить поведение сессии без чтения application log.
 
 ## Ошибки и деградация
 
-- Сбой SafetyAgent → `unknown`, никакой заявки или эскалации по модельному плану,
-  короткая безопасная реплика и кнопка человека.
-- Сбой SupportAgent при безопасном risk → разговорный fallback без общего меню.
-- Невалидный intent/action/choice set → audit события, свободный fallback без
-  side effects.
-- Противоречие `text` и `choice_set` → backend заменяет ход целиком заранее
-  согласованным экраном соответствующего workflow; он не приклеивает к
-  модельному тексту посторонние кнопки.
+- Сбой SafetyAgent не меняет verified local critical/human signal: фиксируется
+  diagnostic status, а deterministic policy продолжает свой маршрут.
+- Сбой SupportAgent при безопасном local risk → разговорный fallback без общего
+  меню.
+- Невалидная diagnostic schema → audit status, без side effects от модели.
+- Guarded draft с ложным обещанием внешнего действия → backend fallback без
+  контекстных кнопок.
 - Ошибка БД при создании заявки → бот не обещает, что заявка сохранена, и
   предлагает повторить либо позвать человека.
 - Повторный callback → идемпотентный результат без дубля заявки.
