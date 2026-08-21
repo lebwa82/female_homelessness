@@ -3,8 +3,6 @@ from pydantic import ValidationError
 
 from app.catalog import available_aid_for_need, get_aid_item
 from app.domain import (
-    ActionKind,
-    AgentAction,
     AgentTurn,
     Choice,
     NeedKind,
@@ -29,20 +27,6 @@ def test_every_need_offer_contains_three_catalog_items() -> None:
         offers = available_aid_for_need(need)
         assert len(offers) == 3
         assert all(get_aid_item(item.id) == item for item in offers)
-
-
-def test_agent_action_rejects_more_than_four_choices() -> None:
-    with pytest.raises(ValidationError):
-        AgentAction(
-            kind=ActionKind.SHOW_CHOICES,
-            text="Выберите",
-            choices=tuple(Choice(id=str(i), label=str(i)) for i in range(5)),
-        )
-
-
-def test_agent_action_forbids_unknown_fields() -> None:
-    with pytest.raises(ValidationError):
-        AgentAction.model_validate({"kind": "reply", "text": "Рядом", "invented": True})
 
 
 def test_agent_turn_always_appends_human_choice_once() -> None:

@@ -46,18 +46,6 @@ class RiskLevel(str, Enum):
     UNKNOWN = "unknown"
 
 
-class ActionKind(str, Enum):
-    REPLY = "reply"
-    SHOW_CHOICES = "show_choices"
-    OFFER_AID = "offer_aid"
-    REQUEST_LOCATION = "request_location"
-    REQUEST_CONTACT = "request_contact"
-    CREATE_AID_REQUEST = "create_aid_request"
-    RECORD_ESCALATION = "record_escalation"
-    OFFER_MORE_HELP = "offer_more_help"
-    CLOSE_CONVERSATION = "close_conversation"
-
-
 class Choice(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -167,20 +155,6 @@ class RiskAssessment(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     rationale: str = Field(default="", max_length=240)
     detector: str = Field(default="model", max_length=64)
-
-
-class AgentAction(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: ActionKind
-    text: str = Field(min_length=1, max_length=1200)
-    choices: tuple[Choice, ...] = Field(default=(), max_length=4)
-    need: NeedKind | None = None
-    aid_id: str | None = Field(default=None, max_length=64)
-    contact_method: ContactMethod | None = None
-    contact_value: str | None = Field(default=None, max_length=320)
-    city: str | None = Field(default=None, max_length=120)
-    district: str | None = Field(default=None, max_length=120)
 
 
 class AgentTurn(BaseModel):

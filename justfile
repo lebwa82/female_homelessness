@@ -51,6 +51,14 @@ llm-health:
 scenario-smoke:
     uv run python -m scripts.scenario_smoke
 
+# Replay the versioned behavior suite with deterministic fixture results.
+eval-dialogues:
+    uv run pytest tests/test_behavior_dataset.py tests/test_dialogue_eval.py -q
+
+# Run the anonymized behavior suite against the configured Qwen model.
+eval-dialogues-live:
+    uv run python -m scripts.dialogue_eval --live tests/fixtures/dialogue_scenarios.jsonl
+
 # Deploy the clean, committed Git snapshot to the MVP VM and verify it.
 # The current public IP is resolved from Yandex Cloud; override when needed:
 # just deploy-prod user@host

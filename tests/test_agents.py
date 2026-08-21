@@ -9,16 +9,18 @@ from app.agents import (
     AgentContext,
     AgentEvaluation,
     YandexAgentGateway,
+    parse_risk,
     usage_audit,
     yandex_model_settings,
     yandex_output_type,
 )
-from app.domain import AgentAction, ChoiceSet, RiskAssessment, RiskLevel, SupportIntent, SupportPlan
+from app.domain import ChoiceSet, RiskAssessment, RiskLevel, SupportIntent, SupportPlan
 
 
-def test_qwen_uses_prompted_typed_output_with_reasoning_disabled() -> None:
+def test_qwen_uses_deterministic_prompted_typed_output() -> None:
     assert isinstance(yandex_output_type("risk"), PromptedOutput)
     assert yandex_output_type("support").outputs is SupportPlan
+    assert yandex_model_settings()["temperature"] == 0.0
     assert yandex_model_settings()["openai_reasoning_effort"] == "none"
 
 
@@ -33,11 +35,29 @@ def test_usage_audit_reads_the_pydantic_ai_usage_object() -> None:
     }
 
 
+def test_parse_risk_accepts_the_model_rationale_short_alias() -> None:
+    risk, audit = parse_risk(
+        AgentCallResult(
+            payload={
+                "level": "none",
+                "categories": [],
+                "confidence": 0.98,
+                "rationale_short": "no concrete danger",
+            },
+            audit={"status": "completed"},
+        )
+    )
+
+    assert risk.level is RiskLevel.NONE
+    assert risk.rationale == "no concrete danger"
+    assert audit["status"] == "completed"
+
+
 def test_agent_evaluation_rejects_non_support_plan() -> None:
     with pytest.raises(TypeError, match="plan must be a SupportPlan or None"):
         AgentEvaluation(
             risk=RiskAssessment(level=RiskLevel.NONE),
-            plan=AgentAction(kind="reply", text="Я рядом."),
+            plan=object(),  # type: ignore[arg-type]
             risk_audit={"status": "completed"},
             support_audit={"status": "completed"},
         )
@@ -107,6 +127,47 @@ async def test_human_request_is_instructed_and_parsed_as_no_safety_risk() -> Non
     assert "human_requested" not in captured_risk_instruction
     assert "Просьба поговорить с человеком не является риском." in captured_risk_instruction
     assert result.risk.level is RiskLevel.NONE
+
+
+@pytest.mark.asyncio
+async def test_gateway_instructions_keep_safety_and_support_plans_high_precision() -> None:
+    captured: dict[str, str] = {}
+
+    async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
+        del input_text
+        captured[agent_name] = " ".join(instructions.split())
+        if agent_name == "risk":
+            payload = {"level": "none", "categories": [], "confidence": 0.98, "rationale": "safe"}
+        else:
+            payload = {
+                "intent": "open_conversation",
+                "next_action": "continue_conversation",
+                "text": "Я рядом.",
+                "choice_set": "none",
+                "catalog_item_ids": [],
+            }
+        return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
+
+    result = await YandexAgentGateway(call=call).evaluate(
+        AgentContext(history=(("user", "мне нужна поддержка"),), state="open_conversation")
+    )
+
+    assert result.risk_audit["status"] == "completed"
+    assert result.support_audit["status"] == "completed"
+    assert result.risk_audit["request"]["temperature"] == 0.0
+    assert result.support_audit["request"]["temperature"] == 0.0
+    assert result.plan is not None
+    assert "Не выводи concern из одиночества, усталости, горя, просьбы выслушать" in captured["risk"]
+    assert "Без прямого указания на угрозу, страх насилия или нестабильное жильё выбирай none." in captured["risk"]
+    assert "Верни поля level, categories, confidence и rationale; не используй rationale_short." in captured["risk"]
+    assert "Нехватка еды или денег сама по себе — none, а не concern." in captured["risk"]
+    assert "Urgent выбирай только при явно негде ночевать сегодня или выселении прямо сейчас." in captured["risk"]
+    assert "без need не выбирай offer_aid" in captured["support"]
+    assert "psychologist_considering/clarify и choice_set=psychologist_interest" in captured["support"]
+    assert "Выраженная потребность в помощи или интерес к доступным вариантам" in captured["support"]
+    assert "Даже при urgent жилье верни concrete_need/offer_aid с need=housing." in captured["support"]
+    assert "Вопрос об условиях или возможности психолога не возвращай как open_conversation." in captured["support"]
+    assert "Описание опасности без практической просьбы о помощи остаётся open_conversation." in captured["support"]
 
 
 @pytest.mark.asyncio

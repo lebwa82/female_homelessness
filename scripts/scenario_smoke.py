@@ -52,6 +52,14 @@ def incoming(text: str = "") -> IncomingMessage:
 
 
 async def run_scenarios() -> None:
+    open_conversation_store = InMemoryConversationStore()
+    open_conversation_service = ConversationService(
+        store=open_conversation_store, gateway=SmokeGateway()
+    )
+    open_turn = await open_conversation_service.handle_text(incoming("мне нужно выговориться"))
+    assert [choice.id for choice in open_turn.choices] == ["human"]
+    assert not open_conversation_store.escalations
+
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=SmokeGateway())
 
@@ -77,7 +85,7 @@ async def run_scenarios() -> None:
 
 def main() -> None:
     asyncio.run(run_scenarios())
-    print("Scenario smoke: aid flow and crisis escalation passed")
+    print("Scenario smoke: aid, open conversation, psychologist request and crisis paths passed")
 
 
 if __name__ == "__main__":

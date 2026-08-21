@@ -27,7 +27,13 @@ RISK_INSTRUCTIONS = """Ты классифицируешь только опас
 Верни JSON: critical — непосредственная угроза жизни, суицид или насилие сейчас;
 urgent — сегодня негде ночевать или выселение прямо сейчас; concern — страх,
 угроза или нестабильное жильё без непосредственной опасности; none — опасности
-не видно. Просьба поговорить с человеком не является риском."""
+не видно. Просьба поговорить с человеком не является риском. Не выводи concern из
+одиночества, усталости, горя, просьбы выслушать, просьбы о человеке или психологе,
+либо обычной потребности в помощи. Без прямого указания на угрозу, страх насилия или
+нестабильное жильё выбирай none. Верни поля level, categories, confidence и rationale;
+не используй rationale_short. Нехватка еды или денег сама по себе — none, а не concern.
+Urgent выбирай только при явно негде ночевать сегодня или выселении прямо сейчас.
+Страх или нестабильное жильё без этого — concern."""
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
 Верни SupportPlan. Просьбы «выслушай», «хочу выговориться» и «можно с тобой
@@ -36,7 +42,16 @@ SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычны�
 explicit_human_request/request_human. Не показывай need_categories в обычном
 разговоре. Психолога сначала мягко предложи текстом с offered_support=psychologist;
 при осторожном интересе используй psychologist_considering, а при однозначном
-согласии — psychologist_request/start_psychologist_request. Не создавай callback ID."""
+согласии — psychologist_request/start_psychologist_request. Если пользователь
+спрашивает о психологе или отвечает осторожным интересом, используй
+psychologist_considering/clarify и choice_set=psychologist_interest. Для concrete_need
+или aid_interest обязательно укажи need: housing, food_money, legal, support, children
+или other; без need не выбирай offer_aid. Выраженная потребность в помощи или интерес
+к доступным вариантам — concrete_need либо aid_interest с offer_aid и подходящим need,
+а не open_conversation. Даже при urgent жилье верни concrete_need/offer_aid с
+need=housing. Вопрос об условиях или возможности психолога не возвращай как
+open_conversation. Описание опасности без практической просьбы о помощи остаётся
+open_conversation. Не создавай callback ID."""
 
 
 @dataclass(frozen=True)
@@ -71,7 +86,7 @@ Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
 def yandex_model_settings() -> OpenAIResponsesModelSettings:
     """Use Qwen without reasoning to preserve a bounded conversational response."""
     return OpenAIResponsesModelSettings(
-        temperature=0.3,
+        temperature=0.0,
         max_tokens=300,
         openai_reasoning_effort="none",
     )
@@ -139,7 +154,7 @@ class YandexAgentGateway:
             "agent": agent_name,
             "input_hash": input_hash,
             "request": {
-                "temperature": 0.3,
+                "temperature": 0.0,
                 "max_tokens": 300,
                 "reasoning_effort": "none",
                 "data_logging_enabled": False,
@@ -235,8 +250,12 @@ def format_agent_context(context: AgentContext, transcript: str) -> str:
 
 
 def parse_risk(result: AgentCallResult) -> tuple[RiskAssessment, dict[str, Any]]:
+    payload = dict(result.payload)
+    rationale_short = payload.pop("rationale_short", None)
+    if "rationale" not in payload and rationale_short is not None:
+        payload["rationale"] = rationale_short
     try:
-        assessment = RiskAssessment.model_validate({**result.payload, "detector": "model"})
+        assessment = RiskAssessment.model_validate({**payload, "detector": "model"})
     except ValidationError:
         return (
             RiskAssessment(level=RiskLevel.UNKNOWN, detector="model", rationale="model response unavailable"),
