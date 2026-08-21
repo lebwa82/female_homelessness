@@ -43,3 +43,10 @@ def test_conversation_identity_is_unique_per_channel_for_future_chatwoot_adapter
     assert Conversation.__table__.c.channel_user_id.unique is not True
     assert len(unique_constraints) == 1
     assert {column.name for column in unique_constraints[0].columns} == {"channel", "channel_user_id"}
+
+
+def test_conversation_and_escalation_models_persist_policy_context() -> None:
+    assert "pending_offer" in Conversation.__table__.c
+    assert "cause" in Escalation.__table__.c
+    assert Escalation.__table__.c.cause.default.arg == "safety"
+    assert Escalation.__table__.c.level.nullable is True

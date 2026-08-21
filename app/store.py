@@ -8,7 +8,13 @@ from uuid import uuid4
 
 from app import db
 from app.config import settings
-from app.domain import IncomingMessage, RiskAssessment
+from app.domain import (
+    EscalationCause,
+    EscalationRequest,
+    IncomingMessage,
+    RiskAssessment,
+    RiskLevel,
+)
 
 
 @dataclass
@@ -24,6 +30,7 @@ class ConversationRecord:
     pending_contact_method: str | None = None
     pending_city: str | None = None
     pending_district: str | None = None
+    pending_offer: str | None = None
 
 
 @dataclass
@@ -40,11 +47,23 @@ class StoredAidRequest:
 @dataclass
 class StoredEscalation:
     conversation_id: int
-    assessment: RiskAssessment
+    request: EscalationRequest
 
     @property
-    def level(self):  # type: ignore[no-untyped-def]
-        return self.assessment.level
+    def cause(self) -> EscalationCause:
+        return self.request.cause
+
+    @property
+    def level(self) -> RiskLevel | None:
+        return self.request.level
+
+    @property
+    def categories(self) -> tuple[str, ...]:
+        return self.request.categories
+
+    @property
+    def reason(self) -> str:
+        return self.request.reason
 
 
 @dataclass
@@ -65,7 +84,7 @@ class InMemoryConversationStore:
     followup_jobs: list[StoredFollowupJob] = field(default_factory=list)
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
     risk_assessments: list[tuple[int, RiskAssessment]] = field(default_factory=list)
-    actions: list[tuple[int, str, str]] = field(default_factory=list)
+    actions: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -103,11 +122,13 @@ class InMemoryConversationStore:
     async def record_risk(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
         self.risk_assessments.append((record.id, assessment))
 
-    async def record_action(self, record: ConversationRecord, kind: str, status: str) -> None:
-        self.actions.append((record.id, kind, status))
+    async def record_action(
+        self, record: ConversationRecord, kind: str, status: str, audit: dict[str, Any] | None = None
+    ) -> None:
+        self.actions.append((record.id, kind, status, audit or {}))
 
-    async def create_escalation(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
-        self.escalations.append(StoredEscalation(record.id, assessment))
+    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
+        self.escalations.append(StoredEscalation(record.id, request))
 
     async def create_aid_request(
         self,
@@ -148,6 +169,7 @@ class InMemoryConversationStore:
         record.pending_contact_method = None
         record.pending_city = None
         record.pending_district = None
+        record.pending_offer = None
 
     async def cancel_pending_reminder(self, record: ConversationRecord) -> None:
         self.followup_jobs = [
@@ -199,11 +221,13 @@ class PostgresConversationStore:
     async def record_risk(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
         await db.record_risk_assessment(record.id, assessment)
 
-    async def record_action(self, record: ConversationRecord, kind: str, status: str) -> None:
-        await db.record_action(record.id, kind, status)
+    async def record_action(
+        self, record: ConversationRecord, kind: str, status: str, audit: dict[str, Any] | None = None
+    ) -> None:
+        await db.record_action(record.id, kind, status, audit)
 
-    async def create_escalation(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
-        await db.create_escalation(record.id, assessment)
+    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
+        await db.create_escalation(record.id, request)
 
     async def create_aid_request(
         self,
@@ -272,4 +296,5 @@ class PostgresConversationStore:
             pending_contact_method=row.pending_contact_method,
             pending_city=row.pending_city,
             pending_district=row.pending_district,
+            pending_offer=row.pending_offer,
         )

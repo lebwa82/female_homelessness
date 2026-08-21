@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncAttrs, AsyncEngine, async_sessionmaker, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
-from app.domain import ConversationState, RiskAssessment
+from app.domain import ConversationState, EscalationRequest, RiskAssessment
 from app.pii import redact_with_audit
 
 
@@ -50,6 +50,7 @@ class Conversation(Base):
     pending_contact_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pending_city: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pending_district: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    pending_offer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     human_handoff: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -149,7 +150,8 @@ class Escalation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
-    level: Mapped[str] = mapped_column(String(32), index=True)
+    cause: Mapped[str] = mapped_column(String(48), default="safety", index=True)
+    level: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     categories: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     reason: Mapped[str] = mapped_column(String(240), default="")
     status: Mapped[str] = mapped_column(String(32), default="simulated", index=True)
@@ -193,10 +195,14 @@ async def init_db() -> None:
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_contact_method VARCHAR(64)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_city VARCHAR(120)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_district VARCHAR(120)",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_offer VARCHAR(64)",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS redacted_content TEXT",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS cause VARCHAR(48) NOT NULL DEFAULT 'safety'",
+            "ALTER TABLE escalations ALTER COLUMN level DROP NOT NULL",
+            "CREATE INDEX IF NOT EXISTS ix_escalations_cause ON escalations (cause)",
         ):
             await connection.execute(text(statement))
 
@@ -313,14 +319,15 @@ async def record_action(
         await session.commit()
 
 
-async def create_escalation(conversation_id: int, assessment: RiskAssessment) -> None:
+async def create_escalation(conversation_id: int, request: EscalationRequest) -> None:
     async with Session() as session:
         session.add(
             Escalation(
                 conversation_id=conversation_id,
-                level=assessment.level.value,
-                categories={"items": list(assessment.categories)},
-                reason=assessment.rationale,
+                cause=request.cause.value,
+                level=request.level.value if request.level else None,
+                categories={"items": list(request.categories)},
+                reason=request.reason,
             )
         )
         await session.commit()
@@ -357,6 +364,7 @@ async def delete_conversation_data(conversation_id: int) -> None:
             conversation.pending_contact_method = None
             conversation.pending_city = None
             conversation.pending_district = None
+            conversation.pending_offer = None
         session.add(Event(conversation_id=conversation_id, kind="data_deleted", payload="", audit={}))
         await session.commit()
 

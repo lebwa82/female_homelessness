@@ -11,6 +11,8 @@ from app.domain import (
     Choice,
     ContactMethod,
     ConversationState,
+    EscalationCause,
+    EscalationRequest,
     IncomingMessage,
     NeedKind,
     RiskAssessment,
@@ -150,7 +152,7 @@ class ConversationService:
         await self.store.record_risk(record, merged)
 
         if merged.level is RiskLevel.CRITICAL:
-            await self.store.create_escalation(record, merged)
+            await self.store.create_escalation(record, self._safety_escalation(merged))
             await self.store.record_action(record, "critical_escalation", "completed")
             return self._critical_turn(merged)
         if merged.level is RiskLevel.UNKNOWN:
@@ -163,7 +165,7 @@ class ConversationService:
                 ),
             )
         if merged.level in {RiskLevel.URGENT, RiskLevel.CONCERN}:
-            await self.store.create_escalation(record, merged)
+            await self.store.create_escalation(record, self._safety_escalation(merged))
 
         if record.state == ConversationState.COLLECTING_LOCATION.value:
             await self.store.update(
@@ -265,12 +267,14 @@ class ConversationService:
         self, record: ConversationRecord, action: AgentAction, user_text: str
     ) -> AgentTurn:
         if action.kind is ActionKind.RECORD_ESCALATION:
-            assessment = RiskAssessment(
-                level=RiskLevel.CONCERN,
-                detector="support_agent",
-                rationale="support action escalation",
+            await self.store.create_escalation(
+                record,
+                EscalationRequest(
+                    cause=EscalationCause.SAFETY,
+                    level=RiskLevel.CONCERN,
+                    reason="support action escalation",
+                ),
             )
-            await self.store.create_escalation(record, assessment)
             return self._turn(action.text, (Choice(id="continue_bot", label="Продолжить здесь"),))
         if action.kind is ActionKind.OFFER_AID and action.need and action.need is not NeedKind.OTHER:
             await self.store.update(record, need=action.need.value, state=ConversationState.CHOOSING_AID.value)
@@ -305,13 +309,10 @@ class ConversationService:
         return self._turn(plan.text)
 
     async def _human_turn(self, record: ConversationRecord, reason: str) -> AgentTurn:
-        assessment = RiskAssessment(
-            level=RiskLevel.NONE,
-            categories=("human_requested",),
-            detector="backend",
-            rationale=reason,
+        await self.store.create_escalation(
+            record,
+            EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason=reason),
         )
-        await self.store.create_escalation(record, assessment)
         await self.store.record_action(record, "human_handoff", "simulated")
         return AgentTurn(
             text=HUMAN_PROMPT,
@@ -345,6 +346,15 @@ class ConversationService:
                 Choice(id="human", label="Поговорить с живым человеком"),
                 Choice(id="continue_bot", label="Продолжить здесь"),
             ),
+        )
+
+    @staticmethod
+    def _safety_escalation(assessment: RiskAssessment) -> EscalationRequest:
+        return EscalationRequest(
+            cause=EscalationCause.SAFETY,
+            level=assessment.level,
+            categories=assessment.categories,
+            reason=assessment.rationale,
         )
 
     @staticmethod
