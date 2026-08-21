@@ -72,10 +72,12 @@
 **Files:**
 - Modify: `app/domain.py`
 - Modify: `app/agents.py`
+- Modify: `app/signals.py`
 - Modify: `app/policy.py`
 - Modify: `app/service.py`
 - Modify: `app/ui.py`
 - Modify: `tests/test_agents.py`
+- Modify: `tests/test_signals.py`
 - Modify: `tests/test_policy.py`
 - Modify: `tests/test_service_scenarios.py`
 - Modify: `tests/test_ui.py`
@@ -86,6 +88,7 @@
 - `AgentEvaluation` exposes diagnostic payload/status/audit for both calls.
 - `resolve_turn(context: PolicyContext) -> ResolvedTurn` consumes state, deterministic signals, diagnostic statuses, diagnostics, pending offer, and backend catalog.
 - `ConversationService.handle_text()` always extracts signals, awaits the same two concurrent calls, then invokes the kernel once.
+- Pending-offer-only acknowledgements are converted to deterministic contextual signals by `extract_signals(text, pending_offer=...)`; model intent does not authorize the psychologist button.
 
 - [ ] **Step 1: Write failing schema and gateway tests**
 
