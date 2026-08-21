@@ -3,34 +3,35 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents import AgentContext, YandexAgentGateway
-from app.catalog import AidItem, available_aid_for_need, get_aid_item
+from app.catalog import PSYCHOLOGIST_AID_ID, AidItem, available_aid_for_need, get_aid_item
 from app.domain import (
-    ActionKind,
-    AgentAction,
     AgentTurn,
     Choice,
+    ChoiceSet,
     ContactMethod,
     ConversationState,
     EscalationCause,
     EscalationRequest,
     IncomingMessage,
     NeedKind,
+    PolicyEffect,
+    ResolvedTurn,
     RiskAssessment,
     RiskLevel,
-    SupportAction,
     SupportIntent,
-    SupportPlan,
+    SupportOffer,
 )
 from app.knowledge import find_verified_articles, format_verified_context
+from app.policy import resolve_turn
 from app.safety import assess_local_risk, merge_risk
 from app.store import ConversationRecord, PostgresConversationStore
 from app.ui import (
     CONTACT_CHOICES,
     CONTINUE_CHOICES,
-    FOLLOWUP_CHOICES,
     LEVEL_TWO_CHOICES,
     MORE_HELP_CHOICES,
     NEED_CHOICES,
+    choices_for,
 )
 
 WELCOME = (
@@ -78,9 +79,22 @@ class ConversationService:
             await self.store.update(record, state=ConversationState.CLOSED.value)
             return self._turn(PAUSE)
         if callback_id == "continue_bot":
-            return await self._enter_need_discovery(record)
+            return await self._open_conversation_turn(
+                record,
+                "Я здесь. Можно продолжить с того места, где остановились.",
+            )
         if callback_id == "human":
             return await self._human_turn(record, "button")
+        if callback_id == "support:psychologist":
+            if record.state != ConversationState.OPEN_CONVERSATION.value or record.pending_offer != SupportOffer.PSYCHOLOGIST.value:
+                return await self._state_turn(record)
+            return await self._execute_resolved_turn(
+                record,
+                ResolvedTurn(
+                    text="Хорошо, начнём запрос к психологу.",
+                    effect=PolicyEffect.START_PSYCHOLOGIST_REQUEST,
+                ),
+            )
         if callback_id == "location:skip":
             if record.state != ConversationState.COLLECTING_LOCATION.value:
                 return await self._state_turn(record)
@@ -93,6 +107,12 @@ class ConversationService:
                 ConversationState.CHOOSING_AID.value,
             }:
                 return await self._state_turn(record)
+            if callback_id == f"need:{NeedKind.SUPPORT.value}":
+                return await self._open_conversation_turn(
+                    record,
+                    "Я здесь и могу вас выслушать. Можно написать, что сейчас особенно важно.",
+                    clear_pending_offer=True,
+                )
             return await self._handle_need_choice(record, callback_id.removeprefix("need:"))
         if callback_id.startswith("aid:"):
             if record.state != ConversationState.CHOOSING_AID.value:
@@ -131,7 +151,7 @@ class ConversationService:
             )
         if callback_id == "level2:later":
             return self._turn("Хорошо. К этой возможности можно вернуться в любое время.")
-        return self._turn("Можно выбрать следующий шаг или написать своими словами.", NEED_CHOICES)
+        return await self._state_turn(record)
 
     async def handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         record = await self.store.ensure(incoming)
@@ -154,43 +174,48 @@ class ConversationService:
         await self.store.record_agent_run(record, "support", evaluation.support_audit)
         merged = merge_risk(assess_local_risk(incoming.text), evaluation.risk)
         await self.store.record_risk(record, merged)
+        state_before = record.state
+        decision = resolve_turn(merged, evaluation.plan, state_before)
 
-        if merged.level is RiskLevel.CRITICAL:
-            await self.store.create_escalation(record, self._safety_escalation(merged))
-            await self.store.record_action(record, "critical_escalation", "completed")
-            return self._critical_turn(merged)
-        if merged.level is RiskLevel.UNKNOWN:
-            await self.store.record_action(record, "model_failure", "safe_fallback")
-            return AgentTurn(
-                text=UNKNOWN_PROMPT,
-                choices=(
-                    Choice(id="continue_bot", label="Продолжить здесь"),
-                    Choice(id="human", label="Поговорить с живым человеком"),
-                ),
+        if (
+            evaluation.plan is None
+            or evaluation.plan.intent is not SupportIntent.OPEN_CONVERSATION
+        ):
+            decision = decision.model_copy(update={"offered_support": None})
+
+        if (
+            decision.effect is PolicyEffect.NONE
+            and merged.level is not RiskLevel.UNKNOWN
+            and record.state
+            in {
+                ConversationState.CHOOSING_AID.value,
+                ConversationState.COLLECTING_LOCATION.value,
+                ConversationState.COLLECTING_CONTACT_METHOD.value,
+                ConversationState.COLLECTING_CONTACT_VALUE.value,
+                ConversationState.AID_REQUESTED.value,
+            }
+        ):
+            if merged.level in {RiskLevel.CONCERN, RiskLevel.URGENT}:
+                await self.store.create_escalation(record, self._safety_escalation(merged))
+            return await self._execute_workflow_text(record, incoming.text, merged, state_before)
+
+        if (
+            decision.choice_set is ChoiceSet.PSYCHOLOGIST_INTEREST
+            and record.pending_offer != SupportOffer.PSYCHOLOGIST.value
+        ):
+            decision = decision.model_copy(
+                update={"choice_set": ChoiceSet.NONE, "fallback_reason": "pending_offer_required"}
             )
-        if merged.level in {RiskLevel.URGENT, RiskLevel.CONCERN}:
-            await self.store.create_escalation(record, self._safety_escalation(merged))
 
-        if record.state == ConversationState.COLLECTING_LOCATION.value:
-            await self.store.update(
-                record,
-                pending_city=incoming.text[:120],
-                state=ConversationState.COLLECTING_CONTACT_METHOD.value,
-            )
-            return self._contact_turn()
-        if record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
-            return await self._complete_pending_request(record, incoming.text.strip()[:320])
-
-        plan = evaluation.plan
-        if plan is None:
-            return await self._enter_need_discovery(record)
-        return await self._apply_support_plan(record, plan)
+        turn = await self._execute_resolved_turn(record, decision, merged)
+        await self._record_policy_decision(record, state_before, merged, evaluation.plan, decision, turn)
+        return turn
 
     async def _handle_need_choice(self, record: ConversationRecord, raw_need: str) -> AgentTurn:
         try:
             need = NeedKind(raw_need)
         except ValueError:
-            return await self._enter_need_discovery(record)
+            return await self._state_turn(record)
         await self.store.update(record, need=need.value, state=ConversationState.CHOOSING_AID.value)
         if need is NeedKind.OTHER:
             return self._turn(OTHER_PROMPT)
@@ -199,7 +224,7 @@ class ConversationService:
     async def _handle_aid_choice(self, record: ConversationRecord, aid_id: str) -> AgentTurn:
         item = get_aid_item(aid_id)
         if item is None:
-            return await self._enter_need_discovery(record)
+            return await self._state_turn(record)
         if item.needs_location:
             await self.store.update(
                 record,
@@ -246,7 +271,7 @@ class ConversationService:
     ) -> AgentTurn:
         aid_id = record.pending_aid_id
         if aid_id is None or get_aid_item(aid_id) is None:
-            return await self._enter_need_discovery(record)
+            return await self._state_turn(record)
         contact_method = method.value if method else record.pending_contact_method
         await self.store.create_aid_request(
             record,
@@ -267,50 +292,131 @@ class ConversationService:
         await self.store.record_action(record, "create_aid_request", "completed")
         return self._turn("Хорошо, запрос сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
 
-    async def _apply_model_action(
-        self, record: ConversationRecord, action: AgentAction, user_text: str
+    async def _execute_resolved_turn(
+        self,
+        record: ConversationRecord,
+        decision: ResolvedTurn,
+        assessment: RiskAssessment | None = None,
     ) -> AgentTurn:
-        if action.kind is ActionKind.RECORD_ESCALATION:
-            await self.store.create_escalation(
-                record,
-                EscalationRequest(
-                    cause=EscalationCause.SAFETY,
-                    level=RiskLevel.CONCERN,
-                    reason="support action escalation",
-                ),
-            )
-            return self._turn(action.text, (Choice(id="continue_bot", label="Продолжить здесь"),))
-        if action.kind is ActionKind.OFFER_AID and action.need and action.need is not NeedKind.OTHER:
-            await self.store.update(record, need=action.need.value, state=ConversationState.CHOOSING_AID.value)
-            return self._offer_turn(action.need, prefix=action.text)
-        if action.kind is ActionKind.REQUEST_CONTACT and record.pending_aid_id:
-            return self._contact_turn(prefix=action.text)
-        if action.kind is ActionKind.CLOSE_CONVERSATION:
-            await self.store.update(record, state=ConversationState.CLOSED.value)
-            return self._turn(action.text)
-        if action.kind is ActionKind.SHOW_CHOICES:
-            choices = safe_choices(action.choices)
-            if choices:
-                if any(choice.id.startswith("need:") for choice in choices):
-                    return await self._enter_need_discovery(record, action.text, choices)
-                return self._turn(action.text, choices)
-        detected = detect_need(user_text)
-        if detected is not None:
-            await self.store.update(record, need=detected.value, state=ConversationState.CHOOSING_AID.value)
-            return self._offer_turn(detected, prefix=action.text)
-        return await self._enter_need_discovery(record, action.text, NEED_CHOICES)
+        """Perform the side effects permitted by a policy-resolved turn."""
+        if assessment and assessment.level in {RiskLevel.CONCERN, RiskLevel.URGENT}:
+            await self.store.create_escalation(record, self._safety_escalation(assessment))
 
-    async def _apply_support_plan(self, record: ConversationRecord, plan: SupportPlan) -> AgentTurn:
-        """Temporary direct SupportPlan consumer until ConversationPolicy owns plan resolution."""
-        if plan.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST:
+        if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
+            if assessment is not None:
+                await self.store.create_escalation(record, self._safety_escalation(assessment))
+            await self.store.record_action(record, "critical_escalation", "completed")
+            return self._turn(
+                decision.text,
+                choices_for(decision.choice_set, decision.catalog_item_ids),
+            )
+        if decision.effect is PolicyEffect.HUMAN_HANDOFF:
             return await self._human_turn(record, "support_plan")
-        if plan.next_action is SupportAction.OFFER_AID and plan.need and plan.need is not NeedKind.OTHER:
-            await self.store.update(record, need=plan.need.value, state=ConversationState.CHOOSING_AID.value)
-            return self._offer_turn(plan.need, prefix=plan.text)
-        if plan.next_action is SupportAction.CLOSE:
-            await self.store.update(record, state=ConversationState.CLOSED.value)
-            return self._turn(plan.text)
-        return self._turn(plan.text)
+        if decision.effect is PolicyEffect.OFFER_AID and decision.need is not None:
+            item_ids = decision.catalog_item_ids or tuple(
+                item.id for item in available_aid_for_need(decision.need)
+            )
+            await self.store.update(
+                record,
+                need=decision.need.value,
+                pending_offer=None,
+                state=ConversationState.CHOOSING_AID.value,
+            )
+            return self._offer_turn(decision.need, decision.text, item_ids)
+        if decision.effect is PolicyEffect.START_PSYCHOLOGIST_REQUEST:
+            await self.store.update(
+                record,
+                pending_aid_id=PSYCHOLOGIST_AID_ID,
+                pending_offer=None,
+                state=ConversationState.COLLECTING_CONTACT_METHOD.value,
+            )
+            return self._contact_turn(prefix=decision.text)
+        if decision.effect is PolicyEffect.CLOSE:
+            await self.store.update(record, pending_offer=None, state=ConversationState.CLOSED.value)
+            return self._turn(decision.text, choices_for(decision.choice_set, decision.catalog_item_ids))
+
+        update_values: dict[str, str | None] = {"state": ConversationState.OPEN_CONVERSATION.value}
+        if decision.offered_support is not None:
+            update_values["pending_offer"] = decision.offered_support.value
+        await self.store.update(record, **update_values)
+        return self._turn(decision.text, choices_for(decision.choice_set, decision.catalog_item_ids))
+
+    async def _execute_workflow_text(
+        self,
+        record: ConversationRecord,
+        text: str,
+        assessment: RiskAssessment,
+        state_before: str,
+    ) -> AgentTurn:
+        if record.state == ConversationState.COLLECTING_LOCATION.value:
+            await self.store.update(
+                record,
+                pending_city=text[:120],
+                state=ConversationState.COLLECTING_CONTACT_METHOD.value,
+            )
+            turn = self._contact_turn()
+            transition = "collecting_location_to_collecting_contact_method"
+        elif record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
+            turn = await self._complete_pending_request(record, text.strip()[:320])
+            transition = "collecting_contact_value_to_aid_requested"
+        else:
+            turn = await self._state_turn(record)
+            transition = "replay_current_workflow"
+        await self._record_workflow_decision(record, state_before, assessment, transition, turn)
+        return turn
+
+    async def _record_policy_decision(
+        self,
+        record: ConversationRecord,
+        state_before: str,
+        assessment: RiskAssessment,
+        plan: Any,
+        decision: ResolvedTurn,
+        turn: AgentTurn,
+    ) -> None:
+        await self.store.record_action(
+            record,
+            "policy_decision",
+            "completed",
+            {
+                "state_before": state_before,
+                "state_after": record.state,
+                "risk": assessment.level.value,
+                "intent": plan.intent.value if plan else None,
+                "next_action": plan.next_action.value if plan else None,
+                "choice_set": decision.choice_set.value,
+                "rendered_callback_ids": [choice.id for choice in turn.choices],
+                "effect": decision.effect.value,
+                "fallback_reason": decision.fallback_reason,
+            },
+        )
+
+    async def _record_workflow_decision(
+        self,
+        record: ConversationRecord,
+        state_before: str,
+        assessment: RiskAssessment,
+        transition: str,
+        turn: AgentTurn,
+    ) -> None:
+        await self.store.record_action(
+            record,
+            "policy_decision",
+            "completed",
+            {
+                "state_before": state_before,
+                "state_after": record.state,
+                "risk": assessment.level.value,
+                "intent": None,
+                "next_action": None,
+                "choice_set": "workflow",
+                "rendered_callback_ids": [choice.id for choice in turn.choices],
+                "effect": "none",
+                "fallback_reason": None,
+                "decision_source": "workflow",
+                "workflow_transition": transition,
+            },
+        )
 
     async def _human_turn(
         self,
@@ -328,32 +434,6 @@ class ConversationService:
             choices=(
                 Choice(id="continue_bot", label="Продолжить здесь"),
                 Choice(id="human", label="Поговорить с живым человеком"),
-            ),
-        )
-
-    @staticmethod
-    def _critical_turn(assessment: RiskAssessment) -> AgentTurn:
-        if "suicide" in assessment.categories:
-            return AgentTurn(
-                text=(
-                    "Слышу вас. Это важно.\n\n"
-                    "Телефон доверия — бесплатно, круглосуточно: 8-800-2000-122\n\n"
-                    "Я здесь параллельно. Можно написать, что происходит."
-                ),
-                choices=(
-                    Choice(id="human", label="Поговорить с живым человеком"),
-                    Choice(id="continue_bot", label="Продолжить здесь"),
-                ),
-            )
-        return AgentTurn(
-            text=(
-                "Слышу вас. Хочу убедиться, что вы сейчас в безопасности. "
-                "Если есть непосредственная опасность и это безопасно, можно позвонить 112. "
-                "Зову человека, а здесь можно продолжать писать."
-            ),
-            choices=(
-                Choice(id="human", label="Поговорить с живым человеком"),
-                Choice(id="continue_bot", label="Продолжить здесь"),
             ),
         )
 
@@ -379,16 +459,36 @@ class ConversationService:
         await self.store.update(record, state=ConversationState.DISCOVERING_NEED.value)
         return self._turn(text, choices)
 
+    async def _open_conversation_turn(
+        self,
+        record: ConversationRecord,
+        text: str,
+        *,
+        clear_pending_offer: bool = False,
+    ) -> AgentTurn:
+        values: dict[str, str | None] = {"state": ConversationState.OPEN_CONVERSATION.value}
+        if clear_pending_offer:
+            values["pending_offer"] = None
+        await self.store.update(record, **values)
+        return self._turn(text)
+
     @staticmethod
-    def _offer_turn(need: NeedKind, prefix: str = "") -> AgentTurn:
-        items = available_aid_for_need(need)
+    def _offer_turn(need: NeedKind, prefix: str = "", item_ids: tuple[str, ...] = ()) -> AgentTurn:
+        items = (
+            tuple(item for item_id in item_ids if (item := get_aid_item(item_id)) is not None)
+            if item_ids
+            else available_aid_for_need(need)
+        )
         if not items:
             return ConversationService._turn(OTHER_PROMPT)
         descriptions = "\n".join(f"— {item.label}" for item in items)
         text = f"{prefix.strip()}\n\n" if prefix.strip() else ""
         text += f"Вот что можем предложить сейчас:\n\n{descriptions}\n\nЧто сейчас ближе?"
-        choices = tuple(Choice(id=f"aid:{item.id}", label=item.label) for item in items)
-        return ConversationService._turn(text, (*choices, Choice(id="need:other", label="Что-то другое")))
+        choices = choices_for(ChoiceSet.AID_CATALOG, tuple(item.id for item in items))
+        return ConversationService._turn(
+            text,
+            (*choices[:-1], Choice(id="need:other", label="Что-то другое"), choices[-1]),
+        )
 
     @staticmethod
     def _contact_turn(prefix: str = "") -> AgentTurn:
@@ -398,38 +498,38 @@ class ConversationService:
     async def _state_turn(self, record: ConversationRecord) -> AgentTurn:
         if record.state == ConversationState.AID_REQUESTED.value:
             return ConversationService._turn("Запрос уже сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
+        if record.state == ConversationState.DISCOVERING_NEED.value:
+            return ConversationService._turn(NEED_PROMPT, NEED_CHOICES)
         if record.state == ConversationState.CHOOSING_AID.value and record.need:
             try:
                 return ConversationService._offer_turn(NeedKind(record.need))
             except ValueError:
                 pass
+        if record.state == ConversationState.COLLECTING_LOCATION.value:
+            return ConversationService._turn(
+                "Чтобы понять, где это может быть удобно, можно написать город. Точный адрес не нужен.",
+                (
+                    Choice(id="location:skip", label="Не хочу указывать место"),
+                    Choice(id="human", label="Поговорить с живым человеком"),
+                ),
+            )
         if record.state == ConversationState.COLLECTING_CONTACT_METHOD.value:
             return self._contact_turn()
-        return await self._enter_need_discovery(record)
+        if record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
+            try:
+                method = ContactMethod(record.pending_contact_method or "")
+            except ValueError:
+                return self._contact_turn()
+            label = {
+                ContactMethod.OTHER_TELEGRAM: "ник в Telegram",
+                ContactMethod.PHONE: "номер телефона",
+                ContactMethod.EMAIL: "email",
+            }.get(method)
+            if label:
+                return self._turn(f"Можно написать {label}. Он нужен только для организации выбранной помощи.")
+            return self._contact_turn()
+        return await self._open_conversation_turn(record, UNKNOWN_PROMPT)
 
 
 def available_catalog() -> tuple[AidItem, ...]:
     return tuple({item.id: item for need in NeedKind for item in available_aid_for_need(need)}.values())
-
-
-def safe_choices(choices: tuple[Choice, ...]) -> tuple[Choice, ...]:
-    allowed = {
-        choice.id: choice
-        for choice in (*NEED_CHOICES, *CONTACT_CHOICES, *MORE_HELP_CHOICES, *FOLLOWUP_CHOICES, *LEVEL_TWO_CHOICES)
-    }
-    return tuple(allowed[choice.id] for choice in choices if choice.id in allowed)[:4]
-
-
-def detect_need(text: str) -> NeedKind | None:
-    normalized = text.lower()
-    if any(term in normalized for term in ("жиль", "некуда", "ночев", "хостел")):
-        return NeedKind.HOUSING
-    if any(term in normalized for term in ("ед", "продукт", "деньг", "карт")):
-        return NeedKind.FOOD_MONEY
-    if any(term in normalized for term in ("документ", "юрист", "прав")):
-        return NeedKind.LEGAL
-    if any(term in normalized for term in ("ребен", "ребён", "дет")):
-        return NeedKind.CHILDREN
-    if any(term in normalized for term in ("поговор", "поддерж", "психолог", "зависим")):
-        return NeedKind.SUPPORT
-    return None

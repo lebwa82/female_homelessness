@@ -33,6 +33,14 @@ class CapturingGateway:
         return self.evaluation
 
 
+@dataclass
+class ScriptedGateway:
+    evaluations: list[AgentEvaluation]
+
+    async def evaluate(self, context) -> AgentEvaluation:  # type: ignore[no-untyped-def]
+        return self.evaluations.pop(0)
+
+
 def identity(text: str = "") -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=101,
@@ -54,6 +62,37 @@ def safe_evaluation(plan: SupportPlan | None = None) -> AgentEvaluation:
         ),
         risk_audit={"status": "completed"},
         support_audit={"status": "completed"},
+    )
+
+
+def scripted_service(*plans: SupportPlan) -> tuple[ConversationService, InMemoryConversationStore, ScriptedGateway]:
+    store = InMemoryConversationStore()
+    gateway = ScriptedGateway([safe_evaluation(plan) for plan in plans])
+    return ConversationService(store=store, gateway=gateway), store, gateway
+
+
+def psychologist_offer_plan() -> SupportPlan:
+    return SupportPlan(
+        intent="open_conversation",
+        next_action="continue_conversation",
+        text="Я рядом. Если вам это откликается, могу рассказать о поддержке психолога.",
+        offered_support="psychologist",
+    )
+
+
+def considering_psychologist_plan() -> SupportPlan:
+    return SupportPlan(
+        intent="psychologist_considering",
+        next_action="clarify",
+        text="Могу помочь начать запрос к психологу, если вы этого хотите.",
+    )
+
+
+def psychologist_request_plan() -> SupportPlan:
+    return SupportPlan(
+        intent="psychologist_request",
+        next_action="start_psychologist_request",
+        text="Хорошо, начнём запрос к психологу.",
     )
 
 
@@ -103,7 +142,7 @@ async def test_offer_aid_plan_opens_aid_options() -> None:
 
 
 @pytest.mark.asyncio
-async def test_open_conversation_plan_returns_only_global_human_button_without_escalation() -> None:
+async def test_request_to_be_heard_continues_bot_without_menu_or_handoff() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(
         store=store,
@@ -112,17 +151,142 @@ async def test_open_conversation_plan_returns_only_global_human_button_without_e
                 SupportPlan(
                     intent="open_conversation",
                     next_action="continue_conversation",
-                    text="Я могу вас выслушать. Что сейчас особенно тяжело?",
+                    text="Да. Я здесь и могу вас выслушать.",
+                    choice_set="none",
                 )
             )
         ),
     )
 
-    turn = await service.handle_text(identity("Мне тяжело"))
+    turn = await service.handle_text(identity("мне просто хочется выговориться"))
 
-    assert turn.text == "Я могу вас выслушать. Что сейчас особенно тяжело?"
     assert [choice.id for choice in turn.choices] == ["human"]
     assert store.escalations == []
+    assert store.conversations[101].state == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_continue_after_handoff_returns_to_open_conversation() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    await service.handle_callback(identity(), "human")
+    turn = await service.handle_callback(identity(), "continue_bot")
+
+    assert [choice.id for choice in turn.choices] == ["human"]
+    assert not any(choice.id.startswith("need:") for choice in turn.choices)
+    assert store.conversations[101].state == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_support_need_callback_returns_to_open_conversation_without_a_catalog() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    turn = await service.handle_callback(identity(), "need:support")
+
+    assert turn.text == "Я здесь и могу вас выслушать. Можно написать, что сейчас особенно важно."
+    assert [choice.id for choice in turn.choices] == ["human"]
+    assert store.conversations[101].state == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_psychologist_interest_after_offer_collects_contact() -> None:
+    service, store, _ = scripted_service(psychologist_offer_plan(), considering_psychologist_plan())
+
+    await service.handle_text(identity("мне очень тяжело"))
+    offer = await service.handle_text(identity("расскажите о психологе"))
+    contact = await service.handle_callback(identity(), "support:psychologist")
+    await service.handle_callback(identity(), "contact:current_telegram")
+
+    assert [choice.id for choice in offer.choices] == ["support:psychologist", "human"]
+    assert any(choice.id == "contact:current_telegram" for choice in contact.choices)
+    assert store.aid_requests[-1].aid_id == "psychologist_3_sessions"
+
+
+@pytest.mark.asyncio
+async def test_direct_psychologist_request_collects_contact_without_a_prior_offer() -> None:
+    service, store, _ = scripted_service(psychologist_request_plan())
+
+    contact = await service.handle_text(identity("хочу поговорить с психологом"))
+
+    assert [choice.id for choice in contact.choices] == [
+        "contact:current_telegram",
+        "contact:other_telegram",
+        "contact:phone",
+        "contact:email",
+        "contact:later",
+        "human",
+    ]
+    assert store.conversations[101].pending_aid_id == "psychologist_3_sessions"
+    assert store.conversations[101].state == "collecting_contact_method"
+
+
+@pytest.mark.asyncio
+async def test_psychologist_callback_without_a_recorded_offer_returns_open_conversation() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    turn = await service.handle_callback(identity(), "support:psychologist")
+
+    assert [choice.id for choice in turn.choices] == ["human"]
+    assert store.aid_requests == []
+    assert store.conversations[101].state == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_only_open_conversation_can_record_a_psychologist_offer() -> None:
+    service, store, _ = scripted_service(
+        SupportPlan(
+            intent="verified_information",
+            next_action="provide_verified_info",
+            text="Вот проверенная информация.",
+            offered_support="psychologist",
+        ),
+        considering_psychologist_plan(),
+    )
+
+    await service.handle_text(identity("какая помощь бывает"))
+    turn = await service.handle_text(identity("расскажите о психологе"))
+
+    assert store.conversations[101].pending_offer is None
+    assert [choice.id for choice in turn.choices] == ["human"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_callback_returns_open_conversation_instead_of_need_menu() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    turn = await service.handle_callback(identity(), "unknown:old-button")
+
+    assert [choice.id for choice in turn.choices] == ["human"]
+    assert store.conversations[101].state == "open_conversation"
+
+
+@pytest.mark.asyncio
+async def test_policy_audit_contains_only_resolved_literals_after_execution() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+
+    turn = await service.handle_text(identity("мне просто хочется выговориться"))
+
+    _, kind, _, audit = store.actions[-1]
+    assert kind == "policy_decision"
+    assert audit == {
+        "state_before": "greeting",
+        "state_after": "open_conversation",
+        "risk": "none",
+        "intent": "open_conversation",
+        "next_action": "continue_conversation",
+        "choice_set": "none",
+        "rendered_callback_ids": [choice.id for choice in turn.choices],
+        "effect": "none",
+        "fallback_reason": None,
+    }
+    assert "text" not in audit
+    assert "prompt" not in audit
+    assert "history" not in audit
 
 
 @pytest.mark.asyncio
@@ -146,6 +310,34 @@ async def test_explicit_human_request_plan_starts_handoff() -> None:
     assert "зову человека" in turn.text.lower()
     assert store.escalations[-1].cause is EscalationCause.HUMAN_REQUEST
     assert store.escalations[-1].level is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", [RiskLevel.CONCERN, RiskLevel.URGENT])
+async def test_noncritical_safety_is_recorded_while_a_valid_plan_continues(level: RiskLevel) -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            AgentEvaluation(
+                risk=RiskAssessment(level=level, detector="model"),
+                plan=SupportPlan(
+                    intent="open_conversation",
+                    next_action="continue_conversation",
+                    text="Я рядом и готова продолжить.",
+                ),
+                risk_audit={"status": "completed"},
+                support_audit={"status": "completed"},
+            )
+        ),
+    )
+
+    turn = await service.handle_text(identity("мне непросто"))
+
+    assert turn.text == "Я рядом и готова продолжить."
+    assert [choice.id for choice in turn.choices] == ["human"]
+    assert store.escalations[-1].cause is EscalationCause.SAFETY
+    assert store.escalations[-1].level is level
 
 
 @pytest.mark.asyncio

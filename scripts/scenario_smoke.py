@@ -26,6 +26,21 @@ class SmokeGateway:
         )
 
 
+@dataclass
+class PsychologistSmokeGateway:
+    async def evaluate(self, context: AgentContext) -> AgentEvaluation:
+        return AgentEvaluation(
+            risk=RiskAssessment(level=RiskLevel.NONE, detector="smoke"),
+            plan=SupportPlan(
+                intent="psychologist_request",
+                next_action="start_psychologist_request",
+                text="Начинаю запрос к психологу.",
+            ),
+            risk_audit={"status": "completed"},
+            support_audit={"status": "completed"},
+        )
+
+
 def incoming(text: str = "") -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=900_001,
@@ -51,6 +66,13 @@ async def run_scenarios() -> None:
     critical = await service.handle_text(incoming("не хочу жить"))
     assert "8-800-2000-122" in critical.text
     assert store.escalations[-1].level is RiskLevel.CRITICAL
+
+    psychologist_store = InMemoryConversationStore()
+    psychologist_service = ConversationService(store=psychologist_store, gateway=PsychologistSmokeGateway())
+    contact = await psychologist_service.handle_text(incoming("хочу поговорить с психологом"))
+    assert any(choice.id == "contact:current_telegram" for choice in contact.choices)
+    await psychologist_service.handle_callback(incoming(), "contact:current_telegram")
+    assert psychologist_store.aid_requests[-1].aid_id == "psychologist_3_sessions"
 
 
 def main() -> None:

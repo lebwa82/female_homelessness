@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict
 
 from app.domain import NeedKind
 
+PSYCHOLOGIST_AID_ID = "psychologist_3_sessions"
+
 
 class AidItem(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -27,7 +29,7 @@ AID_CATALOG = (
         description="Онлайн-консультация по документам и правам.",
     ),
     AidItem(
-        id="psychologist_3_sessions",
+        id=PSYCHOLOGIST_AID_ID,
         label="Три встречи с психологом",
         description="Три онлайн-встречи через партнёрскую платформу.",
     ),
@@ -80,4 +82,3 @@ def get_aid_item(aid_id: str) -> AidItem | None:
 
 def available_aid_for_need(need: NeedKind) -> tuple[AidItem, ...]:
     return tuple(_BY_ID[aid_id] for aid_id in _BY_NEED[need])
-
