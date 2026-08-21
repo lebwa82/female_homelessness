@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from app.agents import AgentEvaluation
-from app.domain import AgentAction, RiskAssessment, RiskLevel
+from app.domain import RiskAssessment, RiskLevel, SupportPlan
 from scripts.llm_health_check import check_structured
 
 
@@ -12,9 +12,13 @@ class HealthyGateway:
     async def evaluate(self, context):  # type: ignore[no-untyped-def]
         return AgentEvaluation(
             risk=RiskAssessment(level=RiskLevel.NONE, detector="model"),
-            action=AgentAction(kind="reply", text="Я рядом."),
+            plan=SupportPlan(
+                intent="open_conversation",
+                next_action="continue_conversation",
+                text="Я рядом.",
+            ),
             risk_audit={"status": "completed"},
-            action_audit={"status": "completed"},
+            support_audit={"status": "completed"},
         )
 
 
@@ -23,9 +27,9 @@ class UnhealthyGateway:
     async def evaluate(self, context):  # type: ignore[no-untyped-def]
         return AgentEvaluation(
             risk=RiskAssessment(level=RiskLevel.UNKNOWN, detector="model"),
-            action=None,
+            plan=None,
             risk_audit={"status": "validation_error"},
-            action_audit={"status": "validation_error"},
+            support_audit={"status": "validation_error"},
         )
 
 

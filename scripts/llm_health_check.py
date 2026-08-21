@@ -26,9 +26,9 @@ async def check_structured(gateway: AgentGateway | None = None) -> int:
     )
     healthy = (
         evaluation.risk_audit.get("status") == "completed"
-        and evaluation.action_audit.get("status") == "completed"
+        and evaluation.support_audit.get("status") == "completed"
         and evaluation.risk.level is not RiskLevel.UNKNOWN
-        and evaluation.action is not None
+        and evaluation.plan is not None
     )
     if healthy:
         print("LLM health-check: structured agents ok")
@@ -39,9 +39,9 @@ async def check_structured(gateway: AgentGateway | None = None) -> int:
         f"risk={evaluation.risk_audit.get('status', 'unknown')}/"
         f"{evaluation.risk_audit.get('error_type', 'none')}@"
         f"{evaluation.risk_audit.get('error_origin', 'none')}, "
-        f"support={evaluation.action_audit.get('status', 'unknown')}/"
-        f"{evaluation.action_audit.get('error_type', 'none')}@"
-        f"{evaluation.action_audit.get('error_origin', 'none')}"
+        f"support={evaluation.support_audit.get('status', 'unknown')}/"
+        f"{evaluation.support_audit.get('error_type', 'none')}@"
+        f"{evaluation.support_audit.get('error_origin', 'none')}"
     )
     return 1
 

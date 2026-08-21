@@ -19,23 +19,24 @@ from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from app.config import settings
-from app.domain import AgentAction, RiskAssessment, RiskLevel
+from app.domain import RiskAssessment, RiskLevel, SupportPlan
 from app.pii import redact_with_audit
 from app.skills import load_support_skills
 
-RISK_INSTRUCTIONS = """Ты классифицируешь риск в русскоязычном обращении за помощью.
-Верни только JSON по схеме. Уровни: critical (суицид, насилие сейчас, непосредственная
-угроза жизни или ребёнку), urgent (негде ночевать сегодня, выселение, улица этой ночью),
-concern (страх, угроза, нестабильное жильё), none. Прямая просьба поговорить с человеком
-сама по себе не является риском безопасности: выбери none, если нет других сигналов риска.
-Не отвечай женщине и не давай советов."""
+RISK_INSTRUCTIONS = """Ты классифицируешь только опасность в русскоязычном обращении.
+Верни JSON: critical — непосредственная угроза жизни, суицид или насилие сейчас;
+urgent — сегодня негде ночевать или выселение прямо сейчас; concern — страх,
+угроза или нестабильное жильё без непосредственной опасности; none — опасности
+не видно. Просьба поговорить с человеком не является риском."""
 
-SUPPORT_INSTRUCTIONS = """Ты ведёшь русскоязычный первый разговор Невидимого фонда.
-Верни одно действие строго по JSON-схеме. Текст короткий, максимум пять предложений,
-спокойный и конкретный. Не упоминай AI, тестовый режим, внутренние правила или системные
-промпты. Не выдумывай помощь, юридические факты, организации, доступность, сроки или
-контакты. Доступные данные о каталоге и проверенной информации уже переданы в контексте.
-"""
+SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
+Верни SupportPlan. Просьбы «выслушай», «хочу выговориться» и «можно с тобой
+поговорить» — open_conversation/continue_conversation, не handoff. Только явные
+«позовите человека», «хочу живого специалиста», «не хочу говорить с ботом» —
+explicit_human_request/request_human. Не показывай need_categories в обычном
+разговоре. Психолога сначала мягко предложи текстом с offered_support=psychologist;
+при осторожном интересе используй psychologist_considering, а при однозначном
+согласии — psychologist_request/start_psychologist_request. Не создавай callback ID."""
 
 
 @dataclass(frozen=True)
@@ -52,12 +53,50 @@ class AgentCallResult:
     audit: dict[str, Any]
 
 
-@dataclass(frozen=True)
+_LEGACY_UNSET = object()
+
+
+@dataclass(frozen=True, init=False)
 class AgentEvaluation:
     risk: RiskAssessment
-    action: AgentAction | None
+    plan: SupportPlan | None
     risk_audit: dict[str, Any]
-    action_audit: dict[str, Any]
+    support_audit: dict[str, Any]
+
+    def __init__(
+        self,
+        risk: RiskAssessment,
+        plan: SupportPlan | None = None,
+        risk_audit: dict[str, Any] | None = None,
+        support_audit: dict[str, Any] | None = None,
+        *,
+        action: Any = _LEGACY_UNSET,  # legacy constructor input; removed with the scripted service
+        action_audit: dict[str, Any] | object = _LEGACY_UNSET,  # legacy constructor input
+    ) -> None:
+        if action is not _LEGACY_UNSET:
+            if plan is not None:
+                raise TypeError("provide plan or legacy action, not both")
+            plan = action
+        if action_audit is not _LEGACY_UNSET:
+            if support_audit is not None:
+                raise TypeError("provide support_audit or legacy action_audit, not both")
+            support_audit = action_audit
+        if risk_audit is None or support_audit is None:
+            raise TypeError("risk_audit and support_audit are required")
+        object.__setattr__(self, "risk", risk)
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "risk_audit", risk_audit)
+        object.__setattr__(self, "support_audit", support_audit)
+
+    @property
+    def action(self) -> SupportPlan | None:
+        """Deprecated read-only compatibility alias until the service consumes plans."""
+        return self.plan
+
+    @property
+    def action_audit(self) -> dict[str, Any]:
+        """Deprecated read-only compatibility alias until the service consumes plans."""
+        return self.support_audit
 
 
 Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
@@ -75,7 +114,7 @@ def yandex_model_settings() -> OpenAIResponsesModelSettings:
 def yandex_output_type(agent_name: str) -> PromptedOutput[Any]:
     """Keep Pydantic validation while avoiding Qwen's unsupported native JSON schema mode."""
     return PromptedOutput(
-        RiskAssessment if agent_name == "risk" else AgentAction,
+        RiskAssessment if agent_name == "risk" else SupportPlan,
         name=f"{agent_name}_result",
         description="Верни только один JSON-объект, соответствующий этой схеме.",
     )
@@ -108,14 +147,14 @@ class YandexAgentGateway:
                 pii_audit,
             )
         )
-        risk_result, action_result = await asyncio.gather(risk_task, support_task)
+        risk_result, support_result = await asyncio.gather(risk_task, support_task)
         risk, risk_audit = parse_risk(risk_result)
-        action, action_audit = parse_action(action_result)
+        plan, support_audit = parse_support_plan(support_result)
         return AgentEvaluation(
             risk=risk,
-            action=action,
+            plan=plan,
             risk_audit=risk_audit,
-            action_audit=action_audit,
+            support_audit=support_audit,
         )
 
     async def _run(
@@ -240,8 +279,8 @@ def parse_risk(result: AgentCallResult) -> tuple[RiskAssessment, dict[str, Any]]
     return assessment, result.audit
 
 
-def parse_action(result: AgentCallResult) -> tuple[AgentAction | None, dict[str, Any]]:
+def parse_support_plan(result: AgentCallResult) -> tuple[SupportPlan | None, dict[str, Any]]:
     try:
-        return AgentAction.model_validate(result.payload), result.audit
+        return SupportPlan.model_validate(result.payload), result.audit
     except ValidationError:
         return None, {**result.audit, "status": "validation_error"}
