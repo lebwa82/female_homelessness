@@ -1,44 +1,14 @@
 from __future__ import annotations
 
-import re
+from app.domain import CrisisAssessment, HardSignalKind, Risk, RiskAssessment, RiskLevel
+from app.signals import extract_signals
 
-from app.domain import CrisisAssessment, Risk, RiskAssessment, RiskLevel
-
-_LOCAL_PATTERNS: tuple[tuple[RiskLevel, str, tuple[str, ...]], ...] = (
-    (
-        RiskLevel.CRITICAL,
-        "suicide",
-        (
-            r"\b(суицид|покончить с собой|не хочу жить|хочу исчезнуть|нет сил жить)\b",
-            r"\b(не вижу смысла|не могу больше|всё бесполезно)\b",
-        ),
-    ),
-    (
-        RiskLevel.CRITICAL,
-        "violence_now",
-        (
-            r"\b(меня убивают|хочет убить|убью|убить)\b",
-            r"\b(сейчас.*(бь[её]т|избивает)|насилие прямо сейчас)\b",
-            r"\b(реб[её]нок в опасности|дети на улице)\b",
-        ),
-    ),
-    (
-        RiskLevel.URGENT,
-        "acute_homelessness",
-        (
-            r"\b(сегодня.*(негде ночевать|некуда идти)|ночую на улице|улица этой ночью)\b",
-            r"\b(выгнали|выселили|нет жилья)\b",
-        ),
-    ),
-    (
-        RiskLevel.CONCERN,
-        "fear_or_threat",
-        (
-            r"\b(боюсь|страшно|угрожает|преследует|заперта|не могу уйти|держит)\b",
-            r"\b(насилие|документы забрали|нет где ночевать)\b",
-        ),
-    ),
-)
+_SIGNAL_RISK: dict[HardSignalKind, tuple[RiskLevel, str]] = {
+    HardSignalKind.SUICIDE_OR_SELF_HARM: (RiskLevel.CRITICAL, "suicide"),
+    HardSignalKind.VIOLENCE_OR_THREAT_NOW: (RiskLevel.CRITICAL, "violence_now"),
+    HardSignalKind.URGENT_SHELTER: (RiskLevel.URGENT, "acute_homelessness"),
+    HardSignalKind.SAFETY_CONCERN: (RiskLevel.CONCERN, "fear_or_threat"),
+}
 
 _PRECEDENCE = {
     RiskLevel.NONE: 0,
@@ -50,20 +20,20 @@ _PRECEDENCE = {
 
 
 def assess_local_risk(text: str) -> RiskAssessment:
-    normalized = text.lower().strip()
-    matches: list[tuple[RiskLevel, str]] = []
-    for level, category, patterns in _LOCAL_PATTERNS:
-        if any(re.search(pattern, normalized) for pattern in patterns):
-            matches.append((level, category))
+    matches = [
+        _SIGNAL_RISK[match.kind]
+        for match in extract_signals(text).matches
+        if match.kind in _SIGNAL_RISK
+    ]
     if not matches:
-        return RiskAssessment(level=RiskLevel.NONE, detector="local")
+        return RiskAssessment(level=RiskLevel.NONE, detector="local-signals")
     level = max((item[0] for item in matches), key=_PRECEDENCE.__getitem__)
     return RiskAssessment(
         level=level,
-        categories=tuple(category for _, category in matches),
+        categories=tuple(dict.fromkeys(category for _, category in matches)),
         confidence=1.0,
-        rationale="local high-precision signal",
-        detector="local",
+        rationale="deterministic local signal",
+        detector="local-signals",
     )
 
 

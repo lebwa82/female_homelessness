@@ -46,6 +46,40 @@ class RiskLevel(str, Enum):
     UNKNOWN = "unknown"
 
 
+class HardSignalKind(str, Enum):
+    EXPLICIT_HUMAN_REQUEST = "explicit_human_request"
+    CONCRETE_AID = "concrete_aid"
+    GENERIC_AID_INTEREST = "generic_aid_interest"
+    PSYCHOLOGIST_CONSIDERING = "psychologist_considering"
+    PSYCHOLOGIST_REQUEST = "psychologist_request"
+    SUICIDE_OR_SELF_HARM = "suicide_or_self_harm"
+    VIOLENCE_OR_THREAT_NOW = "violence_or_threat_now"
+    URGENT_SHELTER = "urgent_shelter"
+    SAFETY_CONCERN = "safety_concern"
+
+
+class SignalMatch(BaseModel):
+    """Audit-safe deterministic match without retaining any user text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: HardSignalKind
+    rule_id: str = Field(min_length=1, max_length=96)
+    token_start: int = Field(ge=0)
+    token_end: int = Field(ge=0)
+    need: NeedKind | None = None
+
+
+class DeterministicSignals(BaseModel):
+    """Versioned, hash-addressed output of the backend signal extractor."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    matcher_version: str = Field(min_length=1, max_length=64)
+    input_hash: str = Field(min_length=64, max_length=64)
+    matches: tuple[SignalMatch, ...] = ()
+
+
 class Choice(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
