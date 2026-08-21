@@ -125,6 +125,7 @@ class EscalationRequest(BaseModel):
     level: RiskLevel | None = None
     categories: tuple[str, ...] = ()
     reason: str = Field(default="", max_length=240)
+    request_key: str | None = Field(default=None, max_length=128)
 
 
 class PolicyEffect(str, Enum):

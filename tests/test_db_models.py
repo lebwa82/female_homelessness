@@ -21,6 +21,7 @@ def test_new_operational_tables_have_expected_identity_and_audit_columns() -> No
     assert FollowupJob.__tablename__ == "followup_jobs"
     assert "metadata" in AgentRun.__table__.c
     assert "request_key" in AidRequest.__table__.c
+    assert "request_key" in Escalation.__table__.c
     assert "due_at" in FollowupJob.__table__.c
 
 
@@ -50,3 +51,5 @@ def test_conversation_and_escalation_models_persist_policy_context() -> None:
     assert "cause" in Escalation.__table__.c
     assert Escalation.__table__.c.cause.default.arg == "safety"
     assert Escalation.__table__.c.level.nullable is True
+    assert Escalation.__table__.c.request_key.nullable is True
+    assert Escalation.__table__.c.request_key.unique is True

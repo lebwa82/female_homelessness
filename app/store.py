@@ -42,6 +42,7 @@ class StoredAidRequest:
     contact_value: str | None
     city: str | None = None
     district: str | None = None
+    request_key: str | None = None
 
 
 @dataclass
@@ -188,8 +189,14 @@ class InMemoryConversationStore:
             claim.lease_token = None
             claim.lease_expires_at = None
 
-    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
-        self.escalations.append(StoredEscalation(record.id, request))
+    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> StoredEscalation:
+        if request.request_key is not None:
+            for escalation in self.escalations:
+                if escalation.request.request_key == request.request_key:
+                    return escalation
+        escalation = StoredEscalation(record.id, request)
+        self.escalations.append(escalation)
+        return escalation
 
     async def create_aid_request(
         self,
@@ -199,7 +206,12 @@ class InMemoryConversationStore:
         contact_value: str | None,
         city: str | None = None,
         district: str | None = None,
+        request_key: str | None = None,
     ) -> StoredAidRequest:
+        if request_key is not None:
+            for request in self.aid_requests:
+                if request.request_key == request_key:
+                    return request
         request = StoredAidRequest(
             id=next(self._ids),
             conversation_id=record.id,
@@ -208,6 +220,7 @@ class InMemoryConversationStore:
             contact_value=contact_value,
             city=city,
             district=district,
+            request_key=request_key,
         )
         self.aid_requests.append(request)
         self.followup_jobs.append(
@@ -267,7 +280,9 @@ class PostgresConversationStore:
                     setattr(row, key, value)
             await session.commit()
             await session.refresh(row)
-            return self._record_from_row(row)
+            updated = self._record_from_row(row)
+            record.__dict__.update(updated.__dict__)
+            return record
 
     async def append_message(
         self, record: ConversationRecord, role: str, content: str, audit: dict[str, Any] | None = None
@@ -314,8 +329,8 @@ class PostgresConversationStore:
     ) -> None:
         await db.fail_callback_execution(record.id, callback_id, message_id, lease_token)
 
-    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> None:
-        await db.create_escalation(record.id, request)
+    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> Any:
+        return await db.create_escalation(record.id, request)
 
     async def create_aid_request(
         self,
@@ -325,17 +340,42 @@ class PostgresConversationStore:
         contact_value: str | None,
         city: str | None = None,
         district: str | None = None,
+        request_key: str | None = None,
     ) -> StoredAidRequest:
+        request_key = request_key or uuid4().hex
         async with db.Session() as session:
-            request = db.AidRequest(
-                conversation_id=record.id,
-                aid_id=aid_id,
-                request_key=uuid4().hex,
-                city=city,
-                district=district,
+            result = await session.execute(
+                db.postgres_insert(db.AidRequest)
+                .values(
+                    conversation_id=record.id,
+                    aid_id=aid_id,
+                    request_key=request_key,
+                    city=city,
+                    district=district,
+                )
+                .on_conflict_do_nothing(index_elements=(db.AidRequest.request_key,))
+                .returning(db.AidRequest.id)
             )
-            session.add(request)
-            await session.flush()
+            request_id = result.scalar_one_or_none()
+            if request_id is None:
+                existing = await session.execute(
+                    db.select(db.AidRequest).where(db.AidRequest.request_key == request_key)
+                )
+                request = existing.scalar_one()
+                await session.commit()
+                return StoredAidRequest(
+                    id=request.id,
+                    conversation_id=record.id,
+                    aid_id=request.aid_id,
+                    contact_method=contact_method,
+                    contact_value=contact_value,
+                    city=request.city,
+                    district=request.district,
+                    request_key=request_key,
+                )
+            request = await session.get(db.AidRequest, request_id)
+            if request is None:
+                raise LookupError(f"aid request {request_id} is missing")
             if contact_method is not None:
                 session.add(
                     db.ContactPoint(
@@ -362,6 +402,7 @@ class PostgresConversationStore:
                 contact_value=contact_value,
                 city=city,
                 district=district,
+                request_key=request_key,
             )
 
     async def delete_data(self, record: ConversationRecord) -> None:

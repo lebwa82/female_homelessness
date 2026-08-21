@@ -53,6 +53,18 @@ class FailOnceHumanEscalationStore(InMemoryConversationStore):
         await super().create_escalation(record, request)
 
 
+class FailAfterHumanEscalationStore(InMemoryConversationStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self._fail_handoff_audit = True
+
+    async def record_action(self, record, kind, status, audit=None) -> None:  # type: ignore[no-untyped-def]
+        if kind == "human_handoff" and self._fail_handoff_audit:
+            self._fail_handoff_audit = False
+            raise RuntimeError("simulated post-escalation failure")
+        await super().record_action(record, kind, status, audit)
+
+
 def identity(text: str = "", message_id: int | None = 303) -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=101,
@@ -417,6 +429,7 @@ async def test_human_callback_is_idempotent_per_originating_message() -> None:
         EscalationCause.HUMAN_REQUEST,
         EscalationCause.HUMAN_REQUEST,
     ]
+    assert store.escalations[0].request.request_key != store.escalations[1].request.request_key
 
 
 @pytest.mark.asyncio
@@ -685,6 +698,24 @@ async def test_human_callback_retries_after_failed_dispatch_then_replays_after_c
 
     assert len(store.escalations) == 1
     assert store.escalations[0].cause is EscalationCause.HUMAN_REQUEST
+    assert [choice.id for choice in successful.choices] == ["continue_bot", "human"]
+    assert [choice.id for choice in replay.choices] == ["continue_bot", "human"]
+
+
+@pytest.mark.asyncio
+async def test_human_callback_retries_after_post_effect_failure_without_duplicate_escalation() -> None:
+    store = FailAfterHumanEscalationStore()
+    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation()))
+    incoming = identity(message_id=634)
+
+    with pytest.raises(RuntimeError, match="simulated post-escalation failure"):
+        await service.handle_callback(incoming, "human")
+
+    successful = await service.handle_callback(incoming, "human")
+    replay = await service.handle_callback(incoming, "human")
+
+    assert len(store.escalations) == 1
+    assert store.escalations[0].request.request_key is not None
     assert [choice.id for choice in successful.choices] == ["continue_bot", "human"]
     assert [choice.id for choice in replay.choices] == ["continue_bot", "human"]
 

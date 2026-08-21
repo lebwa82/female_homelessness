@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from app.agents import AgentContext, YandexAgentGateway
@@ -74,14 +75,23 @@ class ConversationService:
             return await self._replay_callback(record, callback_id)
         try:
             await self.store.append_message(record, "user", callback_id, {"callback": True})
-            turn = await self._dispatch_callback(record, callback_id)
+            turn = await self._dispatch_callback(
+                record,
+                callback_id,
+                self._callback_request_key(record, callback_id, incoming.message_id),
+            )
         except Exception:
             await self.store.fail_callback(record, callback_id, incoming.message_id, lease_token)
             raise
         await self.store.complete_callback(record, callback_id, incoming.message_id, lease_token)
         return turn
 
-    async def _dispatch_callback(self, record: ConversationRecord, callback_id: str) -> AgentTurn:
+    async def _dispatch_callback(
+        self,
+        record: ConversationRecord,
+        callback_id: str,
+        request_key: str,
+    ) -> AgentTurn:
         if callback_id.startswith("followup:") and record.state == ConversationState.FOLLOWUP_SENT.value:
             await self.store.cancel_pending_reminder(record)
             record = await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
@@ -102,7 +112,7 @@ class ConversationService:
                 "Я здесь. Можно продолжить с того места, где остановились.",
             )
         if callback_id == "human":
-            return await self._human_turn(record, "button")
+            return await self._human_turn(record, "button", request_key=request_key)
         if callback_id == "support:psychologist":
             if (
                 record.state != ConversationState.OPEN_CONVERSATION.value
@@ -143,7 +153,11 @@ class ConversationService:
         if callback_id.startswith("contact:"):
             if record.state != ConversationState.COLLECTING_CONTACT_METHOD.value:
                 return await self._state_turn(record)
-            return await self._handle_contact_choice(record, callback_id.removeprefix("contact:"))
+            return await self._handle_contact_choice(
+                record,
+                callback_id.removeprefix("contact:"),
+                request_key=request_key,
+            )
         if callback_id == "more_help":
             if record.state != ConversationState.AID_REQUESTED.value:
                 return await self._state_turn(record)
@@ -185,6 +199,7 @@ class ConversationService:
                 record,
                 "level_two_support",
                 cause=EscalationCause.LEVEL_TWO_SUPPORT,
+                request_key=request_key,
             )
         if callback_id == "level2:later":
             if record.state != ConversationState.FOLLOWUP_ANSWERED.value:
@@ -289,16 +304,21 @@ class ConversationService:
         )
         return self._contact_turn()
 
-    async def _handle_contact_choice(self, record: ConversationRecord, raw_method: str) -> AgentTurn:
+    async def _handle_contact_choice(
+        self,
+        record: ConversationRecord,
+        raw_method: str,
+        request_key: str | None = None,
+    ) -> AgentTurn:
         try:
             method = ContactMethod(raw_method)
         except ValueError:
             return self._contact_turn()
         if method is ContactMethod.LATER:
-            return await self._complete_pending_request(record, None, method)
+            return await self._complete_pending_request(record, None, method, request_key=request_key)
         if method is ContactMethod.CURRENT_TELEGRAM:
             value = f"@{record.username}" if record.username else None
-            return await self._complete_pending_request(record, value, method)
+            return await self._complete_pending_request(record, value, method, request_key=request_key)
         await self.store.update(
             record,
             pending_contact_method=method.value,
@@ -313,6 +333,7 @@ class ConversationService:
         contact_value: str | None,
         method: ContactMethod | None = None,
         decision: ResolvedTurn | None = None,
+        request_key: str | None = None,
     ) -> AgentTurn:
         aid_id = record.pending_aid_id
         if aid_id is None or get_aid_item(aid_id) is None:
@@ -325,6 +346,7 @@ class ConversationService:
             contact_value,
             city=record.pending_city,
             district=record.pending_district,
+            request_key=request_key,
         )
         await self.store.update(
             record,
@@ -443,6 +465,7 @@ class ConversationService:
         record: ConversationRecord,
         reason: str,
         cause: EscalationCause = EscalationCause.HUMAN_REQUEST,
+        request_key: str | None = None,
     ) -> AgentTurn:
         decision = ResolvedTurn(
             text=HUMAN_HANDOFF_PROMPT,
@@ -452,7 +475,7 @@ class ConversationService:
         return await self._execute_resolved_turn(
             record,
             decision,
-            handoff_request=EscalationRequest(cause=cause, reason=reason),
+            handoff_request=EscalationRequest(cause=cause, reason=reason, request_key=request_key),
         )
 
     async def _replay_callback(self, record: ConversationRecord, callback_id: str) -> AgentTurn:
@@ -474,6 +497,12 @@ class ConversationService:
             categories=assessment.categories,
             reason=assessment.rationale,
         )
+
+    @staticmethod
+    def _callback_request_key(record: ConversationRecord, callback_id: str, message_id: int | None) -> str:
+        source_message_id = str(message_id) if message_id is not None else "missing"
+        origin = f"{record.id}:{callback_id}:{source_message_id}".encode()
+        return f"callback:{hashlib.sha256(origin).hexdigest()}"
 
     @staticmethod
     def _turn(text: str, choices: tuple[Choice, ...] = ()) -> AgentTurn:

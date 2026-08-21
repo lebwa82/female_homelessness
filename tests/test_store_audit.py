@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,6 +70,114 @@ async def test_escalation_request_keeps_human_cause_without_risk_level() -> None
     assert escalation.cause is EscalationCause.HUMAN_REQUEST
     assert escalation.level is None
     assert escalation.reason == "button"
+
+
+@pytest.mark.asyncio
+async def test_in_memory_escalation_reuses_callback_request_key() -> None:
+    store = InMemoryConversationStore()
+    record = await store.ensure(identity())
+    request = EscalationRequest(
+        cause=EscalationCause.HUMAN_REQUEST,
+        reason="button",
+        request_key="callback:human:303",
+    )
+
+    first = await store.create_escalation(record, request)
+    second = await store.create_escalation(record, request)
+
+    assert first is second
+    assert len(store.escalations) == 1
+
+
+@pytest.mark.asyncio
+async def test_in_memory_aid_request_reuses_callback_request_key_without_followup_duplication() -> None:
+    store = InMemoryConversationStore()
+    record = await store.ensure(identity())
+
+    first = await store.create_aid_request(
+        record,
+        "food_card",
+        "current_telegram",
+        "@helper_test",
+        request_key="callback:contact:303",
+    )
+    duplicate = await store.create_aid_request(
+        record,
+        "food_card",
+        "current_telegram",
+        "@helper_test",
+        request_key="callback:contact:303",
+    )
+    later = await store.create_aid_request(
+        record,
+        "food_card",
+        "current_telegram",
+        "@helper_test",
+        request_key="callback:contact:304",
+    )
+
+    assert duplicate is first
+    assert len(store.aid_requests) == 2
+    assert len(store.followup_jobs) == 2
+    assert first.request_key != later.request_key
+
+
+@pytest.mark.asyncio
+async def test_postgres_update_mutates_the_supplied_record_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = SimpleNamespace(
+        id=1,
+        channel="telegram",
+        channel_user_id=101,
+        chat_id=202,
+        username="helper_test",
+        state="followup_sent",
+        requested_help=None,
+        pending_aid_id=None,
+        pending_contact_method=None,
+        pending_city=None,
+        pending_district=None,
+        pending_offer=None,
+    )
+
+    class SessionDouble:
+        async def __aenter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        async def __aexit__(self, *args):  # type: ignore[no-untyped-def]
+            return None
+
+        async def get(self, model, record_id):  # type: ignore[no-untyped-def]
+            assert record_id == 1
+            return row
+
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, refreshed_row) -> None:  # type: ignore[no-untyped-def]
+            assert refreshed_row is row
+
+    monkeypatch.setattr(store_module.db, "Session", SessionDouble)
+    record = ConversationRecord(1, "telegram", 101, 202, "helper_test")
+
+    updated = await PostgresConversationStore().update(
+        record,
+        state="open_conversation",
+        need="housing",
+        pending_aid_id="hostel_3_nights",
+        pending_contact_method="phone",
+        pending_city="Москва",
+        pending_district="ЦАО",
+        pending_offer="psychologist",
+    )
+
+    assert updated is record
+    assert record.state == "open_conversation"
+    assert record.need == "housing"
+    assert record.pending_aid_id == "hostel_3_nights"
+    assert record.pending_contact_method == "phone"
+    assert record.pending_city == "Москва"
+    assert record.pending_district == "ЦАО"
+    assert record.pending_offer == "psychologist"
 
 
 @pytest.mark.asyncio

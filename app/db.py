@@ -182,6 +182,7 @@ class Escalation(Base):
     level: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     categories: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     reason: Mapped[str] = mapped_column(String(240), default="")
+    request_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
     status: Mapped[str] = mapped_column(String(32), default="simulated", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -230,7 +231,12 @@ async def init_db() -> None:
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS cause VARCHAR(48) NOT NULL DEFAULT 'safety'",
             "ALTER TABLE escalations ALTER COLUMN level DROP NOT NULL",
+            "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS request_key VARCHAR(128)",
             "CREATE INDEX IF NOT EXISTS ix_escalations_cause ON escalations (cause)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_escalations_request_key "
+                "ON escalations (request_key)"
+            ),
             """
             CREATE TABLE IF NOT EXISTS callback_executions (
                 id SERIAL PRIMARY KEY,
@@ -458,18 +464,38 @@ async def fail_callback_execution(
         return result.rowcount == 1
 
 
-async def create_escalation(conversation_id: int, request: EscalationRequest) -> None:
+async def create_escalation(conversation_id: int, request: EscalationRequest) -> Escalation:
+    values = {
+        "conversation_id": conversation_id,
+        "cause": request.cause.value,
+        "level": request.level.value if request.level else None,
+        "categories": {"items": list(request.categories)},
+        "reason": request.reason,
+        "request_key": request.request_key,
+    }
     async with Session() as session:
-        session.add(
-            Escalation(
-                conversation_id=conversation_id,
-                cause=request.cause.value,
-                level=request.level.value if request.level else None,
-                categories={"items": list(request.categories)},
-                reason=request.reason,
+        if request.request_key is None:
+            escalation = Escalation(**values)
+            session.add(escalation)
+        else:
+            result = await session.execute(
+                postgres_insert(Escalation)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=(Escalation.request_key,))
+                .returning(Escalation.id)
             )
-        )
+            escalation_id = result.scalar_one_or_none()
+            if escalation_id is None:
+                existing = await session.execute(
+                    select(Escalation).where(Escalation.request_key == request.request_key)
+                )
+                escalation = existing.scalar_one()
+            else:
+                escalation = await session.get(Escalation, escalation_id)
+                if escalation is None:
+                    raise LookupError(f"escalation {escalation_id} is missing")
         await session.commit()
+        return escalation
 
 
 async def purge_expired_content(now: datetime | None = None) -> int:
