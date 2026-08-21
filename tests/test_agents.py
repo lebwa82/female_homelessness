@@ -7,12 +7,13 @@ from pydantic_ai import PromptedOutput
 from app.agents import (
     AgentCallResult,
     AgentContext,
+    AgentEvaluation,
     YandexAgentGateway,
     usage_audit,
     yandex_model_settings,
     yandex_output_type,
 )
-from app.domain import ChoiceSet, RiskLevel, SupportIntent, SupportPlan
+from app.domain import AgentAction, ChoiceSet, RiskAssessment, RiskLevel, SupportIntent, SupportPlan
 
 
 def test_qwen_uses_prompted_typed_output_with_reasoning_disabled() -> None:
@@ -30,6 +31,16 @@ def test_usage_audit_reads_the_pydantic_ai_usage_object() -> None:
         "total_tokens": 18,
         "cached_tokens": 3,
     }
+
+
+def test_agent_evaluation_rejects_non_support_plan() -> None:
+    with pytest.raises(TypeError, match="plan must be a SupportPlan or None"):
+        AgentEvaluation(
+            risk=RiskAssessment(level=RiskLevel.NONE),
+            plan=AgentAction(kind="reply", text="Я рядом."),
+            risk_audit={"status": "completed"},
+            support_audit={"status": "completed"},
+        )
 
 
 @pytest.mark.asyncio

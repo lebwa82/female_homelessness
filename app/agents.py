@@ -60,6 +60,10 @@ class AgentEvaluation:
     risk_audit: dict[str, Any]
     support_audit: dict[str, Any]
 
+    def __post_init__(self) -> None:
+        if self.plan is not None and not isinstance(self.plan, SupportPlan):
+            raise TypeError("plan must be a SupportPlan or None")
+
 
 Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
 
