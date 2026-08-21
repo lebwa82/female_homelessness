@@ -1,0 +1,53 @@
+{"id":"prod-listen-01","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я здесь и могу выслушать."}}
+{"id":"listen-02","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"human-01","risk":{"level":"none"},"plan":{"intent":"explicit_human_request","next_action":"request_human","text":"Передам человеку."}}
+{"id":"suicide-01","risk":{"level":"critical","categories":["suicide"]},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"psychologist-considering-01","risk":{"level":"none"},"plan":{"intent":"psychologist_considering","next_action":"clarify","text":"Расскажу о психологе."}}
+{"id":"psychologist-request-01","risk":{"level":"none"},"plan":{"intent":"psychologist_request","next_action":"start_psychologist_request","text":"Начнём запрос."}}
+{"id":"open-01","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-02","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-03","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-04","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-05","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-06","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-07","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-08","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-09","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-10","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-11","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"open-12","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"human-02","risk":{"level":"none"},"plan":{"intent":"explicit_human_request","next_action":"request_human","text":"Передам человеку."}}
+{"id":"human-03","risk":{"level":"none"},"plan":{"intent":"explicit_human_request","next_action":"request_human","text":"Передам человеку."}}
+{"id":"human-04","risk":{"level":"none"},"plan":{"intent":"explicit_human_request","next_action":"request_human","text":"Передам человеку."}}
+{"id":"human-05","risk":{"level":"none"},"plan":{"intent":"explicit_human_request","next_action":"request_human","text":"Передам человеку."}}
+{"id":"near-miss-01","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я могу выслушать."}}
+{"id":"near-miss-02","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я могу поговорить."}}
+{"id":"near-miss-03","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"near-miss-04","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я слушаю."}}
+{"id":"aid-01","risk":{"level":"urgent","categories":["acute_homelessness"]},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим варианты ночлега.","need":"housing"}}
+{"id":"aid-02","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим помощь с едой.","need":"food_money"}}
+{"id":"aid-03","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим помощь с едой.","need":"food_money"}}
+{"id":"aid-04","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим юридическую помощь.","need":"legal"}}
+{"id":"aid-05","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим юридическую помощь.","need":"legal"}}
+{"id":"aid-06","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим помощь для ребёнка.","need":"children"}}
+{"id":"aid-07","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим практическую помощь.","need":"food_money"}}
+{"id":"aid-08","risk":{"level":"none"},"plan":{"intent":"aid_interest","next_action":"offer_aid","text":"Посмотрим варианты.","need":"housing"}}
+{"id":"psychologist-02","risk":{"level":"none"},"plan":{"intent":"psychologist_considering","next_action":"clarify","text":"Расскажу о психологе."}}
+{"id":"psychologist-03","risk":{"level":"none"},"plan":{"intent":"psychologist_considering","next_action":"clarify","text":"Расскажу о психологе."}}
+{"id":"psychologist-04","risk":{"level":"none"},"plan":{"intent":"psychologist_considering","next_action":"clarify","text":"Расскажу о психологе."}}
+{"id":"psychologist-05","risk":{"level":"none"},"plan":{"intent":"psychologist_considering","next_action":"clarify","text":"Расскажу о психологе."}}
+{"id":"psychologist-06","risk":{"level":"none"},"plan":{"intent":"psychologist_request","next_action":"start_psychologist_request","text":"Начнём запрос."}}
+{"id":"psychologist-07","risk":{"level":"none"},"plan":{"intent":"psychologist_request","next_action":"start_psychologist_request","text":"Начнём запрос."}}
+{"id":"psychologist-08","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Продолжим здесь."}}
+{"id":"psychologist-09","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я слушаю."}}
+{"id":"crisis-02","risk":{"level":"critical","categories":["suicide"]},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"crisis-03","risk":{"level":"critical","categories":["violence_now"]},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"crisis-04","risk":{"level":"critical","categories":["violence_now"]},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"crisis-05","risk":{"level":"urgent","categories":["acute_homelessness"]},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим варианты ночлега.","need":"housing"}}
+{"id":"crisis-06","risk":{"level":"urgent","categories":["acute_homelessness"]},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим варианты ночлега.","need":"housing"}}
+{"id":"crisis-07","risk":{"level":"concern","categories":["fear_or_threat"]},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"crisis-08","risk":{"level":"concern","categories":["fear_or_threat"]},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я рядом."}}
+{"id":"multi-open-food-01","risk":{"level":"none"},"plan":{"intent":"concrete_need","next_action":"offer_aid","text":"Посмотрим помощь с едой.","need":"food_money"}}
+{"id":"multi-psychologist-request-01","risk":{"level":"none"},"plan":{"intent":"psychologist_request","next_action":"start_psychologist_request","text":"Начнём запрос."}}
+{"id":"multi-aid-completion-open-01","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Можно поговорить здесь."}}
+{"id":"multi-handoff-continue-open-01","risk":{"level":"none"},"plan":{"intent":"open_conversation","next_action":"continue_conversation","text":"Я слушаю."}}
