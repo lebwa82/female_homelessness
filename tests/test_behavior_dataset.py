@@ -74,6 +74,26 @@ def test_malformed_dataset_rows_fail_with_clear_errors(row: dict[str, object], m
         load_cases_from_text(json.dumps(row))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("risk", ["invented-risk"]),
+        ("intent", ["invented-intent"]),
+        ("choice_set", "invented-choice-set"),
+        ("effect", "invented-effect"),
+    ],
+)
+def test_expected_enum_values_must_belong_to_the_domain(
+    field: str, value: object
+) -> None:
+    """Typos in symbolic invariants must fail at load time rather than at replay time."""
+    row = _valid_row(f"invalid-{field}")
+    row["expected"] = {field: value}
+
+    with pytest.raises(DatasetError, match=f"expected.{field} contains invalid enum value"):
+        load_cases_from_text(json.dumps(row))
+
+
 def load_cases_from_text(text: str):  # type: ignore[no-untyped-def]
     path = Path(__file__).parent / "fixtures" / "_temporary_dialogue_cases.jsonl"
     path.write_text(text, encoding="utf-8")

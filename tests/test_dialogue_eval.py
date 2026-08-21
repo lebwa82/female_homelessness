@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from app.domain import IncomingMessage, RiskAssessment, RiskLevel, SupportPlan
 from app.service import ConversationService
 from app.store import InMemoryConversationStore
 from scripts.dialogue_eval import (
+    DatasetError,
     FixtureGateway,
     evaluate_case,
     evaluate_cases,
@@ -53,26 +54,50 @@ async def test_fixture_gateway_consumes_separate_agent_payload_not_expected_inva
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["missing", "surplus"])
+async def test_fixture_ids_must_exactly_match_dataset_before_replay(mode: str) -> None:
+    """A stale fixture file must fail before any case can be evaluated."""
+    cases = load_cases(DATASET)
+    payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
+    if mode == "missing":
+        payloads.pop("prod-listen-01")
+    else:
+        payloads["surplus-case"] = payloads["prod-listen-01"]
+
+    with pytest.raises(DatasetError, match=f"fixture IDs must exactly match dataset IDs: {mode}"):
+        await evaluate_cases(FixtureGateway(payloads), cases)
+
+
+@pytest.mark.asyncio
 async def test_production_regression_replays_through_conversation_service() -> None:
     """A request to be heard after an assistant turn must remain an open conversation."""
+    case = next(case for case in load_cases(DATASET) if case.id == "prod-listen-01")
+    assert case.history == (
+        ("user", "мне плохо"),
+        ("assistant", "Я рядом. Что сейчас особенно тяжело?"),
+        ("user", "мне просто хочется выговориться — ты можешь меня выслушать?"),
+    )
     store = InMemoryConversationStore()
+    gateway = ScriptedGateway(
+        [
+            open_conversation_plan(case.history[1][1]),
+            open_conversation_plan("Да, я могу вас выслушать."),
+        ]
+    )
     service = ConversationService(
         store=store,
-        gateway=ScriptedGateway(
-            [
-                open_conversation_plan("Я рядом. Что сейчас особенно тяжело?"),
-                open_conversation_plan("Да, я могу вас выслушать."),
-            ]
-        ),
+        gateway=gateway,
     )
 
-    await service.handle_text(identity("мне плохо", 1))
-    turn = await service.handle_text(
-        identity("мне просто хочется выговориться — ты можешь меня выслушать?", 2)
-    )
+    first_incoming = identity(case.history[0][1], 1)
+    first_turn = await service.handle_text(first_incoming)
+    assert first_turn.text == case.history[1][1]
+    await service.record_outbound(first_incoming, first_turn)
+    turn = await service.handle_text(identity(case.history[2][1], 2))
 
     assert [choice.id for choice in turn.choices] == ["human"]
     assert store.escalations == []
+    assert gateway.contexts[-1].history == case.history
 
 
 def test_cli_output_does_not_echo_dialogue_history(capsys: pytest.CaptureFixture[str]) -> None:
@@ -108,8 +133,10 @@ def test_cli_returns_nonzero_for_hard_invariant_failure(
 @dataclass
 class ScriptedGateway:
     evaluations: list[AgentEvaluation]
+    contexts: list[AgentContext] = field(default_factory=list)
 
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
+        self.contexts.append(context)
         return self.evaluations.pop(0)
 
 

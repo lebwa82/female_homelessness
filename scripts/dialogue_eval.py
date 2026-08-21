@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
-from app.domain import PolicyEffect, PolicySideEffect, RiskAssessment, SupportPlan
+from app.domain import (
+    ChoiceSet,
+    PolicyEffect,
+    PolicySideEffect,
+    RiskAssessment,
+    RiskLevel,
+    SupportIntent,
+    SupportPlan,
+)
 from app.policy import resolve_turn
 
 
@@ -69,6 +77,15 @@ class FixtureGateway:
 
     def for_case(self, case: DialogueCase) -> FixtureGateway:
         return self.from_case(case, self._outputs)
+
+    def validate_case_ids(self, cases: Sequence[DialogueCase]) -> None:
+        missing = {case.id for case in cases} - set(self._outputs)
+        surplus = set(self._outputs) - {case.id for case in cases}
+        if missing or surplus:
+            mismatch = ", ".join(
+                kind for kind, present in (("missing", missing), ("surplus", surplus)) if present
+            )
+            raise DatasetError(f"fixture IDs must exactly match dataset IDs: {mismatch}")
 
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
         del context
@@ -145,6 +162,8 @@ async def evaluate_case(gateway: Gateway, case: DialogueCase) -> CaseReport:
 
 
 async def evaluate_cases(gateway: Gateway, cases: Sequence[DialogueCase]) -> EvalReport:
+    if isinstance(gateway, FixtureGateway):
+        gateway.validate_case_ids(cases)
     reports: list[CaseReport] = []
     for case in cases:
         case_gateway: Gateway = gateway.for_case(case) if isinstance(gateway, FixtureGateway) else gateway
@@ -245,6 +264,18 @@ def _validate_expected(expected: dict[str, Any], prefix: str) -> None:
             raise DatasetError(f"{prefix}: expected.{key} must be a string")
     if "escalation" in expected and not isinstance(expected["escalation"], bool):
         raise DatasetError(f"{prefix}: expected.escalation must be a boolean")
+    enum_values: tuple[tuple[str, list[Any], Any], ...] = (
+        ("risk", expected.get("risk", []), RiskLevel),
+        ("intent", expected.get("intent", []), SupportIntent),
+        ("choice_set", [expected["choice_set"]] if "choice_set" in expected else [], ChoiceSet),
+        ("effect", [expected["effect"]] if "effect" in expected else [], PolicyEffect),
+    )
+    for field, values, enum_type in enum_values:
+        for value in values:
+            try:
+                enum_type(value)
+            except ValueError as error:
+                raise DatasetError(f"{prefix}: expected.{field} contains invalid enum value") from error
 
 
 def _check_expectations(
