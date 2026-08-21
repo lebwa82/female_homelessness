@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -35,6 +36,53 @@ from app.store import InMemoryConversationStore
 
 DATASET_VERSION = 2
 MAX_CASE_CONCURRENCY = 4
+_VALIDATION_FIELD_CATEGORIES = frozenset({
+    "level",
+    "categories",
+    "confidence",
+    "rationale",
+    "rationale_alias_used",
+    "evidence_claims",
+    "intent",
+    "need_hint",
+    "draft_text",
+    "suggested_support",
+})
+_VALIDATION_TYPE_CATEGORIES = {
+    "missing": "missing",
+    "extra_forbidden": "extra_forbidden",
+    "enum": "enum",
+    "string_type": "string_type",
+    "string_too_short": "string_too_short",
+    "string_too_long": "string_too_long",
+    "float_type": "float_type",
+    "float_parsing": "float_parsing",
+    "greater_than_equal": "out_of_range",
+    "less_than_equal": "out_of_range",
+    "tuple_type": "sequence_type",
+    "list_type": "sequence_type",
+    "too_long": "sequence_too_long",
+    "bool_type": "bool_type",
+    "bool_parsing": "bool_type",
+    "model_type": "payload_type",
+    "dict_type": "payload_type",
+    "json_invalid": "payload_format",
+}
+_TRANSPORT_ERROR_CATEGORIES = {
+    "TimeoutError": "TimeoutError",
+    "APITimeoutError": "TimeoutError",
+    "APIConnectionError": "ConnectionError",
+    "ConnectError": "ConnectionError",
+    "ConnectionError": "ConnectionError",
+    "OSError": "ConnectionError",
+    "AuthenticationError": "AuthenticationError",
+    "PermissionDeniedError": "PermissionDeniedError",
+    "RateLimitError": "RateLimitError",
+    "BadRequestError": "BadRequestError",
+    "InternalServerError": "ServerError",
+    "APIStatusError": "ServerError",
+    "UnexpectedModelBehavior": "UnexpectedModelBehavior",
+}
 
 
 class DatasetError(ValueError):
@@ -90,6 +138,34 @@ class FixtureOutput:
 
 
 @dataclass(frozen=True)
+class ProviderFailureMetadata:
+    """Allow-listed non-content diagnostics for one unavailable or invalid provider agent."""
+
+    agent: str
+    diagnostic_status: str
+    transport_error_type: str | None = None
+    validation_fields: tuple[str, ...] = ()
+    validation_types: tuple[str, ...] = ()
+    output_envelope: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "agent": self.agent,
+            "diagnostic_status": self.diagnostic_status,
+        }
+        if self.transport_error_type is not None:
+            result["transport_error_type"] = self.transport_error_type
+        if self.validation_fields or self.validation_types:
+            result["validation"] = {
+                "fields": list(self.validation_fields),
+                "types": list(self.validation_types),
+            }
+        if self.output_envelope is not None:
+            result["output_envelope"] = self.output_envelope
+        return result
+
+
+@dataclass(frozen=True)
 class CaseReport:
     case_id: str
     diagnostics: dict[str, str | None]
@@ -99,6 +175,7 @@ class CaseReport:
     hard_failures: tuple[str, ...]
     diagnostic_deltas: tuple[str, ...]
     provider_failures: tuple[str, ...]
+    provider_failure_metadata: tuple[ProviderFailureMetadata, ...]
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -120,6 +197,28 @@ class EvalReport:
     @property
     def provider_failures(self) -> tuple[str, ...]:
         return tuple(f"{case.case_id}:{item}" for case in self.cases for item in case.provider_failures)
+
+    @property
+    def provider_failure_summary(self) -> dict[str, dict[str, int]]:
+        counters = {
+            "by_agent": Counter[str](),
+            "by_diagnostic_status": Counter[str](),
+            "by_transport_error_type": Counter[str](),
+            "by_validation_field": Counter[str](),
+            "by_validation_type": Counter[str](),
+            "by_output_envelope": Counter[str](),
+        }
+        for case in self.cases:
+            for failure in case.provider_failure_metadata:
+                counters["by_agent"][failure.agent] += 1
+                counters["by_diagnostic_status"][failure.diagnostic_status] += 1
+                if failure.transport_error_type is not None:
+                    counters["by_transport_error_type"][failure.transport_error_type] += 1
+                counters["by_validation_field"].update(failure.validation_fields)
+                counters["by_validation_type"].update(failure.validation_types)
+                if failure.output_envelope is not None:
+                    counters["by_output_envelope"][failure.output_envelope] += 1
+        return {name: dict(sorted(counter.items())) for name, counter in counters.items()}
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -253,6 +352,9 @@ async def evaluate_case(
     hard_failures = _behavior_failures(case.behavior, projection, audit, history_matches)
     deltas = _diagnostic_deltas(case.diagnostics, diagnostics)
     provider_failures = _provider_failures(diagnostics) if require_provider_health else ()
+    provider_failure_metadata = (
+        _provider_failure_metadata(store, diagnostics) if require_provider_health else ()
+    )
     return CaseReport(
         case.id,
         diagnostics,
@@ -262,6 +364,7 @@ async def evaluate_case(
         tuple(hard_failures),
         deltas,
         provider_failures,
+        provider_failure_metadata,
     )
 
 
@@ -329,12 +432,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "rule_ids": case.rule_ids,
             "hard_failures": case.hard_failures,
             "provider_failures": case.provider_failures,
+            "provider_failure_metadata": [failure.as_dict() for failure in case.provider_failure_metadata],
         }, ensure_ascii=True, sort_keys=True))
     print(json.dumps({"summary": {
         "cases": len(report.cases),
         "hard_failures": len(report.hard_failures),
         "diagnostic_deltas": len(report.diagnostic_deltas),
         "provider_failures": len(report.provider_failures),
+        "provider_failure_summary": report.provider_failure_summary,
     }}, ensure_ascii=True, sort_keys=True))
     return 2 if report.provider_failures else 1 if report.hard_failures else 0
 
@@ -542,6 +647,80 @@ def _diagnostic_deltas(expected: Mapping[str, tuple[str, ...]], actual: Mapping[
 
 def _provider_failures(diagnostics: Mapping[str, str | None]) -> tuple[str, ...]:
     return tuple(f"{kind}_{diagnostics[f'{kind}_status']}" for kind in ("safety", "support") if diagnostics[f"{kind}_status"] != DiagnosticStatus.COMPLETED.value)
+
+
+def _provider_failure_metadata(
+    store: InMemoryConversationStore,
+    diagnostics: Mapping[str, str | None],
+) -> tuple[ProviderFailureMetadata, ...]:
+    audits = {agent: audit for _, agent, audit in store.agent_runs}
+    failures: list[ProviderFailureMetadata] = []
+    for agent in ("safety", "support"):
+        status = diagnostics.get(f"{agent}_status")
+        if status == DiagnosticStatus.COMPLETED.value:
+            continue
+        diagnostic_status = status if status in {
+            DiagnosticStatus.INVALID.value,
+            DiagnosticStatus.UNAVAILABLE.value,
+        } else DiagnosticStatus.UNAVAILABLE.value
+        audit = audits.get(agent, {})
+        validation = audit.get("validation_errors")
+        fields = _validation_field_categories(validation.get("fields")) if isinstance(validation, Mapping) else ()
+        types = _validation_type_categories(validation.get("types")) if isinstance(validation, Mapping) else ()
+        failures.append(
+            ProviderFailureMetadata(
+                agent=agent,
+                diagnostic_status=diagnostic_status,
+                transport_error_type=_transport_error_category(audit.get("error_type")),
+                validation_fields=fields,
+                validation_types=types,
+                output_envelope=_output_envelope_shape(audit.get("output_shape")),
+            )
+        )
+    return tuple(failures)
+
+
+def _validation_field_categories(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(sorted({
+        item.split(".", 1)[0] if item.split(".", 1)[0] in _VALIDATION_FIELD_CATEGORIES else "unknown_field"
+        for item in value
+        if isinstance(item, str)
+    }))
+
+
+def _validation_type_categories(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(sorted({
+        _VALIDATION_TYPE_CATEGORIES.get(item, "other_validation_error")
+        for item in value
+        if isinstance(item, str)
+    }))
+
+
+def _transport_error_category(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _TRANSPORT_ERROR_CATEGORIES.get(value, "OtherTransportError")
+
+
+def _output_envelope_shape(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    flags = {name: value.get(name) for name in (
+        "nonempty", "starts_json", "ends_object", "starts_code_fence", "ends_code_fence"
+    )}
+    if not all(isinstance(flag, bool) for flag in flags.values()):
+        return None
+    if flags["starts_code_fence"] and flags["ends_code_fence"]:
+        return "code_fence"
+    if flags["starts_json"] and flags["ends_object"]:
+        return "json_object"
+    if not flags["nonempty"]:
+        return "empty"
+    return "other_nonempty"
 
 
 def _hard_hash(projection: Mapping[str, Any]) -> str:

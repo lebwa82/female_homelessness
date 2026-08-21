@@ -72,6 +72,7 @@ class ProviderSettings:
 
 
 DEFAULT_PROVIDER_SETTINGS = ProviderSettings()
+PROVIDER_TIMEOUT_SECONDS = 12.0
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,18 @@ def yandex_model_settings(
     provider_settings: ProviderSettings = DEFAULT_PROVIDER_SETTINGS,
 ) -> OpenAIResponsesModelSettings:
     return provider_settings.model_settings()
+
+
+def create_yandex_client() -> AsyncOpenAI:
+    """Construct the one-shot provider client with the fixed no-retry transport budget."""
+    return AsyncOpenAI(
+        api_key=settings.yandex_ai_api_key,
+        base_url="https://ai.api.cloud.yandex.net/v1",
+        project=settings.yandex_cloud_folder_id,
+        default_headers={"x-data-logging-enabled": "false"},
+        timeout=PROVIDER_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
 
 def yandex_output_type(agent_name: str) -> type[str]:
@@ -234,14 +247,7 @@ class YandexAgentGateway:
     async def _call_live(self, agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
         if not settings.llm_enabled or not settings.yandex_ai_api_key:
             return AgentCallResult(payload={}, audit={"status": "not_configured"})
-        client = AsyncOpenAI(
-            api_key=settings.yandex_ai_api_key,
-            base_url="https://ai.api.cloud.yandex.net/v1",
-            project=settings.yandex_cloud_folder_id,
-            default_headers={"x-data-logging-enabled": "false"},
-            timeout=12.0,
-            max_retries=0,
-        )
+        client = create_yandex_client()
         started = perf_counter()
         try:
             model = OpenAIResponsesModel(

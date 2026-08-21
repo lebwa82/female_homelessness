@@ -41,14 +41,14 @@ Blocked locally. The existing Podman machine reported started, but its runtime s
 
 ## Live gate
 
-The first healthcheck did not export variables from the sourced environment and was not a valid provider check. With safe auto-export, a provider output could be structurally non-actionable under the prior prompted-output boundary. The single-response JSON boundary removes retries while retaining exactly two calls. The observed health results are not consistently green: one run had safety invalid/support completed, while the following anonymized observation had both completed. No additional retry was made.
-
-The two full-history live evaluator runs are pending a fresh approval-flow authorization. The escalation review rejected the first requested run before execution because it would export the 53 histories to the external provider, and specifically required a renewed approval after the risk warning. This task does not retry or circumvent that decision.
+The provider health observations are not consistently green: one anonymized observation had safety invalid/support completed, while a following observation had both completed. The single-response JSON boundary retains exactly two calls and no retries.
 
 | Live run | Result |
 | --- | --- |
-| 1 | not run — fresh full-history external approval pending |
-| 2 | not run — fresh full-history external approval pending |
+| 1 | 53 cases; 0 hard failures; 23 diagnostic deltas; 8 provider failures |
+| 2 | 53 cases; 0 hard failures; 23 diagnostic deltas; 9 provider failures |
+
+No case output, histories, prompts, response IDs, or provider text were retained from these approved live runs. Fix round 2 itself did not call the provider or run a live evaluation.
 
 ## Fix round 1 — hardening acceptance evidence
 
@@ -58,11 +58,20 @@ The two full-history live evaluator runs are pending a fresh approval-flow autho
 - PostgreSQL assurance now creates a unique temporary conversation and a `human_requested` escalation within the existing rollback-only transaction, reads back its own stored level, verifies it, and rolls the transaction back. Mocked SQL-order coverage proves no committed row or cleanup delete is used.
 - This fix round made no provider, live-evaluation, Podman, or real-PostgreSQL calls. The offline service replay aggregate was 53 cases, with 0 hard failures, 0 diagnostic deltas, and 0 provider failures.
 
+## Fix round 2 — safe live-failure classification
+
+- Two approved full live evaluations of `48bee95` completed before this local-only fix: run 1 had 53 cases, 0 hard failures, 23 diagnostic deltas, and 8 provider failures; run 2 had 53 cases, 0 hard failures, 23 diagnostic deltas, and 9 provider failures. No case output, histories, prompts, response IDs, or provider text were retained.
+- The evaluator now projects provider failures through a strict allow-list: agent (`safety` or `support`), diagnostic status (`invalid` or `unavailable`), transport error class, Pydantic validation field/type, and one fixed output-envelope category. Per-case metadata and the CLI summary discard every other audit field, including values, input hashes, response IDs, model names, token usage, and error origins.
+- The live summary now aggregates counts by agent, diagnostic status, transport error type, validation field/type, and output-envelope category. It leaves hard behavior, history replay, two calls per text turn, and no-retry policy unchanged.
+- The existing 12-second provider client timeout was reviewed and made explicit through a tested client factory; SDK retries and agent retries remain zero. Evaluator concurrency remains capped at four.
+- Local verification after this change: 257 tests passed, scenario smoke passed, and offline replay was 53 cases with 0 hard failures, 0 diagnostic deltas, and 0 provider failures.
+- No provider, live-evaluation, Podman, or real-PostgreSQL call was made in this fix round. An empty isolated package cache made one blocked dependency-metadata DNS attempt before tests; it fetched nothing, and all subsequent verification used the already-installed environment or `UV_OFFLINE=1`.
+
 ## Self-review
 
 - Service evaluator, explicit workflow state, mutation invariance, stable order, bounded case concurrency, and output redaction are covered by tests.
 - No histories, reply prose, prompts, environment values, credentials, proxy data, Telegram data, or database records appear in this report or evaluator output.
-- Task remains blocked on the local Podman runtime, a consistently green provider-health gate, and the approval-flow authorization for full-history live evaluation. No deployment, push, or Telegram action was taken.
+- Task remains blocked on the local Podman runtime and a consistently green provider-health gate. No deployment, push, or Telegram action was taken.
 
 ## Commit
 

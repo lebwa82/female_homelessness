@@ -32,6 +32,23 @@ def test_qwen_uses_text_json_boundary_and_one_provider_settings_source() -> None
     assert provider_settings.audit_fields()["max_tokens"] == 111
 
 
+def test_yandex_client_uses_fixed_timeout_and_disables_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(agents, "AsyncOpenAI", Client)
+
+    agents.create_yandex_client()
+
+    assert captured["timeout"] == 12.0
+    assert captured["max_retries"] == 0
+
+
 def test_support_text_json_instructions_enumerate_the_only_valid_intents() -> None:
     assert all(intent.value in SUPPORT_INSTRUCTIONS for intent in SupportIntent)
 

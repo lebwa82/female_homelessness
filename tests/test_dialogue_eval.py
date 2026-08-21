@@ -8,10 +8,12 @@ from pathlib import Path
 import pytest
 
 from app.agents import AgentContext, AgentEvaluation
+from app.domain import DiagnosticStatus
 from scripts.dialogue_eval import (
     DatasetError,
     DiagnosticVariant,
     FixtureGateway,
+    ProviderFailureMetadata,
     evaluate_case,
     evaluate_cases,
     evaluate_offline_cases,
@@ -137,6 +139,71 @@ async def test_provider_health_failure_is_separate_from_hard_behavior() -> None:
     assert len(report.provider_failures) == len(cases) * 2
 
 
+@pytest.mark.asyncio
+async def test_provider_failure_summary_retains_only_safe_agent_and_cause_metadata() -> None:
+    case = load_cases(DATASET)[0]
+    evaluation = AgentEvaluation(
+        safety_status=DiagnosticStatus.INVALID,
+        support_status=DiagnosticStatus.UNAVAILABLE,
+        safety_audit={
+            "diagnostic_status": "invalid",
+            "validation_errors": {
+                "fields": ["choice_set", "provider_controlled_extra_key"],
+                "types": ["extra_forbidden", "provider_controlled_error_type"],
+            },
+            "output_shape": {
+                "characters": 19,
+                "nonempty": True,
+                "starts_json": False,
+                "ends_object": False,
+                "starts_code_fence": True,
+                "ends_code_fence": True,
+            },
+            "input_hash": "hidden-input-hash",
+            "response_id": "hidden-response-id",
+        },
+        support_audit={
+            "diagnostic_status": "unavailable",
+            "error_type": "ProviderControlledErrorName",
+            "error_origin": "hidden-origin",
+            "model": "hidden-model",
+        },
+    )
+
+    report = await evaluate_cases(
+        ScriptedGateway([evaluation]), (case,), require_provider_health=True
+    )
+
+    assert report.cases[0].provider_failure_metadata == (
+        ProviderFailureMetadata(
+            agent="safety",
+            diagnostic_status="invalid",
+            validation_fields=("unknown_field",),
+            validation_types=("extra_forbidden", "other_validation_error"),
+            output_envelope="code_fence",
+        ),
+        ProviderFailureMetadata(
+            agent="support",
+            diagnostic_status="unavailable",
+            transport_error_type="OtherTransportError",
+        ),
+    )
+    assert report.provider_failure_summary == {
+        "by_agent": {"safety": 1, "support": 1},
+        "by_diagnostic_status": {"invalid": 1, "unavailable": 1},
+        "by_transport_error_type": {"OtherTransportError": 1},
+        "by_validation_field": {"unknown_field": 1},
+        "by_validation_type": {"extra_forbidden": 1, "other_validation_error": 1},
+        "by_output_envelope": {"code_fence": 1},
+    }
+    metadata_repr = repr(report.cases[0].provider_failure_metadata)
+    assert "hidden-" not in metadata_repr
+    assert "input_hash" not in metadata_repr
+    assert "response_id" not in metadata_repr
+    assert "provider_controlled" not in metadata_repr
+    assert "ProviderControlled" not in metadata_repr
+
+
 def test_cli_output_never_includes_history_or_reply_fields(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(["--fixtures", str(FIXTURE_OUTPUTS), str(DATASET)])
 
@@ -145,6 +212,15 @@ def test_cli_output_never_includes_history_or_reply_fields(capsys: pytest.Captur
     assert "prod-listen-01" in captured.out
     assert "history" not in captured.out
     assert "draft_text" not in captured.out
+    summary = json.loads(captured.out.splitlines()[-1])["summary"]
+    assert summary["provider_failure_summary"] == {
+        "by_agent": {},
+        "by_diagnostic_status": {},
+        "by_transport_error_type": {},
+        "by_validation_field": {},
+        "by_validation_type": {},
+        "by_output_envelope": {},
+    }
 
 
 def test_cli_returns_nonzero_for_hard_invariant_failure(
