@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.domain import Choice, ContactMethod, NeedKind
+from app.catalog import get_aid_item
+from app.domain import Choice, ChoiceSet, ContactMethod, NeedKind
+
+HUMAN_CHOICE = Choice(id="human", label="Поговорить с живым человеком")
 
 CONTINUE_CHOICES = (
     Choice(id="continue", label="Да"),
@@ -40,3 +43,37 @@ LEVEL_TWO_CHOICES = (
     Choice(id="level2:later", label="Позже"),
     Choice(id="finish", label="Нет, спасибо"),
 )
+
+SAFE_CONTINUE_CHOICES = (
+    Choice(id="continue_bot", label="Продолжить здесь"),
+    HUMAN_CHOICE,
+)
+
+PSYCHOLOGIST_INTEREST_CHOICES = (
+    Choice(id="support:psychologist", label="Хочу поговорить с психологом"),
+    HUMAN_CHOICE,
+)
+
+_CHOICES_BY_SET = {
+    ChoiceSet.NONE: (HUMAN_CHOICE,),
+    ChoiceSet.SAFE_CONTINUE: SAFE_CONTINUE_CHOICES,
+    ChoiceSet.NEED_CATEGORIES: (*NEED_CHOICES, HUMAN_CHOICE),
+    ChoiceSet.PSYCHOLOGIST_INTEREST: PSYCHOLOGIST_INTEREST_CHOICES,
+    ChoiceSet.CONTACT_METHODS: (*CONTACT_CHOICES, HUMAN_CHOICE),
+    ChoiceSet.MORE_HELP: (*MORE_HELP_CHOICES, HUMAN_CHOICE),
+}
+
+
+def choices_for(
+    choice_set: ChoiceSet,
+    catalog_item_ids: tuple[str, ...] = (),
+) -> tuple[Choice, ...]:
+    """Render only backend-owned callback IDs for a symbolic choice set."""
+    if choice_set is ChoiceSet.AID_CATALOG:
+        choices = tuple(
+            Choice(id=f"aid:{item.id}", label=item.label)
+            for item_id in catalog_item_ids
+            if (item := get_aid_item(item_id)) is not None
+        )
+        return (*choices, HUMAN_CHOICE)
+    return _CHOICES_BY_SET[choice_set]

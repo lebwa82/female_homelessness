@@ -1,5 +1,8 @@
+import pytest
+
 from app.bot import render_keyboard
-from app.domain import AgentTurn, Choice
+from app.domain import AgentTurn, Choice, ChoiceSet
+from app.ui import choices_for
 
 
 def test_all_concrete_choices_render_as_stable_inline_callbacks() -> None:
@@ -22,3 +25,41 @@ def test_all_concrete_choices_render_as_stable_inline_callbacks() -> None:
 
 def test_no_choices_means_no_keyboard() -> None:
     assert render_keyboard(AgentTurn(text="Этот чат открыт.")) is None
+
+
+@pytest.mark.parametrize(
+    ("choice_set", "expected_ids"),
+    [
+        (ChoiceSet.NONE, ["human"]),
+        (ChoiceSet.SAFE_CONTINUE, ["continue_bot", "human"]),
+        (ChoiceSet.PSYCHOLOGIST_INTEREST, ["support:psychologist", "human"]),
+        (
+            ChoiceSet.CONTACT_METHODS,
+            [
+                "contact:current_telegram",
+                "contact:other_telegram",
+                "contact:phone",
+                "contact:email",
+                "contact:later",
+                "human",
+            ],
+        ),
+    ],
+)
+def test_choice_registry_renders_stable_callback_ids(
+    choice_set: ChoiceSet, expected_ids: list[str]
+) -> None:
+    assert [choice.id for choice in choices_for(choice_set)] == expected_ids
+
+
+def test_catalog_choice_set_keeps_only_known_catalog_items() -> None:
+    choices = choices_for(
+        ChoiceSet.AID_CATALOG,
+        ("food_card", "not-a-catalog-item", "legal_consultation"),
+    )
+
+    assert [(choice.id, choice.label) for choice in choices] == [
+        ("aid:food_card", "Карточка на продукты"),
+        ("aid:legal_consultation", "Юрист или адвокат"),
+        ("human", "Поговорить с живым человеком"),
+    ]
