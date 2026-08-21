@@ -67,7 +67,6 @@ async def test_evaluate_starts_risk_and_support_calls_concurrently() -> None:
     assert result.risk.level is RiskLevel.NONE
     assert result.plan.intent is SupportIntent.OPEN_CONVERSATION
     assert result.plan.choice_set is ChoiceSet.NONE
-    assert result.action is result.plan
 
 
 @pytest.mark.asyncio

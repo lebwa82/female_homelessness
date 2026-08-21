@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 
 from app.agents import AgentContext, AgentEvaluation
-from app.domain import AgentAction, IncomingMessage, RiskAssessment, RiskLevel
+from app.domain import IncomingMessage, RiskAssessment, RiskLevel, SupportPlan
 from app.service import ConversationService
 from app.store import InMemoryConversationStore
 
@@ -16,9 +16,13 @@ class SmokeGateway:
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
         return AgentEvaluation(
             risk=RiskAssessment(level=RiskLevel.NONE, detector="smoke"),
-            action=AgentAction(kind="reply", text="Что сейчас важнее всего?"),
+            plan=SupportPlan(
+                intent="open_conversation",
+                next_action="continue_conversation",
+                text="Что сейчас важнее всего?",
+            ),
             risk_audit={"status": "completed"},
-            action_audit={"status": "completed"},
+            support_audit={"status": "completed"},
         )
 
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from app.agents import AgentEvaluation
-from app.domain import ActionKind, AgentAction, Choice, IncomingMessage, RiskAssessment, RiskLevel
+from app.domain import Choice, IncomingMessage, RiskAssessment, RiskLevel, SupportPlan
 from app.service import ConversationService
 from app.store import InMemoryConversationStore, StoredFollowupJob
 
@@ -37,12 +37,17 @@ def identity(text: str = "") -> IncomingMessage:
     )
 
 
-def safe_evaluation(action: AgentAction | None = None) -> AgentEvaluation:
+def safe_evaluation(plan: SupportPlan | None = None) -> AgentEvaluation:
     return AgentEvaluation(
         risk=RiskAssessment(level=RiskLevel.NONE, detector="model"),
-        action=action or AgentAction(kind="reply", text="Что сейчас важнее всего?"),
+        plan=plan
+        or SupportPlan(
+            intent="open_conversation",
+            next_action="continue_conversation",
+            text="Что сейчас важнее всего?",
+        ),
         risk_audit={"status": "completed"},
-        action_audit={"status": "completed"},
+        support_audit={"status": "completed"},
     )
 
 
@@ -70,28 +75,87 @@ async def test_start_then_food_card_current_telegram_creates_one_aid_request() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "action",
-    (
-        AgentAction(
-            kind=ActionKind.SHOW_CHOICES,
-            text="Что сейчас важнее всего?",
-            choices=(Choice(id="need:housing", label="Жильё / некуда идти"),),
-        ),
-        AgentAction(kind=ActionKind.REPLY, text="Что сейчас важнее всего?"),
-    ),
-)
-async def test_need_button_after_free_text_opens_aid_options_instead_of_repeating_needs(
-    action: AgentAction,
-) -> None:
+async def test_offer_aid_plan_opens_aid_options() -> None:
     store = InMemoryConversationStore()
-    service = ConversationService(store=store, gateway=FixedGateway(safe_evaluation(action)))
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            safe_evaluation(
+                SupportPlan(
+                    intent="concrete_need",
+                    next_action="offer_aid",
+                    text="Можно посмотреть варианты жилья.",
+                    need="housing",
+                )
+            )
+        ),
+    )
 
-    need_turn = await service.handle_text(identity("мне нужна помощь"))
-    offer = await service.handle_callback(identity(), "need:housing")
+    offer = await service.handle_text(identity("мне нужна помощь"))
 
-    assert any(choice.id == "need:housing" for choice in need_turn.choices)
     assert any(choice.id == "aid:hostel_3_nights" for choice in offer.choices)
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_plan_returns_only_global_human_button_without_escalation() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            safe_evaluation(
+                SupportPlan(
+                    intent="open_conversation",
+                    next_action="continue_conversation",
+                    text="Я могу вас выслушать. Что сейчас особенно тяжело?",
+                )
+            )
+        ),
+    )
+
+    turn = await service.handle_text(identity("Мне тяжело"))
+
+    assert turn.text == "Я могу вас выслушать. Что сейчас особенно тяжело?"
+    assert [choice.id for choice in turn.choices] == ["human"]
+    assert store.escalations == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_human_request_plan_starts_handoff() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            safe_evaluation(
+                SupportPlan(
+                    intent="explicit_human_request",
+                    next_action="request_human",
+                    text="Позову человека.",
+                )
+            )
+        ),
+    )
+
+    turn = await service.handle_text(identity("Позовите человека"))
+
+    assert "зову человека" in turn.text.lower()
+    assert store.escalations[-1].assessment.categories == ("human_requested",)
+
+
+@pytest.mark.asyncio
+async def test_close_plan_closes_conversation() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            safe_evaluation(SupportPlan(intent="close", next_action="close", text="До свидания."))
+        ),
+    )
+
+    turn = await service.handle_text(identity("Спасибо"))
+    record = await store.ensure(identity())
+
+    assert turn.text == "До свидания."
+    assert record.state == "closed"
 
 
 @pytest.mark.asyncio
@@ -172,11 +236,14 @@ async def test_critical_risk_discards_model_create_aid_action_and_returns_hotlin
     store = InMemoryConversationStore()
     evaluation = AgentEvaluation(
         risk=RiskAssessment(level=RiskLevel.NONE, detector="model"),
-        action=AgentAction(
-            kind="create_aid_request", aid_id="food_card", text="Оформляю карточку на продукты"
+        plan=SupportPlan(
+            intent="aid_interest",
+            next_action="offer_aid",
+            text="Оформляю карточку на продукты",
+            need="food_money",
         ),
         risk_audit={"status": "completed"},
-        action_audit={"status": "completed"},
+        support_audit={"status": "completed"},
     )
     service = ConversationService(store=store, gateway=FixedGateway(evaluation))
 
@@ -204,9 +271,14 @@ async def test_unknown_model_result_returns_safe_buttons_without_side_effect() -
     store = InMemoryConversationStore()
     evaluation = AgentEvaluation(
         risk=RiskAssessment(level=RiskLevel.UNKNOWN, detector="model", rationale="timeout"),
-        action=AgentAction(kind="create_aid_request", aid_id="food_card", text="Оформляю"),
+        plan=SupportPlan(
+            intent="aid_interest",
+            next_action="offer_aid",
+            text="Оформляю",
+            need="food_money",
+        ),
         risk_audit={"status": "error"},
-        action_audit={"status": "completed"},
+        support_audit={"status": "completed"},
     )
     service = ConversationService(store=store, gateway=FixedGateway(evaluation))
 

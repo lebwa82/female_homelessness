@@ -15,6 +15,9 @@ from app.domain import (
     NeedKind,
     RiskAssessment,
     RiskLevel,
+    SupportAction,
+    SupportIntent,
+    SupportPlan,
 )
 from app.knowledge import find_verified_articles, format_verified_context
 from app.safety import assess_local_risk, merge_risk
@@ -142,7 +145,7 @@ class ConversationService:
             )
         )
         await self.store.record_agent_run(record, "risk", evaluation.risk_audit)
-        await self.store.record_agent_run(record, "support", evaluation.action_audit)
+        await self.store.record_agent_run(record, "support", evaluation.support_audit)
         merged = merge_risk(assess_local_risk(incoming.text), evaluation.risk)
         await self.store.record_risk(record, merged)
 
@@ -172,10 +175,10 @@ class ConversationService:
         if record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
             return await self._complete_pending_request(record, incoming.text.strip()[:320])
 
-        action = evaluation.action
-        if action is None:
+        plan = evaluation.plan
+        if plan is None:
             return await self._enter_need_discovery(record)
-        return await self._apply_model_action(record, action, incoming.text)
+        return await self._apply_support_plan(record, plan)
 
     async def _handle_need_choice(self, record: ConversationRecord, raw_need: str) -> AgentTurn:
         try:
@@ -288,6 +291,18 @@ class ConversationService:
             await self.store.update(record, need=detected.value, state=ConversationState.CHOOSING_AID.value)
             return self._offer_turn(detected, prefix=action.text)
         return await self._enter_need_discovery(record, action.text, NEED_CHOICES)
+
+    async def _apply_support_plan(self, record: ConversationRecord, plan: SupportPlan) -> AgentTurn:
+        """Temporary direct SupportPlan consumer until ConversationPolicy owns plan resolution."""
+        if plan.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST:
+            return await self._human_turn(record, "support_plan")
+        if plan.next_action is SupportAction.OFFER_AID and plan.need and plan.need is not NeedKind.OTHER:
+            await self.store.update(record, need=plan.need.value, state=ConversationState.CHOOSING_AID.value)
+            return self._offer_turn(plan.need, prefix=plan.text)
+        if plan.next_action is SupportAction.CLOSE:
+            await self.store.update(record, state=ConversationState.CLOSED.value)
+            return self._turn(plan.text)
+        return self._turn(plan.text)
 
     async def _human_turn(self, record: ConversationRecord, reason: str) -> AgentTurn:
         assessment = RiskAssessment(

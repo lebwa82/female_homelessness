@@ -53,50 +53,12 @@ class AgentCallResult:
     audit: dict[str, Any]
 
 
-_LEGACY_UNSET = object()
-
-
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class AgentEvaluation:
     risk: RiskAssessment
     plan: SupportPlan | None
     risk_audit: dict[str, Any]
     support_audit: dict[str, Any]
-
-    def __init__(
-        self,
-        risk: RiskAssessment,
-        plan: SupportPlan | None = None,
-        risk_audit: dict[str, Any] | None = None,
-        support_audit: dict[str, Any] | None = None,
-        *,
-        action: Any = _LEGACY_UNSET,  # legacy constructor input; removed with the scripted service
-        action_audit: dict[str, Any] | object = _LEGACY_UNSET,  # legacy constructor input
-    ) -> None:
-        if action is not _LEGACY_UNSET:
-            if plan is not None:
-                raise TypeError("provide plan or legacy action, not both")
-            plan = action
-        if action_audit is not _LEGACY_UNSET:
-            if support_audit is not None:
-                raise TypeError("provide support_audit or legacy action_audit, not both")
-            support_audit = action_audit
-        if risk_audit is None or support_audit is None:
-            raise TypeError("risk_audit and support_audit are required")
-        object.__setattr__(self, "risk", risk)
-        object.__setattr__(self, "plan", plan)
-        object.__setattr__(self, "risk_audit", risk_audit)
-        object.__setattr__(self, "support_audit", support_audit)
-
-    @property
-    def action(self) -> SupportPlan | None:
-        """Deprecated read-only compatibility alias until the service consumes plans."""
-        return self.plan
-
-    @property
-    def action_audit(self) -> dict[str, Any]:
-        """Deprecated read-only compatibility alias until the service consumes plans."""
-        return self.support_audit
 
 
 Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
