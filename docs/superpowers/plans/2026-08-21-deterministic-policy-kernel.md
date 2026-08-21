@@ -155,23 +155,23 @@
 - Report has `hard_failures` and `diagnostic_deltas`; CLI exits nonzero only for hard behavioral failure or invalid dataset/provider failure.
 - Hard projection includes safety route, effect/side effects, contextual choices, rendered callbacks, state, escalation cause/count, request count, and mandatory crisis copy.
 
-- [ ] **Step 1: Write a failing test proving the old evaluator bypasses service behavior**
+- [x] **Step 1: Write a failing test proving the old evaluator bypasses service behavior**
 
   Use psychologist pending-offer and active-workflow cases where direct `resolve_turn()` and service replay differ. Require the evaluator to assert final rendered callbacks/state/effects.
 
-- [ ] **Step 2: Version dataset state and expectations without weakening histories**
+- [x] **Step 2: Version dataset state and expectations without weakening histories**
 
   Preserve all 53 histories. Move model `risk`/`intent` expectations into diagnostic expectations. Keep or strengthen behavioral expectations. Correct generic `aid-08` to backend `need_categories` because no concrete need is known; do not let the model invent a category.
 
-- [ ] **Step 3: Implement service-path replay and two-channel report**
+- [x] **Step 3: Implement service-path replay and two-channel report**
 
   Offline fixtures may vary diagnostic fields while hard projections remain stable. CLI output must include only case IDs, typed classifications, rule IDs, hashes, and failure names—never histories/prompts/quotes/secrets.
 
-- [ ] **Step 4: Add deterministic mutation and repeated-live tests**
+- [x] **Step 4: Add deterministic mutation and repeated-live tests**
 
   Run every case against at least three diagnostic mutations and assert identical hard projections. Live mode must report diagnostic drift separately and require zero hard failures in two sequential full runs.
 
-- [ ] **Step 5: Run local acceptance**
+- [x] **Step 5: Run local acceptance**
 
   Run: `just check`
 
@@ -181,11 +181,15 @@
 
   Run: `git diff --check`
 
-- [ ] **Step 6: Run safe integration acceptance**
+- [x] **Step 6a: Run approved live model/service acceptance**
 
-  Without printing `.env`, source the existing project environment and run `just llm-health`, then two sequential `just eval-dialogues-live` runs. Start existing PostgreSQL only through the documented non-destructive command; run schema initialization twice and verify required columns/indexes/historic enum reads. If local Podman remains unavailable, perform the same non-destructive check on the existing deployment VM after confirming the target service and volume; do not remove/recreate volumes.
+  Final approved sequential live evaluations on `35d6b9a` passed with 53 cases each, 0 hard failures, 0 provider failures, and empty provider-failure categories. No histories or provider text were retained.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6b: Run PostgreSQL migration assurance**
+
+  Deferred: the local Podman runtime remains unavailable. Do not deploy until the documented non-destructive assurance passes on an authorized target.
+
+- [x] **Step 7: Commit**
 
   Commit message: `Evaluate production policy behavior end to end`
 
@@ -195,6 +199,6 @@
 
 - [ ] Generate one review package from branch base through Task 10 and dispatch an independent full-branch reviewer.
 - [ ] Resolve all Critical/Important findings with one focused fixer and scoped re-review.
-- [ ] Run `just check`, `just scenario-smoke`, `just eval-dialogues`, `just llm-health`, and two sequential live evals on the reviewed commit.
-- [ ] Deploy only if hard failures are zero in both live runs and PostgreSQL migration assurance passes.
+- [x] Run `just check`, `just scenario-smoke`, `just eval-dialogues`, and two sequential approved live evals on the reviewed commit; the final live model/service gate passed with zero hard/provider failures in both runs.
+- [ ] Deploy only if hard failures are zero in both live runs and PostgreSQL migration assurance passes. Deferred: local PostgreSQL assurance remains blocked on Podman.
 - [ ] Verify the deployed build metadata and service health, then push the integrated commit to GitHub.

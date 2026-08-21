@@ -41,15 +41,17 @@ Blocked locally. The existing Podman machine reported started, but its runtime s
 
 ## Live gate
 
-The provider health observations are not consistently green: one anonymized observation had safety invalid/support completed, while a following observation had both completed. The single-response JSON boundary retains exactly two calls and no retries.
+The approved final model/service gate passed on two sequential full live evaluations of `35d6b9a`. Both had zero hard and provider failures, with empty provider-failure categories. The single-response JSON boundary retains exactly two calls and no retries.
 
 | Live run | Result |
 | --- | --- |
 | 1 | 53 cases; 0 hard failures; 23 diagnostic deltas; 8 provider failures |
 | 2 | 53 cases; 0 hard failures; 23 diagnostic deltas; 9 provider failures |
 | 3 | 53 cases; 0 hard failures; 22 diagnostic deltas; 9 provider failures |
+| 4 (final 1) | 53 cases; 0 hard failures; 27 diagnostic deltas; 0 provider failures; failure categories empty |
+| 5 (final 2) | 53 cases; 0 hard failures; 26 diagnostic deltas; 0 provider failures; failure categories empty |
 
-No case output, histories, prompts, response IDs, or provider text were retained from these approved live runs. Fix round 2 itself did not call the provider or run a live evaluation.
+No case output, histories, prompts, response IDs, or provider text were retained from these approved live runs. PostgreSQL assurance remains a separate blocked release gate.
 
 ## Fix round 1 — hardening acceptance evidence
 
@@ -79,8 +81,8 @@ No case output, histories, prompts, response IDs, or provider text were retained
 
 - Service evaluator, explicit workflow state, mutation invariance, stable order, bounded case concurrency, and output redaction are covered by tests.
 - No histories, reply prose, prompts, environment values, credentials, proxy data, Telegram data, or database records appear in this report or evaluator output.
-- Task remains blocked on the local Podman runtime and a consistently green provider-health gate. No deployment, push, or Telegram action was taken.
+- The live model/service gate passed. Release remains deferred because local PostgreSQL assurance is blocked on the Podman runtime. No deployment, push, or Telegram action was taken.
 
 ## Commit
 
-Created as the local commit `Evaluate production policy behavior end to end`; the handoff records its final SHA.
+Created as the local commit `Evaluate production policy behavior end to end`; the handoff records its final SHA. This follow-up records the passed final live gate without changing the deferred PostgreSQL release condition.
