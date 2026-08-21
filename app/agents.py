@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import traceback
 from collections import Counter
 from collections.abc import Awaitable, Callable
@@ -13,7 +14,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 from pydantic import ValidationError
-from pydantic_ai import Agent, PromptedOutput
+from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -21,30 +22,30 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from app.config import settings
 from app.domain import (
     DiagnosticStatus,
-    RiskAssessment,
-    RiskLevel,
     SafetyDiagnostic,
     SupportDiagnostic,
-    SupportPlan,
 )
 from app.pii import redact_with_audit
 from app.skills import load_support_skills
 
 RISK_INSTRUCTIONS = """Ты даёшь только диагностическую оценку опасности в русскоязычном обращении.
-Верни JSON с level: critical для непосредственной угрозы жизни, суицида или насилия сейчас;
-urgent для ситуации «сегодня негде ночевать» или выселения прямо сейчас; concern для страха,
-угрозы или нестабильного жилья без непосредственной опасности; none если опасности не видно.
-Просьба поговорить с человеком, ботом или психологом не является риском. Верни только поля
-level, categories, confidence, rationale и optional evidence_claims. evidence_claims — точные
-короткие фрагменты текущего сообщения, без пересказа. Не предлагай действий, кнопок или переходов."""
+Верни единственный JSON-объект без Markdown и без пояснений. Обязательно поле level: critical
+для непосредственной угрозы жизни, суицида или насилия сейчас; urgent для ситуации «сегодня
+негде ночевать» или выселения прямо сейчас; concern для страха, угрозы или нестабильного жилья
+без непосредственной опасности; none если опасности не видно. Допустимы только поля level,
+categories, confidence, rationale и evidence_claims. Просьба поговорить с человеком, ботом или
+психологом не является риском. Не предлагай действий, кнопок или переходов."""
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
-Верни только диагностический JSON: intent, optional need_hint, optional evidence_claims,
-draft_text и optional suggested_support=psychologist. draft_text — честная разговорная реплика,
-без обещаний, что человек уже позван, заявка сохранена, помощь организована или контакт передан.
-Не возвращай action, next_action, choice_set, catalog_item_ids, callback IDs, workflow state,
-effect, переход или описание выполненного внешнего действия. Просьбы «выслушай», «хочу
-выговориться» и «можно с тобой поговорить» — разговор, а не handoff."""
+Верни единственный JSON-объект без Markdown и без пояснений. Обязательны intent и draft_text;
+допустимы только intent, need_hint, evidence_claims, draft_text и suggested_support=psychologist.
+intent должен быть ровно одним из: open_conversation, concrete_need, aid_interest,
+psychologist_considering, psychologist_request, verified_information, explicit_human_request,
+close.
+draft_text — честная разговорная реплика, без обещаний, что человек уже позван, заявка сохранена,
+помощь организована или контакт передан. Не возвращай action, next_action, choice_set,
+catalog_item_ids, callback IDs, workflow state, effect, переход или описание выполненного внешнего
+действия. Просьбы «выслушай», «хочу выговориться» и «можно с тобой поговорить» — разговор, а не handoff."""
 
 
 @dataclass(frozen=True)
@@ -87,74 +88,20 @@ class AgentCallResult:
     audit: dict[str, Any]
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class AgentEvaluation:
-    """Gateway result with transport health isolated from semantic model labels.
+    """Gateway result containing diagnostics and transport/schema health only."""
 
-    Legacy fixture inputs are converted at construction, but the result exposes only
-    diagnostics and their statuses. Production text handling consumes those values only.
-    """
+    safety: SafetyDiagnostic | None = None
+    support: SupportDiagnostic | None = None
+    safety_status: DiagnosticStatus = DiagnosticStatus.UNAVAILABLE
+    support_status: DiagnosticStatus = DiagnosticStatus.UNAVAILABLE
+    safety_audit: dict[str, Any] | None = None
+    support_audit: dict[str, Any] | None = None
 
-    safety: SafetyDiagnostic | None
-    support: SupportDiagnostic | None
-    safety_status: DiagnosticStatus
-    support_status: DiagnosticStatus
-    safety_audit: dict[str, Any]
-    support_audit: dict[str, Any]
-
-    def __init__(
-        self,
-        *,
-        safety: SafetyDiagnostic | None = None,
-        support: SupportDiagnostic | None = None,
-        safety_status: DiagnosticStatus | None = None,
-        support_status: DiagnosticStatus | None = None,
-        safety_audit: dict[str, Any] | None = None,
-        support_audit: dict[str, Any] | None = None,
-        risk: RiskAssessment | None = None,
-        plan: SupportPlan | None = None,
-        risk_audit: dict[str, Any] | None = None,
-    ) -> None:
-        if safety is not None and not isinstance(safety, SafetyDiagnostic):
-            raise TypeError("safety must be a SafetyDiagnostic or None")
-        if support is not None and not isinstance(support, SupportDiagnostic):
-            raise TypeError("support must be a SupportDiagnostic or None")
-        if risk is not None and not isinstance(risk, RiskAssessment):
-            raise TypeError("risk must be a RiskAssessment or None")
-        if plan is not None and not isinstance(plan, SupportPlan):
-            raise TypeError("plan must be a SupportPlan or None")
-        if safety is None and risk is not None:
-            safety = SafetyDiagnostic(
-                level=risk.level,
-                categories=risk.categories,
-                confidence=risk.confidence,
-                rationale=risk.rationale or "legacy diagnostic",
-            )
-        if support is None and plan is not None:
-            support = SupportDiagnostic(
-                intent=plan.intent,
-                need_hint=plan.need,
-                draft_text=plan.text,
-                suggested_support=plan.offered_support,
-            )
-        object.__setattr__(self, "safety", safety)
-        object.__setattr__(self, "support", support)
-        object.__setattr__(
-            self,
-            "safety_status",
-            safety_status or (DiagnosticStatus.COMPLETED if safety is not None else DiagnosticStatus.UNAVAILABLE),
-        )
-        object.__setattr__(
-            self,
-            "support_status",
-            support_status or (DiagnosticStatus.COMPLETED if support is not None else DiagnosticStatus.UNAVAILABLE),
-        )
-        object.__setattr__(self, "safety_audit", dict(safety_audit or risk_audit or {}))
-        object.__setattr__(self, "support_audit", dict(support_audit or {}))
-
-    @property
-    def risk_audit(self) -> dict[str, Any]:
-        return self.safety_audit
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "safety_audit", dict(self.safety_audit or {}))
+        object.__setattr__(self, "support_audit", dict(self.support_audit or {}))
 
 
 Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
@@ -166,13 +113,37 @@ def yandex_model_settings(
     return provider_settings.model_settings()
 
 
-def yandex_output_type(agent_name: str) -> PromptedOutput[Any]:
-    output = SafetyDiagnostic if agent_name == "risk" else SupportDiagnostic
-    return PromptedOutput(
-        output,
-        name=f"{agent_name}_diagnostic",
-        description="Верни только один JSON-объект, соответствующий этой схеме.",
-    )
+def yandex_output_type(agent_name: str) -> type[str]:
+    """Use a single text response and validate one JSON object at our provider boundary."""
+    del agent_name
+    return str
+
+
+def parse_provider_json_object(raw_output: str) -> dict[str, Any]:
+    """Accept exactly one JSON object, optionally wrapped in a known Markdown code fence."""
+    candidate = raw_output.strip()
+    for prefix in ("```json\n", "```\n"):
+        if candidate.lower().startswith(prefix) and candidate.endswith("\n```"):
+            candidate = candidate[len(prefix) : -4].strip()
+            break
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def provider_output_shape(raw_output: str) -> dict[str, bool | int]:
+    """Return only non-content metadata needed to diagnose provider output envelopes."""
+    candidate = raw_output.strip()
+    return {
+        "characters": len(raw_output),
+        "nonempty": bool(candidate),
+        "starts_json": candidate.startswith("{"),
+        "ends_object": candidate.endswith("}"),
+        "starts_code_fence": candidate.startswith("```"),
+        "ends_code_fence": candidate.endswith("```"),
+    }
 
 
 def usage_audit(usage: Any) -> dict[str, int]:
@@ -268,10 +239,10 @@ class YandexAgentGateway:
                 retries=0,
             )
             result = await agent.run(input_text)
-            output = result.output
+            output = parse_provider_json_object(result.output)
             response = result.response
             return AgentCallResult(
-                payload=output.model_dump(mode="json"),
+                payload=output,
                 audit={
                     "status": "completed",
                     "rationale_alias_used": bool(
@@ -281,6 +252,7 @@ class YandexAgentGateway:
                     "model": getattr(response, "model_name", None),
                     "latency_ms": round((perf_counter() - started) * 1000),
                     "usage": usage_audit(result.usage),
+                    "output_shape": provider_output_shape(result.output),
                 },
             )
         except Exception as error:  # noqa: BLE001 - SDK/provider errors have no stable common base
@@ -345,8 +317,10 @@ def parse_safety_diagnostic(
         payload["rationale"] = alias_value
     try:
         diagnostic = SafetyDiagnostic.model_validate(payload)
-    except ValidationError:
-        return None, DiagnosticStatus.INVALID, _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+    except ValidationError as error:
+        audit = _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+        audit["validation_errors"] = validation_error_shape(error)
+        return None, DiagnosticStatus.INVALID, audit
     audit = _diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED)
     audit["rationale_alias_used"] = alias_used
     audit["evidence"] = _validate_evidence_claims(diagnostic.evidence_claims, current_user_text)
@@ -362,25 +336,13 @@ def parse_support_diagnostic(
     payload = dict(result.payload)
     try:
         diagnostic = SupportDiagnostic.model_validate(payload)
-    except ValidationError:
-        return None, DiagnosticStatus.INVALID, _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+    except ValidationError as error:
+        audit = _diagnostic_audit(result.audit, DiagnosticStatus.INVALID)
+        audit["validation_errors"] = validation_error_shape(error)
+        return None, DiagnosticStatus.INVALID, audit
     audit = _diagnostic_audit(result.audit, DiagnosticStatus.COMPLETED)
     audit["evidence"] = _validate_evidence_claims(diagnostic.evidence_claims, current_user_text)
     return diagnostic.model_copy(update={"evidence_claims": ()}), DiagnosticStatus.COMPLETED, audit
-
-
-def parse_risk(result: AgentCallResult) -> tuple[RiskAssessment, dict[str, Any]]:
-    """Compatibility adapter; production flow uses `parse_safety_diagnostic`."""
-    diagnostic, _, audit = parse_safety_diagnostic(result, "")
-    if diagnostic is None:
-        return RiskAssessment(level=RiskLevel.NONE, detector="diagnostic-unavailable"), audit
-    return RiskAssessment(
-        level=diagnostic.level,
-        categories=diagnostic.categories,
-        confidence=diagnostic.confidence,
-        rationale=diagnostic.rationale,
-        detector="model-diagnostic",
-    ), audit
 
 
 def _current_user_text(history: tuple[tuple[str, str], ...]) -> str:
@@ -394,6 +356,15 @@ def _validate_evidence_claims(claims: tuple[str, ...], current_user_text: str) -
         "valid": len(valid),
         "invalid": len(claims) - len(valid),
         "hashes": [hashlib.sha256(claim.encode()).hexdigest() for claim in claims],
+    }
+
+
+def validation_error_shape(error: ValidationError) -> dict[str, list[str]]:
+    """Keep validation metadata useful without retaining provider-supplied values."""
+    errors = error.errors(include_url=False, include_context=False, include_input=False)
+    return {
+        "fields": sorted({".".join(str(part) for part in item["loc"]) for item in errors}),
+        "types": sorted({str(item["type"]) for item in errors}),
     }
 
 

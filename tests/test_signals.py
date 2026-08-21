@@ -258,12 +258,20 @@ def test_ongoing_threat_is_concern_only_without_immediate_marker() -> None:
     (
         "psychologist-08",
         "psychologist-09",
-        "multi-aid-completion-open-01",
         "multi-handoff-continue-open-01",
     ),
 )
 def test_open_path_fixture_rows_have_no_text_only_hard_route(case_id: str) -> None:
     assert _matches(_fixture_text(case_id)) == ()
+
+
+def test_clear_conversation_request_exits_completed_aid_workflow() -> None:
+    matches = _matches(_fixture_text("multi-aid-completion-open-01"))
+
+    assert any(
+        kind == "open_conversation_request" and rule_id == "conversation.continue.explicit"
+        for kind, rule_id, _ in matches
+    ), "multi-aid-completion-open-01 must retain its deterministic conversation exit"
 
 
 def test_normalization_is_casefolded_punctuation_tolerant_and_normalizes_yo() -> None:

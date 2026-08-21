@@ -253,6 +253,11 @@ async def init_db() -> None:
             "ALTER TABLE callback_executions ADD COLUMN IF NOT EXISTS lease_token VARCHAR(64)",
             "ALTER TABLE callback_executions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
             "UPDATE callback_executions SET status = 'completed' WHERE status IS NULL",
+            "CREATE INDEX IF NOT EXISTS ix_callback_executions_status ON callback_executions (status)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_callback_executions_lease_expires_at "
+                "ON callback_executions (lease_expires_at)"
+            ),
             """
             CREATE UNIQUE INDEX IF NOT EXISTS uq_callback_executions_origin
             ON callback_executions (conversation_id, callback_id, source_message_id)

@@ -149,6 +149,11 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 fallback_reason="local_input_unavailable",
             ),
         )
+    if (
+        context.state == ConversationState.AID_REQUESTED.value
+        and _has_signal(context, HardSignalKind.OPEN_CONVERSATION_REQUEST)
+    ):
+        return _finalize_turn(context, _open_conversation_turn(context))
     if context.state in _FINITE_WORKFLOW_STATES:
         return resolve_workflow_turn(context)
     if _has_signal(context, HardSignalKind.PSYCHOLOGIST_REQUEST):

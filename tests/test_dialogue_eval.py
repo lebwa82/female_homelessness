@@ -1,26 +1,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
 from app.agents import AgentContext, AgentEvaluation
-from app.domain import (
-    DiagnosticStatus,
-    IncomingMessage,
-    RiskLevel,
-    SafetyDiagnostic,
-    SupportDiagnostic,
-)
-from app.service import ConversationService
-from app.store import InMemoryConversationStore
 from scripts.dialogue_eval import (
     DatasetError,
+    DiagnosticVariant,
     FixtureGateway,
     evaluate_case,
     evaluate_cases,
+    evaluate_offline_cases,
     load_cases,
     load_fixture_outputs,
     main,
@@ -31,40 +25,57 @@ FIXTURE_OUTPUTS = Path(__file__).parent / "fixtures" / "dialogue_agent_outputs.j
 
 
 @pytest.mark.asyncio
-async def test_fixture_replay_surfaces_only_legacy_model_owned_route_differences() -> None:
-    """The adapter keeps diagnostics observable without retaining obsolete action ownership."""
+async def test_fixture_replay_has_no_hard_failures_and_retains_all_cases() -> None:
+    """Versioned diagnostic fixtures must exercise the service path without weakening cases."""
     cases = load_cases(DATASET)
     payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
 
-    reports = await evaluate_cases(FixtureGateway(payloads), cases)
+    report = await evaluate_offline_cases(FixtureGateway(payloads), cases)
 
-    assert reports.failures == (
-        "psychologist-considering-01:choice_set",
-        "aid-08:choice_set",
-        "aid-08:effect",
-        "psychologist-02:choice_set",
-        "psychologist-03:choice_set",
-        "psychologist-04:choice_set",
-        "psychologist-05:choice_set",
-    )
-    assert len(reports.cases) >= 48
+    assert report.hard_failures == ()
+    assert report.diagnostic_deltas == ()
+    assert len(report.cases) == 53
+
+
+@pytest.mark.asyncio
+async def test_evaluator_replays_pending_offer_and_active_workflow_through_service() -> None:
+    """Direct policy resolution misses persisted context that changes rendered service output."""
+    cases = load_cases(DATASET)
+    payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
+
+    report = await evaluate_cases(FixtureGateway(payloads), cases)
+    by_id = {case.case_id: case for case in report.cases}
+
+    assert {key: by_id["psychologist-considering-01"].hard_projection[key] for key in (
+        "effect", "rendered_callback_ids", "state_after"
+    )} == {
+        "effect": "none",
+        "rendered_callback_ids": ("support:psychologist", "human"),
+        "state_after": "open_conversation",
+    }
+    assert {key: by_id["multi-aid-completion-open-01"].hard_projection[key] for key in (
+        "effect", "rendered_callback_ids", "state_after"
+    )} == {
+        "effect": "none",
+        "rendered_callback_ids": ("human",),
+        "state_after": "open_conversation",
+    }
 
 
 @pytest.mark.asyncio
 async def test_fixture_gateway_consumes_separate_agent_payload_not_expected_invariants() -> None:
-    """Fixture output is sourced from the payload fixture, never synthesized from expected."""
+    """Diagnostic labels remain observable but cannot become behavioural authority."""
     case = load_cases(DATASET)[0]
     payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
-    mutated_expected = case.__class__(
-        id=case.id,
-        group=case.group,
-        history=case.history,
-        expected={**case.expected, "intent": ["explicit_human_request"]},
+    mutated = replace(
+        case,
+        diagnostics={**case.diagnostics, "support_intents": ("explicit_human_request",)},
     )
 
-    report = await evaluate_case(FixtureGateway.from_case(mutated_expected, payloads), mutated_expected)
+    report = await evaluate_case(FixtureGateway.from_case(mutated, payloads), mutated)
 
-    assert "intent" in report.failures
+    assert report.hard_failures == ()
+    assert report.diagnostic_deltas == ("support_intent:open_conversation",)
 
 
 @pytest.mark.asyncio
@@ -84,64 +95,63 @@ async def test_fixture_ids_must_exactly_match_dataset_before_replay(mode: str) -
 
 @pytest.mark.asyncio
 async def test_production_regression_replays_through_conversation_service() -> None:
-    """A request to be heard after an assistant turn must remain an open conversation."""
+    """The stored production prefix reaches the gateway intact and remains a free conversation."""
     case = next(case for case in load_cases(DATASET) if case.id == "prod-listen-01")
-    assert case.history == (
-        ("user", "мне плохо"),
-        ("assistant", "Я рядом. Что сейчас особенно тяжело?"),
-        ("user", "мне просто хочется выговориться — ты можешь меня выслушать?"),
+    payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
+    gateway = RecordingGateway(FixtureGateway.from_case(case, payloads))
+
+    report = await evaluate_case(gateway, case)
+
+    assert report.hard_failures == ()
+    assert report.hard_projection["rendered_callback_ids"] == ("human",)
+    assert report.hard_projection["effect"] == "none"
+    assert report.hard_projection["state_after"] == "open_conversation"
+    assert report.hard_projection["escalation_count"] == 0
+    assert len(gateway.contexts) == 1
+    assert _history_digest(gateway.contexts[0].history) == _history_digest(case.history)
+
+
+@pytest.mark.asyncio
+async def test_provider_health_failure_is_separate_from_hard_behavior() -> None:
+    cases = load_cases(DATASET)
+    payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
+
+    report = await evaluate_cases(
+        FixtureGateway(payloads).with_variant(DiagnosticVariant.UNAVAILABLE),
+        cases,
+        require_provider_health=True,
     )
-    store = InMemoryConversationStore()
-    gateway = ScriptedGateway(
-        [
-            open_conversation_plan(case.history[1][1]),
-            open_conversation_plan("Да, я могу вас выслушать."),
-        ]
-    )
-    service = ConversationService(
-        store=store,
-        gateway=gateway,
-    )
 
-    first_incoming = identity(case.history[0][1], 1)
-    first_turn = await service.handle_text(first_incoming)
-    assert first_turn.text == case.history[1][1]
-    await service.record_outbound(first_incoming, first_turn)
-    turn = await service.handle_text(identity(case.history[2][1], 2))
-
-    assert [choice.id for choice in turn.choices] == ["human"]
-    assert store.escalations == []
-    assert gateway.contexts[-1].history == case.history
+    assert report.hard_failures == ()
+    assert len(report.provider_failures) == len(cases) * 2
 
 
-def test_cli_output_does_not_echo_dialogue_history(capsys: pytest.CaptureFixture[str]) -> None:
-    """The evaluator reports the migration gap without echoing dialogue history."""
+def test_cli_output_never_includes_history_or_reply_fields(capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = main(["--fixtures", str(FIXTURE_OUTPUTS), str(DATASET)])
 
     captured = capsys.readouterr()
-    assert exit_code == 1
+    assert exit_code == 0
     assert "prod-listen-01" in captured.out
-    assert "мне просто хочется выговориться" not in captured.out
-    assert "История" not in captured.out
+    assert "history" not in captured.out
+    assert "draft_text" not in captured.out
 
 
 def test_cli_returns_nonzero_for_hard_invariant_failure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A regression failure must make CI fail without disclosing the input text."""
-    broken_payloads = tmp_path / "payloads.jsonl"
-    first = json.loads(FIXTURE_OUTPUTS.read_text(encoding="utf-8").splitlines()[0])
-    first["plan"]["intent"] = "explicit_human_request"
-    lines = [json.dumps(first), *FIXTURE_OUTPUTS.read_text(encoding="utf-8").splitlines()[1:]]
-    broken_payloads.write_text("\n".join(lines), encoding="utf-8")
+    broken_dataset = tmp_path / "cases.jsonl"
+    rows = [json.loads(line) for line in DATASET.read_text(encoding="utf-8").splitlines()]
+    rows[0]["expected"]["behavior"]["state_after"] = "closed"
+    broken_dataset.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
 
-    exit_code = main(["--fixtures", str(broken_payloads), str(DATASET)])
+    exit_code = main(["--fixtures", str(FIXTURE_OUTPUTS), str(broken_dataset)])
 
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "prod-listen-01" in captured.out
-    assert "intent" in captured.out
-    assert "мне просто хочется выговориться" not in captured.out
+    assert "state_after" in captured.out
+    assert "history" not in captured.out
 
 
 @dataclass
@@ -154,25 +164,15 @@ class ScriptedGateway:
         return self.evaluations.pop(0)
 
 
-def open_conversation_plan(text: str) -> AgentEvaluation:
-    return AgentEvaluation(
-        safety=SafetyDiagnostic(level=RiskLevel.NONE, confidence=1.0, rationale="fixture"),
-        support=SupportDiagnostic(
-            intent="open_conversation",
-            draft_text=text,
-        ),
-        safety_status=DiagnosticStatus.COMPLETED,
-        support_status=DiagnosticStatus.COMPLETED,
-        safety_audit={"status": "fixture"},
-        support_audit={"status": "fixture"},
-    )
+@dataclass
+class RecordingGateway:
+    delegate: FixtureGateway
+    contexts: list[AgentContext] = field(default_factory=list)
+
+    async def evaluate(self, context: AgentContext) -> AgentEvaluation:
+        self.contexts.append(context)
+        return await self.delegate.evaluate(context)
 
 
-def identity(text: str, message_id: int) -> IncomingMessage:
-    return IncomingMessage(
-        platform_user_id=711,
-        chat_id=812,
-        username="test_identity",
-        text=text,
-        message_id=message_id,
-    )
+def _history_digest(history: tuple[tuple[str, str], ...]) -> str:
+    return sha256(json.dumps(history, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()

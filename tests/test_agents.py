@@ -2,9 +2,10 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai import PromptedOutput
 
+from app import agents
 from app.agents import (
+    SUPPORT_INSTRUCTIONS,
     AgentCallResult,
     AgentContext,
     ProviderSettings,
@@ -15,21 +16,53 @@ from app.agents import (
     yandex_model_settings,
     yandex_output_type,
 )
-from app.domain import DiagnosticStatus, SafetyDiagnostic, SupportDiagnostic
+from app.domain import DiagnosticStatus, SupportIntent
 
 
-def test_qwen_uses_typed_diagnostics_and_one_provider_settings_source() -> None:
+def test_qwen_uses_text_json_boundary_and_one_provider_settings_source() -> None:
     provider_settings = ProviderSettings(temperature=0.2, max_tokens=111, reasoning_effort="low")
 
-    assert isinstance(yandex_output_type("risk"), PromptedOutput)
-    assert yandex_output_type("risk").outputs is SafetyDiagnostic
-    assert yandex_output_type("support").outputs is SupportDiagnostic
+    assert yandex_output_type("risk") is str
+    assert yandex_output_type("support") is str
     assert yandex_model_settings(provider_settings) == {
         "temperature": 0.2,
         "max_tokens": 111,
         "openai_reasoning_effort": "low",
     }
     assert provider_settings.audit_fields()["max_tokens"] == 111
+
+
+def test_support_text_json_instructions_enumerate_the_only_valid_intents() -> None:
+    assert all(intent.value in SUPPORT_INSTRUCTIONS for intent in SupportIntent)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"level":"none"}', {"level": "none"}),
+        ('```json\n{"level":"none"}\n```', {"level": "none"}),
+        ("not-json", {}),
+        ('{"level":"none"}\ntrailing', {}),
+    ],
+)
+def test_provider_json_parser_accepts_only_one_object_or_known_code_fence(
+    raw: str, expected: dict[str, str]
+) -> None:
+    assert agents.parse_provider_json_object(raw) == expected
+
+
+def test_provider_output_shape_reports_only_non_content_metadata() -> None:
+    shape = agents.provider_output_shape('```json\n{"level":"none"}\n```')
+
+    assert shape == {
+        "characters": 28,
+        "nonempty": True,
+        "starts_json": False,
+        "ends_object": False,
+        "starts_code_fence": True,
+        "ends_code_fence": True,
+    }
+    assert all("level" not in str(value) for value in shape.values())
 
 
 def test_usage_audit_reads_the_pydantic_ai_usage_object() -> None:
@@ -90,6 +123,18 @@ def test_safety_alias_audit_flag_does_not_require_the_excluded_provider_field() 
     assert audit["rationale_alias_used"] is True
 
 
+def test_level_only_safety_diagnostic_is_accepted_for_provider_schema_robustness() -> None:
+    """A diagnostic label alone must not make the live structured call retry or fail."""
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(payload={"level": "none"}, audit={"status": "completed"}),
+        "анонимная health-проверка",
+    )
+
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None and diagnostic.level.value == "none"
+    assert audit["diagnostic_status"] == "completed"
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     (
@@ -108,6 +153,25 @@ def test_invalid_support_diagnostic_never_becomes_a_semantic_risk(
     assert diagnostic is None
     assert status is expected
     assert audit["diagnostic_status"] == "invalid"
+
+
+def test_invalid_diagnostic_audit_contains_only_validation_shape() -> None:
+    diagnostic, status, audit = parse_support_diagnostic(
+        AgentCallResult(
+            payload={
+                "intent": "open_conversation",
+                "draft_text": "diagnostic",
+                "choice_set": "not-authorized",
+            },
+            audit={"status": "completed"},
+        ),
+        "anonymized",
+    )
+
+    assert diagnostic is None
+    assert status is DiagnosticStatus.INVALID
+    assert audit["validation_errors"] == {"fields": ["choice_set"], "types": ["extra_forbidden"]}
+    assert "not-authorized" not in repr(audit)
 
 
 def test_transport_failure_is_unavailable_not_a_synthetic_unknown_risk() -> None:
@@ -157,6 +221,29 @@ async def test_evaluate_starts_exactly_two_calls_concurrently_and_keeps_actions_
     assert result.support is not None and result.support.draft_text == "Я могу вас выслушать."
     assert result.safety_audit["request"]["max_tokens"] == 271
     assert result.support_audit["request"] == result.safety_audit["request"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_diagnostic_keeps_the_two_call_provider_budget() -> None:
+    calls: list[str] = []
+
+    async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
+        del instructions, input_text
+        calls.append(agent_name)
+        payload = (
+            {"level": "invalid-label"}
+            if agent_name == "risk"
+            else {"intent": "open_conversation", "draft_text": "diagnostic"}
+        )
+        return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
+
+    result = await YandexAgentGateway(call=call).evaluate(
+        AgentContext(history=(("user", "anonymized"),), state="open_conversation")
+    )
+
+    assert sorted(calls) == ["risk", "support"]
+    assert result.safety_status is DiagnosticStatus.INVALID
+    assert result.support_status is DiagnosticStatus.COMPLETED
 
 
 @pytest.mark.asyncio

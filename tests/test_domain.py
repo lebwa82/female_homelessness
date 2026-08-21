@@ -8,7 +8,7 @@ from app.domain import (
     NeedKind,
     RiskAssessment,
     RiskLevel,
-    SupportPlan,
+    SupportDiagnostic,
 )
 
 
@@ -51,14 +51,12 @@ def test_risk_assessment_has_conservative_levels() -> None:
     assert assessment.confidence == 0.91
 
 
-def test_support_plan_rejects_model_callback_ids() -> None:
+def test_support_diagnostic_rejects_model_control_fields() -> None:
     with pytest.raises(ValidationError):
-        SupportPlan.model_validate(
+        SupportDiagnostic.model_validate(
             {
                 "intent": "open_conversation",
-                "next_action": "continue_conversation",
-                "text": "Я рядом.",
-                "choice_set": "none",
-                "choices": [{"id": "invented", "label": "Нажми"}],
+                "draft_text": "Я рядом.",
+                "effect": "human_handoff",
             }
         )

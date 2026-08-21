@@ -12,15 +12,29 @@ DATASET = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
 
 def _valid_row(case_id: str) -> dict[str, object]:
     return {
+        "version": 2,
         "id": case_id,
         "group": "open_conversation",
         "history": [["user", "анонимный текст"]],
+        "initial": {"state": "open_conversation", "pending_offer": None},
         "expected": {
-            "risk": ["none"],
-            "intent": ["open_conversation"],
-            "choice_set": "none",
-            "effect": "none",
-            "escalation": False,
+            "behavior": {
+                "local_risk": "none",
+                "choice_set": "none",
+                "rendered_callback_ids": ["human"],
+                "effect": "none",
+                "side_effects": [],
+                "state_after": "open_conversation",
+                "escalation": False,
+                "escalation_cause": None,
+                "escalation_count": 0,
+                "request_count": 0,
+                "copy_contains": None,
+            },
+            "diagnostics": {
+                "safety_levels": ["none"],
+                "support_intents": ["open_conversation"],
+            },
         },
     }
 
@@ -45,6 +59,20 @@ def test_dataset_has_required_coverage() -> None:
         "crisis",
         "multi_turn",
     } <= {case.group for case in cases}
+    assert all(case.version == 2 for case in cases)
+    assert {case.id for case in cases if case.initial.pending_offer is not None} == {
+        "psychologist-considering-01",
+        "psychologist-request-01",
+        "psychologist-02",
+        "psychologist-03",
+        "psychologist-04",
+        "psychologist-05",
+        "psychologist-06",
+        "psychologist-07",
+        "psychologist-08",
+        "psychologist-09",
+        "multi-psychologist-request-01",
+    }
 
 
 def test_dataset_ids_are_unique() -> None:
@@ -65,7 +93,7 @@ def test_dataset_ids_are_unique() -> None:
     [
         ({"id": "broken"}, "missing required keys"),
         ({**_valid_row("role-01"), "history": [["system", "no"]]}, "invalid history role"),
-        ({**_valid_row("expectation-01"), "expected": {"risk": "none"}}, "expected.risk"),
+        ({**_valid_row("expectation-01"), "expected": {"behavior": {}}}, "missing required keys"),
     ],
 )
 def test_malformed_dataset_rows_fail_with_clear_errors(row: dict[str, object], message: str) -> None:
@@ -77,8 +105,7 @@ def test_malformed_dataset_rows_fail_with_clear_errors(row: dict[str, object], m
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("risk", ["invented-risk"]),
-        ("intent", ["invented-intent"]),
+        ("local_risk", "invented-risk"),
         ("choice_set", "invented-choice-set"),
         ("effect", "invented-effect"),
     ],
@@ -88,9 +115,9 @@ def test_expected_enum_values_must_belong_to_the_domain(
 ) -> None:
     """Typos in symbolic invariants must fail at load time rather than at replay time."""
     row = _valid_row(f"invalid-{field}")
-    row["expected"] = {field: value}
+    row["expected"]["behavior"][field] = value  # type: ignore[index]
 
-    with pytest.raises(DatasetError, match=f"expected.{field} contains invalid enum value"):
+    with pytest.raises(DatasetError, match=f"expected.behavior.{field} contains invalid enum value"):
         load_cases_from_text(json.dumps(row))
 
 

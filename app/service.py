@@ -222,7 +222,7 @@ class ConversationService:
                 knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
             )
         )
-        await self.store.record_agent_run(record, "risk", evaluation.risk_audit)
+        await self.store.record_agent_run(record, "safety", evaluation.safety_audit)
         await self.store.record_agent_run(record, "support", evaluation.support_audit)
         try:
             pending_offer = SupportOffer(record.pending_offer) if record.pending_offer else None

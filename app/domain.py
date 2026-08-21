@@ -56,6 +56,7 @@ class DiagnosticStatus(str, Enum):
 
 class HardSignalKind(str, Enum):
     EXPLICIT_HUMAN_REQUEST = "explicit_human_request"
+    OPEN_CONVERSATION_REQUEST = "open_conversation_request"
     CONCRETE_AID = "concrete_aid"
     GENERIC_AID_INTEREST = "generic_aid_interest"
     PSYCHOLOGIST_CONSIDERING = "psychologist_considering"
@@ -112,16 +113,6 @@ class SupportIntent(str, Enum):
     CLOSE = "close"
 
 
-class SupportAction(str, Enum):
-    CONTINUE_CONVERSATION = "continue_conversation"
-    CLARIFY = "clarify"
-    OFFER_AID = "offer_aid"
-    PROVIDE_VERIFIED_INFO = "provide_verified_info"
-    REQUEST_HUMAN = "request_human"
-    START_PSYCHOLOGIST_REQUEST = "start_psychologist_request"
-    CLOSE = "close"
-
-
 class ChoiceSet(str, Enum):
     NONE = "none"
     SAFE_CONTINUE = "safe_continue"
@@ -143,8 +134,8 @@ class SafetyDiagnostic(BaseModel):
 
     level: RiskLevel
     categories: tuple[str, ...] = Field(default=(), max_length=5)
-    confidence: float = Field(ge=0.0, le=1.0)
-    rationale: str = Field(min_length=1, max_length=240)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    rationale: str = Field(default="not_provided", min_length=1, max_length=240)
     evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
     rationale_alias_used: bool = Field(default=False, exclude=True)
 
@@ -173,18 +164,6 @@ class SupportDiagnostic(BaseModel):
     evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
     draft_text: str = Field(min_length=1, max_length=1200)
     suggested_support: SupportOffer | None = None
-
-
-class SupportPlan(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    intent: SupportIntent
-    next_action: SupportAction
-    text: str = Field(min_length=1, max_length=1200)
-    choice_set: ChoiceSet = ChoiceSet.NONE
-    need: NeedKind | None = None
-    catalog_item_ids: tuple[str, ...] = Field(default=(), max_length=4)
-    offered_support: SupportOffer | None = None
 
 
 class EscalationCause(str, Enum):

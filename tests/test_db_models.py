@@ -1,3 +1,6 @@
+import pytest
+
+from app import db
 from app.db import (
     ActionExecution,
     AgentRun,
@@ -9,6 +12,7 @@ from app.db import (
     RiskAssessmentRecord,
     conversation_identity_hash,
 )
+from scripts.postgres_assurance import _REQUIRED_INDEXES
 
 
 def test_new_operational_tables_have_expected_identity_and_audit_columns() -> None:
@@ -53,3 +57,40 @@ def test_conversation_and_escalation_models_persist_policy_context() -> None:
     assert Escalation.__table__.c.level.nullable is True
     assert Escalation.__table__.c.request_key.nullable is True
     assert Escalation.__table__.c.request_key.unique is True
+
+
+@pytest.mark.asyncio
+async def test_init_db_and_assurance_require_callback_lease_scan_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+
+    class Connection:
+        async def run_sync(self, function):  # type: ignore[no-untyped-def]
+            del function
+
+        async def execute(self, statement):  # type: ignore[no-untyped-def]
+            statements.append(str(statement))
+
+    class Begin:
+        async def __aenter__(self) -> Connection:
+            return Connection()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:  # type: ignore[no-untyped-def]
+            del exc_type, exc, traceback
+
+    class Engine:
+        def begin(self) -> Begin:
+            return Begin()
+
+    monkeypatch.setattr(db, "engine", Engine())
+
+    await db.init_db()
+
+    expected_indexes = {
+        "ix_callback_executions_status",
+        "ix_callback_executions_lease_expires_at",
+    }
+    assert expected_indexes <= _REQUIRED_INDEXES
+    for index_name in expected_indexes:
+        assert any(index_name in statement for statement in statements)

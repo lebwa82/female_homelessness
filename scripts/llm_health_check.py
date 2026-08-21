@@ -36,9 +36,9 @@ async def check_structured(gateway: AgentGateway | None = None) -> int:
     print("LLM health-check: structured agent validation failed")
     print(
         "LLM health-check diagnostics: "
-        f"risk={evaluation.risk_audit.get('status', 'unknown')}/"
-        f"{evaluation.risk_audit.get('error_type', 'none')}@"
-        f"{evaluation.risk_audit.get('error_origin', 'none')}, "
+        f"safety={evaluation.safety_audit.get('status', 'unknown')}/"
+        f"{evaluation.safety_audit.get('error_type', 'none')}@"
+        f"{evaluation.safety_audit.get('error_origin', 'none')}, "
         f"support={evaluation.support_audit.get('status', 'unknown')}/"
         f"{evaluation.support_audit.get('error_type', 'none')}@"
         f"{evaluation.support_audit.get('error_origin', 'none')}"

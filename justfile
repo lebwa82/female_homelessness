@@ -17,6 +17,10 @@ db-down:
 db-status:
     podman compose ps
 
+# Verify additive PostgreSQL schema migrations without creating or deleting user rows.
+db-assure:
+    uv run python -m scripts.postgres_assurance
+
 # Stop only a previous local instance of this bot's polling command.
 stop-local:
     @pids="$(pgrep -f '^uv run python -m app\.bot$' || true)"; if [ -n "$pids" ]; then kill -TERM $pids; sleep 1; fi
@@ -54,6 +58,7 @@ scenario-smoke:
 # Replay the versioned behavior suite with deterministic fixture results.
 eval-dialogues:
     uv run pytest tests/test_behavior_dataset.py tests/test_dialogue_eval.py -q
+    uv run python -m scripts.dialogue_eval --fixtures tests/fixtures/dialogue_agent_outputs.jsonl tests/fixtures/dialogue_scenarios.jsonl
 
 # Run the anonymized behavior suite against the configured Qwen model.
 eval-dialogues-live:

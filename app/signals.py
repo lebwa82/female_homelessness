@@ -63,6 +63,7 @@ def extract_signals(
             )
 
     _add_human_request_matches(tokens, add)
+    _add_open_conversation_matches(tokens, add)
     _add_aid_matches(tokens, add)
     _add_psychologist_matches(tokens, add)
     _add_pending_offer_matches(tokens, pending_offer, add)
@@ -118,6 +119,27 @@ def _add_human_request_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
             role_index = start + 3
             if role_index < len(tokens) and tokens[role_index] in _HUMAN_ROLES:
                 add(HardSignalKind.EXPLICIT_HUMAN_REQUEST, "human.want_talk.role", start, role_index + 1)
+
+
+def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
+    """Recognise a bounded request to leave a completed workflow for ordinary conversation."""
+    for phrase in (
+        ("можно", "просто", "поговорить"),
+        ("хочу", "просто", "поговорить"),
+        ("хочу", "выговориться"),
+        ("хочу", "продолжить", "разговор"),
+        ("поговори", "со", "мной"),
+        ("поговорите", "со", "мной"),
+        ("выслушай", "меня"),
+        ("выслушайте", "меня"),
+    ):
+        for start in _find_phrase(tokens, phrase):
+            add(
+                HardSignalKind.OPEN_CONVERSATION_REQUEST,
+                "conversation.continue.explicit",
+                start,
+                start + len(phrase),
+            )
 
 
 def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
