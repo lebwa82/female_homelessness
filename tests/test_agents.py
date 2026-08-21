@@ -62,6 +62,29 @@ async def test_evaluate_starts_risk_and_support_calls_concurrently() -> None:
 
 
 @pytest.mark.asyncio
+async def test_human_request_is_instructed_and_parsed_as_no_safety_risk() -> None:
+    captured_risk_instruction = ""
+
+    async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
+        nonlocal captured_risk_instruction
+        if agent_name == "risk":
+            captured_risk_instruction = instructions
+            assert "хочу поговорить с человеком" in input_text
+            payload = {"level": "none", "categories": [], "confidence": 0.98, "rationale": "safe"}
+        else:
+            payload = {"kind": "reply", "text": "Я рядом."}
+        return AgentCallResult(payload=payload, audit={"status": "completed", "agent": agent_name})
+
+    result = await YandexAgentGateway(call=call).evaluate(
+        AgentContext(history=(("user", "хочу поговорить с человеком"),), state="open_conversation")
+    )
+
+    assert "human_requested" not in captured_risk_instruction
+    assert "не является риском безопасности" in captured_risk_instruction
+    assert result.risk.level is RiskLevel.NONE
+
+
+@pytest.mark.asyncio
 async def test_gateway_masks_transcript_and_audit_excludes_raw_message() -> None:
     captured: list[str] = []
 
