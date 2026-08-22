@@ -38,26 +38,50 @@ legacy_dir=""
 legacy_moved=0
 target_replaced=0
 activation_started=0
-database_url=""
+db_assure_env=""
+# The override exists solely for local shell stubs; operators do not need it
+# and the default is the fixed root-owned command path used in production.
+staged_path="${WOMEN_HELP_STAGED_PATH:-/usr/local/bin:/usr/bin:/bin}"
 
 cleanup() {
   sudo rm -f "$ARCHIVE_PATH"
   sudo rm -rf "$staging_dir"
+  if [[ -n "$db_assure_env" ]]; then
+    sudo rm -f "$db_assure_env"
+  fi
 }
 trap cleanup EXIT
 
 run_staged() {
-  # A service EnvironmentFile is data, never shell input.  The isolated staged
-  # process receives only the required database value and a non-secret command
-  # path; no other root-only service values are inherited or printed.
+  # All non-database gates are isolated from root-only service credentials.
+  # The synthetic endpoint is deliberately unreachable: checks must stay
+  # offline and cannot accidentally target production PostgreSQL.
   sudo env -i \
-    PATH="$PATH" \
-    DATABASE_URL="$database_url" \
-    bash -c '
+    PATH="$staged_path" \
+    DATABASE_URL=postgresql+asyncpg://offline \
+    /bin/bash -c '
     cd "$1"
     shift
     exec "$@"
   ' -- "$staging_dir" "$@"
+}
+
+run_staged_db_assure() {
+  # Read one strict data line from the root-owned temporary file.  This is not
+  # `source`/`eval`: quote characters and shell syntax were rejected before
+  # the file was created, and the value never appears in argv or logs.
+  sudo env -i \
+    PATH="$staged_path" \
+    WOMEN_HELP_DB_ENV_FILE="$db_assure_env" \
+    /bin/bash -c '
+    set -euo pipefail
+    IFS= read -r database_line < "$WOMEN_HELP_DB_ENV_FILE"
+    case "$database_line" in DATABASE_URL=*) ;; *) exit 2;; esac
+    DATABASE_URL="${database_line#DATABASE_URL=}"
+    export DATABASE_URL
+    cd "$1"
+    exec just db-assure
+  ' -- "$staging_dir"
 }
 
 rollback() {
@@ -97,27 +121,18 @@ read_database_url() {
       value = $0
       sub(/^[[:space:]]*DATABASE_URL=/, "", value)
       if (value == "" || value ~ /[[:space:]"\\]/ || index(value, "$") || index(value, "`") || index(value, sprintf("%c", 39))) exit 2
-      print value
+      print "DATABASE_URL=" value
     }
     END { if (found != 1) exit 2 }
   ' "$ENV_FILE"
 }
-
-if ! sudo test -r "$ENV_FILE"; then
-  echo "Refusing activation: root-only service EnvironmentFile is unavailable." >&2
-  exit 3
-fi
-if ! database_url="$(read_database_url)"; then
-  echo "Refusing activation: service EnvironmentFile has no safe database value." >&2
-  exit 3
-fi
 
 sudo mkdir -p "$release_root"
 sudo mkdir "$staging_dir"
 sudo tar -xf "$ARCHIVE_PATH" -C "$staging_dir"
 
 # All checks operate from the staged artifact before it can replace the active
-# project.  db-assure uses the existing root-only database configuration.
+# project.  They receive a synthetic, deliberately unusable database URL.
 run_staged uv sync --all-groups --locked
 run_staged just check
 run_staged just scenario-smoke
@@ -129,7 +144,16 @@ if ! sudo podman inspect --format '{{.State.Health.Status}}' "$POSTGRES_CONTAINE
   echo "Refusing activation: production PostgreSQL is not healthy." >&2
   exit 4
 fi
-run_staged just db-assure
+if ! sudo test -r "$ENV_FILE"; then
+  echo "Refusing activation: root-only service EnvironmentFile is unavailable." >&2
+  exit 3
+fi
+db_assure_env="$(sudo mktemp /tmp/women-help-db-assure.XXXXXX)"
+if ! read_database_url | sudo tee "$db_assure_env" >/dev/null; then
+  echo "Refusing activation: service EnvironmentFile has no safe database value." >&2
+  exit 3
+fi
+run_staged_db_assure
 
 if [[ -e "$release_dir" ]]; then
   echo "Refusing activation: release revision already exists." >&2

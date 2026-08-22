@@ -128,6 +128,19 @@ class Conversation(Base):
     )
 
 
+class ConversationTombstone(Base):
+    """Minimal deletion barrier; it retains neither raw identity nor content."""
+
+    __tablename__ = "conversation_tombstones"
+    __table_args__ = (UniqueConstraint("channel", "platform_user_hash", name="uq_conversation_tombstones_identity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(32))
+    platform_user_hash: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Event(Base):
     __tablename__ = "events"
 
@@ -227,6 +240,8 @@ class InboundTextExecution(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     outcome: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -282,6 +297,8 @@ class FollowupJob(Base):
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -413,6 +430,19 @@ async def init_db() -> None:
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_offer VARCHAR(64)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0",
+            """
+            CREATE TABLE IF NOT EXISTS conversation_tombstones (
+                id SERIAL PRIMARY KEY,
+                channel VARCHAR(32) NOT NULL,
+                platform_user_hash VARCHAR(64) NOT NULL,
+                generation INTEGER NOT NULL,
+                deleted_at TIMESTAMPTZ DEFAULT now()
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_tombstones_identity
+            ON conversation_tombstones (channel, platform_user_hash)
+            """,
             "ALTER TABLE action_executions ADD COLUMN IF NOT EXISTS effect_key VARCHAR(128)",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_action_executions_effect_key ON action_executions (effect_key)",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS redacted_content TEXT",
@@ -427,8 +457,17 @@ async def init_db() -> None:
                 f"make_interval(days => {settings.message_retention_days}) WHERE expires_at IS NULL"
             ),
             "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS conversation_generation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(64)",
+            "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS ix_followup_jobs_lease_expires_at ON followup_jobs (lease_expires_at)",
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS outcome JSONB",
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ",
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivery_token VARCHAR(64)",
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivery_lease_expires_at TIMESTAMPTZ",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_inbound_text_executions_delivery_lease_expires_at "
+                "ON inbound_text_executions (delivery_lease_expires_at)"
+            ),
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS cause VARCHAR(48) NOT NULL DEFAULT 'safety'",
             "ALTER TABLE escalations ALTER COLUMN level DROP NOT NULL",
@@ -500,6 +539,7 @@ async def get_or_create_conversation_record(
     username: str | None,
     identity_hash_key: str,
 ) -> Conversation:
+    identity_hash = conversation_identity_hash(channel, platform_user_id, identity_hash_key)
     async with Session() as session:
         result = await session.execute(
             select(Conversation).where(
@@ -509,14 +549,41 @@ async def get_or_create_conversation_record(
         )
         conversation = result.scalar_one_or_none()
         if conversation is None:
-            conversation = Conversation(
-                channel=channel,
-                channel_user_id=platform_user_id,
-                chat_id=chat_id,
-                username=username,
-                platform_user_hash=conversation_identity_hash(channel, platform_user_id, identity_hash_key),
+            tombstone_result = await session.execute(
+                select(ConversationTombstone).where(
+                    ConversationTombstone.channel == channel,
+                    ConversationTombstone.platform_user_hash == identity_hash,
+                )
             )
-            session.add(conversation)
+            tombstone = tombstone_result.scalar_one_or_none()
+            created = await session.execute(
+                postgres_insert(Conversation)
+                .values(
+                    channel=channel,
+                    channel_user_id=platform_user_id,
+                    chat_id=chat_id,
+                    username=username,
+                    platform_user_hash=identity_hash,
+                    generation=tombstone.generation if tombstone is not None else 0,
+                )
+                .on_conflict_do_nothing(index_elements=(Conversation.channel, Conversation.channel_user_id))
+                .returning(Conversation.id)
+            )
+            conversation_id = created.scalar_one_or_none()
+            if conversation_id is None:
+                concurrent = await session.execute(
+                    select(Conversation).where(
+                        Conversation.channel == channel,
+                        Conversation.channel_user_id == platform_user_id,
+                    )
+                )
+                conversation = concurrent.scalar_one()
+                conversation.chat_id = chat_id
+                conversation.username = username
+            else:
+                conversation = await session.get(Conversation, conversation_id)
+                if conversation is None:
+                    raise LookupError("new conversation is missing")
         else:
             conversation.chat_id = chat_id
             conversation.username = username
@@ -867,9 +934,58 @@ async def acknowledge_text_execution_outcome(conversation_id: int, message_id: i
                 InboundTextExecution.source_message_id == source_message_id,
                 InboundTextExecution.outcome.is_not(None),
             )
-            .values(delivered_at=func.now())
+            .values(delivered_at=func.now(), delivery_token=None, delivery_lease_expires_at=None)
         )
         await session.commit()
+
+
+async def claim_text_execution_delivery(conversation_id: int, message_id: int | None) -> str | None:
+    """Lease one durable outbox turn before handing it to Telegram."""
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    now = datetime.now(UTC)
+    token = uuid4().hex
+    async with Session() as session:
+        result = await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.outcome.is_not(None),
+                InboundTextExecution.delivered_at.is_(None),
+                or_(
+                    InboundTextExecution.delivery_token.is_(None),
+                    InboundTextExecution.delivery_lease_expires_at <= now,
+                ),
+            )
+            .values(
+                delivery_token=token,
+                delivery_lease_expires_at=now + CALLBACK_PROCESSING_LEASE,
+            )
+            .returning(InboundTextExecution.delivery_token)
+        )
+        await session.commit()
+        return result.scalar_one_or_none()
+
+
+async def release_text_execution_delivery(
+    conversation_id: int,
+    message_id: int | None,
+    delivery_token: str,
+) -> bool:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.delivery_token == delivery_token,
+                InboundTextExecution.delivered_at.is_(None),
+            )
+            .values(delivery_token=None, delivery_lease_expires_at=None)
+        )
+        await session.commit()
+        return result.rowcount == 1
 
 
 async def fail_text_execution(conversation_id: int, message_id: int | None, lease_token: str) -> bool:
@@ -927,11 +1043,12 @@ async def purge_expired_content(now: datetime | None = None) -> int:
     now = now or datetime.now(UTC)
     async with Session() as session:
         messages = await session.execute(
-            select(ConversationMessage).where(ConversationMessage.expires_at.is_not(None), ConversationMessage.expires_at <= now)
+            select(ConversationMessage).where(
+                or_(ConversationMessage.expires_at.is_(None), ConversationMessage.expires_at <= now)
+            )
         )
         contacts = await session.execute(
-            select(ContactPoint).where(ContactPoint.expires_at.is_not(None), ContactPoint.expires_at <= now)
-        )
+            select(ContactPoint).where(or_(ContactPoint.expires_at.is_(None), ContactPoint.expires_at <= now)))
         items = [*messages.scalars(), *contacts.scalars()]
         for item in items:
             await session.delete(item)
@@ -946,6 +1063,23 @@ async def delete_conversation_data(conversation_id: int) -> None:
     non-persistent so it cannot recreate a conversation identity.
     """
     async with Session() as session:
+        get_conversation = getattr(session, "get", None)
+        if get_conversation is not None:
+            conversation = await get_conversation(Conversation, conversation_id, with_for_update=True)
+            if conversation is None:
+                return
+            await session.execute(
+                postgres_insert(ConversationTombstone)
+                .values(
+                    channel=conversation.channel,
+                    platform_user_hash=conversation.platform_user_hash,
+                    generation=conversation.generation + 1,
+                )
+                .on_conflict_do_update(
+                    index_elements=(ConversationTombstone.channel, ConversationTombstone.platform_user_hash),
+                    set_={"generation": func.greatest(ConversationTombstone.generation, conversation.generation + 1)},
+                )
+            )
         request_ids = select(AidRequest.id).where(AidRequest.conversation_id == conversation_id)
         await session.execute(delete(ContactPoint).where(ContactPoint.aid_request_id.in_(request_ids)))
         await session.execute(delete(FollowupJob).where(FollowupJob.conversation_id == conversation_id))
@@ -964,6 +1098,7 @@ async def delete_conversation_data(conversation_id: int) -> None:
 
 async def cancel_followup_reminders(conversation_id: int) -> None:
     async with Session() as session:
+        await session.get(Conversation, conversation_id, with_for_update=True)
         await session.execute(
             delete(FollowupJob).where(
                 FollowupJob.conversation_id == conversation_id,

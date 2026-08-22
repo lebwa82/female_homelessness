@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import count
@@ -93,6 +96,8 @@ class StoredCallbackClaim:
 class StoredTurnOutcome:
     turn: AgentTurn
     delivered: bool = False
+    delivery_token: str | None = None
+    delivery_lease_expires_at: datetime | None = None
 
 
 @dataclass
@@ -109,6 +114,8 @@ class InMemoryConversationStore:
     callback_claims: dict[tuple[int, str, str], StoredCallbackClaim] = field(default_factory=dict)
     text_claims: dict[tuple[int, str], StoredCallbackClaim] = field(default_factory=dict)
     text_outcomes: dict[tuple[int, str], StoredTurnOutcome] = field(default_factory=dict)
+    tombstone_generations: dict[tuple[str, int], int] = field(default_factory=dict)
+    _update_locks: dict[int, asyncio.Lock] = field(default_factory=dict, repr=False)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -120,6 +127,7 @@ class InMemoryConversationStore:
                 platform_user_id=incoming.platform_user_id,
                 chat_id=incoming.chat_id,
                 username=incoming.username,
+                generation=self.tombstone_generations.get((incoming.channel, incoming.platform_user_id), 0),
             )
             self.conversations[incoming.platform_user_id] = record
         else:
@@ -129,6 +137,13 @@ class InMemoryConversationStore:
 
     async def get(self, incoming: IncomingMessage) -> ConversationRecord | None:
         return self.conversations.get(incoming.platform_user_id)
+
+    @asynccontextmanager
+    async def serialize_update(self, record: ConversationRecord) -> AsyncIterator[None]:
+        """Share one update lock between every in-memory service instance."""
+        lock = self._update_locks.setdefault(record.id, asyncio.Lock())
+        async with lock:
+            yield
 
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
         for key, value in values.items():
@@ -328,6 +343,37 @@ class InMemoryConversationStore:
         outcome = self.text_outcomes.get(key)
         if outcome is not None:
             outcome.delivered = True
+            outcome.delivery_token = None
+            outcome.delivery_lease_expires_at = None
+
+    async def claim_outbound_delivery(self, record: ConversationRecord, message_id: int | None) -> str | None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        outcome = self.text_outcomes.get(key)
+        now = datetime.now(UTC)
+        if outcome is None or outcome.delivered:
+            return None
+        if (
+            outcome.delivery_token is not None
+            and outcome.delivery_lease_expires_at is not None
+            and outcome.delivery_lease_expires_at > now
+        ):
+            return None
+        token = uuid4().hex
+        outcome.delivery_token = token
+        outcome.delivery_lease_expires_at = now + timedelta(minutes=5)
+        return token
+
+    async def release_outbound_delivery(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+        delivery_token: str,
+    ) -> None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        outcome = self.text_outcomes.get(key)
+        if outcome is not None and outcome.delivery_token == delivery_token and not outcome.delivered:
+            outcome.delivery_token = None
+            outcome.delivery_lease_expires_at = None
 
     async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
         key = (record.id, str(message_id) if message_id is not None else "missing")
@@ -338,6 +384,7 @@ class InMemoryConversationStore:
             claim.lease_expires_at = None
 
     async def delete_data(self, record: ConversationRecord) -> None:
+        self.tombstone_generations[(record.channel, record.platform_user_id)] = record.generation + 1
         self.messages = [item for item in self.messages if item[0] != record.id]
         request_ids = {item.id for item in self.aid_requests if item.conversation_id == record.id}
         self.aid_requests = [item for item in self.aid_requests if item.conversation_id != record.id]
@@ -388,6 +435,17 @@ class PostgresConversationStore:
             )
             row = result.scalar_one_or_none()
             return self._record_from_row(row) if row is not None else None
+
+    @asynccontextmanager
+    async def serialize_update(self, record: ConversationRecord) -> AsyncIterator[None]:
+        """Hold a database-backed advisory lock across one policy derivation."""
+        async with db.Session() as session:
+            await session.execute(db.select(db.func.pg_advisory_lock(record.id)))
+            try:
+                yield
+            finally:
+                await session.execute(db.select(db.func.pg_advisory_unlock(record.id)))
+                await session.commit()
 
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
         async with db.Session() as session:
@@ -600,6 +658,17 @@ class PostgresConversationStore:
 
     async def acknowledge_text_outcome(self, record: ConversationRecord, message_id: int | None) -> None:
         await db.acknowledge_text_execution_outcome(record.id, message_id)
+
+    async def claim_outbound_delivery(self, record: ConversationRecord, message_id: int | None) -> str | None:
+        return await db.claim_text_execution_delivery(record.id, message_id)
+
+    async def release_outbound_delivery(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+        delivery_token: str,
+    ) -> None:
+        await db.release_text_execution_delivery(record.id, message_id, delivery_token)
 
     async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
         await db.fail_text_execution(record.id, message_id, lease_token)

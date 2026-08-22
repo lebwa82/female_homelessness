@@ -342,6 +342,25 @@ async def evaluate_case(
     for role, content in case.history[:-1]:
         await store.append_message(record, role, content)
     turn = await ConversationService(store=store, gateway=gateway).handle_text(incoming)
+    return await _report_turn(
+        case,
+        store,
+        record,
+        turn,
+        history_matches=await store.history(record) == case.history,
+        require_provider_health=require_provider_health,
+    )
+
+
+async def _report_turn(
+    case: DialogueCase,
+    store: InMemoryConversationStore,
+    record: Any,
+    turn: Any,
+    *,
+    history_matches: bool,
+    require_provider_health: bool,
+) -> CaseReport:
     audit = _policy_audit(store)
     rule_ids = tuple(audit.get("rule_ids", ()))
     copy_contains = case.behavior["copy_contains"]
@@ -359,10 +378,9 @@ async def evaluate_case(
         "canonical_copy_ok": copy_contains is None or copy_contains in turn.text,
         "rule_ids": rule_ids,
     }
-    soft_projection = {"pending_offer": record.pending_offer}
+    soft_projection = {"pending_offer": record.pending_offer, "authoritative": False}
     soft_failures = _soft_failures(case.soft, case.initial, soft_projection)
     diagnostics = _diagnostic_projection(store, audit)
-    history_matches = await store.history(record) == case.history
     hard_failures = _behavior_failures(case.behavior, projection, audit, history_matches)
     deltas = _diagnostic_deltas(case.diagnostics, diagnostics)
     provider_failures = _provider_failures(diagnostics) if require_provider_health else ()
@@ -395,6 +413,15 @@ async def evaluate_cases(
         raise ValueError("invalid max_concurrency")
     if isinstance(gateway, FixtureGateway):
         gateway.validate_case_ids(cases)
+    soft_cases = tuple(case for case in cases if case.group == "soft_lifecycle")
+    if soft_cases and not require_provider_health:
+        reports = await _evaluate_cases_with_soft_lifecycle(
+            gateway,
+            cases,
+            soft_cases,
+            require_provider_health=require_provider_health,
+        )
+        return EvalReport(cases=reports)
     semaphore = asyncio.Semaphore(max_concurrency)
 
     async def one(case: DialogueCase) -> CaseReport:
@@ -403,6 +430,96 @@ async def evaluate_cases(
             return await evaluate_case(selected, case, require_provider_health=require_provider_health)
 
     return EvalReport(cases=tuple(await asyncio.gather(*(one(case) for case in cases))))
+
+
+def _gateway_for_case(gateway: Gateway, case: DialogueCase) -> Gateway:
+    return gateway.for_case(case) if isinstance(gateway, FixtureGateway) else gateway
+
+
+async def _evaluate_cases_with_soft_lifecycle(
+    gateway: Gateway,
+    cases: Sequence[DialogueCase],
+    soft_cases: Sequence[DialogueCase],
+    *,
+    require_provider_health: bool,
+) -> tuple[CaseReport, ...]:
+    """Replay soft offers as real sequential state, never seeded end states."""
+    by_id = {case.id: case for case in soft_cases}
+    required = {"soft-offer-create", "soft-offer-consume", "soft-offer-expire"}
+    if set(by_id) != required:
+        raise DatasetError("soft lifecycle cases must be create, consume, and expire")
+    create_case, consume_case, expire_case = (
+        by_id["soft-offer-create"],
+        by_id["soft-offer-consume"],
+        by_id["soft-offer-expire"],
+    )
+    reports: dict[str, CaseReport] = {}
+
+    async def prepare(case: DialogueCase, identity: int) -> tuple[InMemoryConversationStore, Any, int]:
+        store = InMemoryConversationStore()
+        incoming = IncomingMessage(
+            platform_user_id=identity,
+            chat_id=identity,
+            text=_final_user_text(case.history),
+            message_id=1,
+        )
+        record = await store.ensure(incoming)
+        await store.update(record, **case.initial.store_values())
+        return store, record, identity
+
+    # Branch one: None → psychologist → None by accepting the offer.
+    identity = int(hashlib.sha256(b"soft-offer-consume-lifecycle").hexdigest()[:12], 16)
+    store, record, _ = await prepare(create_case, identity)
+    first_incoming = IncomingMessage(
+        platform_user_id=identity,
+        chat_id=identity,
+        text=_final_user_text(create_case.history),
+        message_id=1,
+    )
+    create_turn = await ConversationService(store=store, gateway=_gateway_for_case(gateway, create_case)).handle_text(first_incoming)
+    reports[create_case.id] = await _report_turn(
+        create_case, store, record, create_turn, history_matches=True, require_provider_health=require_provider_health
+    )
+    consume_incoming = IncomingMessage(
+        platform_user_id=identity,
+        chat_id=identity,
+        text=_final_user_text(consume_case.history),
+        message_id=2,
+    )
+    consume_turn = await ConversationService(store=store, gateway=_gateway_for_case(gateway, consume_case)).handle_text(consume_incoming)
+    reports[consume_case.id] = await _report_turn(
+        consume_case, store, record, consume_turn, history_matches=True, require_provider_health=require_provider_health
+    )
+
+    # Branch two: create a fresh offer, then prove unrelated text expires it.
+    expiry_identity = int(hashlib.sha256(b"soft-offer-expire-lifecycle").hexdigest()[:12], 16)
+    expiry_store, expiry_record, _ = await prepare(create_case, expiry_identity)
+    expiry_create = IncomingMessage(
+        platform_user_id=expiry_identity,
+        chat_id=expiry_identity,
+        text=_final_user_text(create_case.history),
+        message_id=1,
+    )
+    await ConversationService(store=expiry_store, gateway=_gateway_for_case(gateway, create_case)).handle_text(expiry_create)
+    expire_incoming = IncomingMessage(
+        platform_user_id=expiry_identity,
+        chat_id=expiry_identity,
+        text=_final_user_text(expire_case.history),
+        message_id=2,
+    )
+    expire_turn = await ConversationService(store=expiry_store, gateway=_gateway_for_case(gateway, expire_case)).handle_text(expire_incoming)
+    reports[expire_case.id] = await _report_turn(
+        expire_case, expiry_store, expiry_record, expire_turn, history_matches=True, require_provider_health=require_provider_health
+    )
+
+    normal_reports = {
+        case.id: await evaluate_case(
+            _gateway_for_case(gateway, case), case, require_provider_health=require_provider_health
+        )
+        for case in cases
+        if case.group != "soft_lifecycle"
+    }
+    return tuple(reports[case.id] if case.id in reports else normal_reports[case.id] for case in cases)
 
 
 async def evaluate_offline_cases(gateway: FixtureGateway, cases: Sequence[DialogueCase]) -> EvalReport:
@@ -414,9 +531,14 @@ async def evaluate_offline_cases(gateway: FixtureGateway, cases: Sequence[Dialog
     reports: list[CaseReport] = []
     for index, report in enumerate(base.cases):
         failures = list(report.hard_failures)
-        for variant, mutation in variants.items():
-            if mutation.cases[index].hard_hash != report.hard_hash:
-                failures.append(f"mutation_{variant.value}_hard_projection")
+        # Soft lifecycle cases intentionally observe a diagnostic-owned offer
+        # as a non-authoritative projection.  They are checked by their own
+        # sequential lifecycle contract, rather than pretending a mutated
+        # offer was the same stored conversation state.
+        if cases[index].group != "soft_lifecycle":
+            for variant, mutation in variants.items():
+                if mutation.cases[index].hard_hash != report.hard_hash:
+                    failures.append(f"mutation_{variant.value}_hard_projection")
         reports.append(replace(report, hard_failures=tuple(failures)))
     return EvalReport(cases=tuple(reports))
 

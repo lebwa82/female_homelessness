@@ -504,6 +504,7 @@ def test_deploy_script_runs_staged_gate_without_evaluating_unrelated_environment
     environment = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "WOMEN_HELP_STAGED_PATH": f"{fake_bin}:/usr/bin:/bin",
         "WOMEN_HELP_ENV_FILE": str(env_file),
     }
     result = subprocess.run(
@@ -549,7 +550,12 @@ def test_deploy_script_err_trap_restores_moved_legacy_target_on_restart_failure(
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "WOMEN_HELP_ENV_FILE": str(env_file)},
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "WOMEN_HELP_STAGED_PATH": f"{fake_bin}:/usr/bin:/bin",
+            "WOMEN_HELP_ENV_FILE": str(env_file),
+        },
     )
 
     assert result.returncode != 0

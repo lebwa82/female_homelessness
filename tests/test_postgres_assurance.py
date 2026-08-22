@@ -5,13 +5,33 @@ from types import SimpleNamespace
 import pytest
 
 from app import db
-from scripts.postgres_assurance import _REQUIRED_COLUMNS, _REQUIRED_INDEXES, assure
+from scripts.postgres_assurance import (
+    _REQUIRED_COLUMNS,
+    _index_projection,
+    assure,
+    expected_indexes,
+)
+
+
+def _definition(name: str) -> str:
+    expected = expected_indexes[name]
+    unique = "UNIQUE " if expected.unique else ""
+    columns = ", ".join(expected.columns)
+    predicate = f" WHERE {expected.predicate}" if expected.predicate else ""
+    return f"CREATE {unique}INDEX {name} ON public.{expected.table} USING btree ({columns}){predicate}"
+
+
+def test_assurance_rejects_a_correctly_named_index_with_wrong_column() -> None:
+    expected = expected_indexes["uq_inbound_text_executions_origin"]
+
+    assert _index_projection(
+        "CREATE UNIQUE INDEX uq_inbound_text_executions_origin "
+        "ON public.inbound_text_executions USING btree (conversation_id, lease_token)"
+    ) != expected
 
 
 @pytest.mark.asyncio
-async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
     init_runs = 0
 
@@ -24,6 +44,9 @@ async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level
             return iter(self._rows)
 
         def scalar_one(self):  # type: ignore[no-untyped-def]
+            return self._scalar
+
+        def scalar_one_or_none(self):  # type: ignore[no-untyped-def]
             return self._scalar
 
     class Transaction:
@@ -47,49 +70,18 @@ async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level
                 )
             if "pg_indexes" in sql:
                 order.append("indexes")
-                return Result(
-                    tuple(
-                        SimpleNamespace(
-                            indexname=name,
-                            indexdef=("CREATE UNIQUE INDEX" if name.startswith("uq_") else "CREATE INDEX"),
-                        )
-                        for name in _REQUIRED_INDEXES
-                    )
-                )
+                return Result(tuple(SimpleNamespace(indexname=name, indexdef=_definition(name)) for name in expected_indexes))
             if "INSERT INTO conversations" in sql:
-                order.append("conversation_insert")
+                order.append("conversation")
                 return Result(scalar=41)
-            if "INSERT INTO escalations" in sql:
-                order.append("escalation_insert")
-                return Result()
-            if "SELECT level FROM escalations" in sql:
-                order.append("historical_level_select")
-                return Result(scalar="human_requested")
-            if "INSERT INTO inbound_text_executions" in sql:
-                order.append("claim_insert")
-                return Result()
-            if "SELECT status FROM inbound_text_executions" in sql:
-                order.append("claim_select")
-                return Result(scalar="processing")
-            if "INSERT INTO conversation_messages" in sql:
-                order.append("expired_message_insert")
-                return Result()
-            if "SELECT count(*) FROM conversation_messages" in sql:
-                order.append("expired_message_select")
-                return Result(scalar=1)
-            if "DELETE FROM conversation_messages" in sql:
-                order.append("message_delete")
-                return Result()
-            if "DELETE FROM inbound_text_executions" in sql:
-                order.append("claim_delete")
-                return Result()
-            if "DELETE FROM escalations" in sql:
-                order.append("escalation_delete")
-                return Result()
-            if "DELETE FROM conversations" in sql:
-                order.append("conversation_delete")
-                return Result()
-            raise AssertionError("unexpected_statement")
+            if "SELECT inbound_text_executions.outcome" in sql:
+                order.append("outcome")
+                return Result(scalar={"text": "assurance", "choices": []})
+            if "SELECT conversation_messages.id" in sql:
+                order.append("retention")
+                return Result(scalar=None)
+            order.append("repository")
+            return Result()
 
     class Connect:
         async def __aenter__(self) -> Connection:
@@ -112,20 +104,8 @@ async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level
     result = await assure()
 
     assert init_runs == 2
-    assert result["historical_level_readable"] is True
-    assert order == [
-        "metadata",
-        "indexes",
-        "conversation_insert",
-        "escalation_insert",
-        "historical_level_select",
-        "claim_insert",
-        "claim_select",
-        "expired_message_insert",
-        "expired_message_select",
-        "message_delete",
-        "claim_delete",
-        "escalation_delete",
-        "conversation_delete",
-        "rollback",
-    ]
+    assert result["claim_reclaim_outcome"] is True
+    assert result["retention_purge_read"] is True
+    assert result["comprehensive_delete"] is True
+    assert order[:2] == ["metadata", "indexes"]
+    assert {"conversation", "outcome", "retention", "rollback"} <= set(order)

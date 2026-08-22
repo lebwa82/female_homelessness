@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from app.agents import AgentContext, AgentEvaluation
-from app.domain import DiagnosticStatus, RiskLevel, SafetyDiagnostic, SupportDiagnostic
+from app.domain import (
+    DiagnosticStatus,
+    RiskLevel,
+    SafetyDiagnostic,
+    SupportDiagnostic,
+    SupportOffer,
+)
 from scripts.dialogue_eval import (
     DatasetError,
     DiagnosticVariant,
@@ -36,12 +42,17 @@ async def test_fixture_replay_has_no_hard_failures_and_retains_all_cases() -> No
 
     assert report.hard_failures == ()
     assert report.diagnostic_deltas == ()
-    assert len(report.cases) == 60
+    assert len(report.cases) == 63
     assert {
         "suicide-direct-want-die",
         "suicide-direct-kill-self",
         "suicide-direct-self-harm-now",
         "suicide-direct-not-want-live-help",
+    } <= {case.case_id for case in report.cases}
+    assert {
+        "suicide-clause-comma",
+        "suicide-clause-dash",
+        "suicide-clause-period",
     } <= {case.case_id for case in report.cases}
     assert not report.soft_failures
 
@@ -78,7 +89,37 @@ async def test_evaluator_reports_pending_offer_as_soft_state_without_authorizing
 
     report = await evaluate_case(FixtureGateway.from_case(case, payloads), case)
 
-    assert report.soft_projection == {"pending_offer": "psychologist"}
+    assert report.soft_projection == {"pending_offer": "psychologist", "authoritative": False}
+
+
+@pytest.mark.asyncio
+async def test_soft_offer_cases_are_replayed_as_two_sequential_lifecycles() -> None:
+    cases = tuple(case for case in load_cases(DATASET) if case.group == "soft_lifecycle")
+    offer = AgentEvaluation(
+        safety=SafetyDiagnostic(level="none"),
+        support=SupportDiagnostic(intent="open_conversation", draft_text="safe", suggested_support=SupportOffer.PSYCHOLOGIST),
+        safety_status=DiagnosticStatus.COMPLETED,
+        support_status=DiagnosticStatus.COMPLETED,
+        safety_audit={"status": "fixture"},
+        support_audit={"status": "fixture"},
+    )
+    ordinary = AgentEvaluation(
+        safety=SafetyDiagnostic(level="none"),
+        support=SupportDiagnostic(intent="open_conversation", draft_text="safe"),
+        safety_status=DiagnosticStatus.COMPLETED,
+        support_status=DiagnosticStatus.COMPLETED,
+        safety_audit={"status": "fixture"},
+        support_audit={"status": "fixture"},
+    )
+    gateway = ScriptedGateway([offer, ordinary, offer, ordinary])
+
+    report = await evaluate_cases(gateway, cases)
+
+    assert report.soft_failures == ()
+    assert all(case.soft_projection["authoritative"] is False for case in report.cases)
+    assert len(gateway.contexts) == 4
+    assert any(content == "мне тяжело" for _, content in gateway.contexts[1].history)
+    assert any(content == "мне тяжело" for _, content in gateway.contexts[3].history)
 
 
 @pytest.mark.asyncio

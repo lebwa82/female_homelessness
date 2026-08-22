@@ -144,6 +144,14 @@ def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> N
         ("не", "хочу", "указывать", "место"),
         ("не", "хочу", "оставлять", "контакт"),
         ("не", "буду", "оставлять", "контакт"),
+        # Refusals occur in natural word orders as well as in the prompt's
+        # wording.  These are workflow escapes, never field values.
+        ("город", "указывать", "не", "хочу"),
+        ("место", "не", "укажу"),
+        ("контакт", "оставлять", "не", "буду"),
+        ("не", "дам", "номер"),
+        ("заявку", "не", "надо"),
+        ("давайте", "пропустим"),
         ("пропустить",),
     ):
         for start in _find_phrase(tokens, phrase):
@@ -336,7 +344,11 @@ def _is_bounded_not_want_to_live(tokens: tuple[str, ...], start: int, width: int
     must not weaken its local crisis route.
     """
     tail = tokens[start + width :]
-    return not tail or tail[0] not in {"в", "с"}
+    # Tokenisation intentionally drops punctuation, so a bare preposition is
+    # not enough to redefine the completed clause.  Suppress only the two
+    # reviewed continuations, preserving crisis language such as "в последнее
+    # время" and "с каждым днём" after a punctuation boundary.
+    return tuple(tail[:3]) != ("в", "этом", "городе") and tuple(tail[:2]) != ("с", "ним")
 
 
 def _is_predicate_negated(tokens: tuple[str, ...], predicate_start: int) -> bool:

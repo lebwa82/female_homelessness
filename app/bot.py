@@ -54,7 +54,32 @@ def render_keyboard(turn: AgentTurn) -> InlineKeyboardMarkup | None:
 async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn) -> None:
     if turn.audit.get("suppress_delivery"):
         return
-    await message.answer(turn.text, reply_markup=render_keyboard(turn))
+    if not turn.audit.get("skip_outbound_persistence"):
+        delivery_authorization = getattr(conversation_service, "delivery_authorization", None)
+        if delivery_authorization is not None:
+            try:
+                async with delivery_authorization(incoming, turn) as token:
+                    if token is None:
+                        return
+                    await message.answer(turn.text, reply_markup=render_keyboard(turn))
+            except Exception as error:  # noqa: BLE001 - a failed outbox lease is retried, never bypassed
+                logger.warning("Outbound delivery unavailable: %s", type(error).__name__)
+                return
+        else:
+            authorize_delivery = getattr(conversation_service, "authorize_delivery", None)
+            if authorize_delivery is not None:
+                try:
+                    authorized = await authorize_delivery(incoming, turn)
+                except Exception as error:  # noqa: BLE001 - only canonical crisis wording may fail open
+                    if not turn.audit.get("critical_delivery"):
+                        logger.warning("Outbound delivery authorization unavailable: %s", type(error).__name__)
+                        return
+                    authorized = True
+                if not authorized:
+                    return
+            await message.answer(turn.text, reply_markup=render_keyboard(turn))
+    else:
+        await message.answer(turn.text, reply_markup=render_keyboard(turn))
     if not turn.audit.get("skip_outbound_persistence"):
         try:
             await conversation_service.record_outbound(incoming, turn)

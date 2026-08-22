@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
@@ -74,6 +76,13 @@ class ConversationService:
     async def _start(self, incoming: IncomingMessage) -> AgentTurn:
         try:
             record = await self.store.ensure(incoming)
+        except Exception:  # noqa: BLE001 - a failed inbound write must not pretend to have succeeded
+            return self._persistence_unavailable_turn()
+        async with self.store.serialize_update(record):
+            return await self._start_serialized(record, incoming)
+
+    async def _start_serialized(self, record: ConversationRecord, incoming: IncomingMessage) -> AgentTurn:
+        try:
             lease_token = await self.store.claim_text(record, incoming.message_id)
         except Exception:  # noqa: BLE001 - a failed inbound write must not pretend to have succeeded
             return self._persistence_unavailable_turn()
@@ -121,8 +130,66 @@ class ConversationService:
                 or (isinstance(expected_generation, int) and record.generation != expected_generation)
             ):
                 return
-            await self.store.append_message(record, "assistant", turn.text, {"ui": {"choices": [choice.id for choice in turn.choices]}})
+            # Delivery acknowledgement is the durable outbox boundary.  The
+            # optional assistant audit may fail, but must never make Telegram
+            # retry an already visible answer.
             await self.store.acknowledge_text_outcome(record, incoming.message_id)
+            await self.store.append_message(
+                record,
+                "assistant",
+                turn.text,
+                {"ui": {"choices": [choice.id for choice in turn.choices]}},
+            )
+
+    async def authorize_delivery(self, incoming: IncomingMessage, turn: AgentTurn) -> bool:
+        """Authorize the visible reply against its durable conversation identity."""
+        async with self._lock_for(incoming):
+            record = await self.store.get(incoming)
+            if record is None:
+                return False
+            expected_id = turn.audit.get("conversation_id")
+            expected_generation = turn.audit.get("conversation_generation")
+            return (
+                isinstance(expected_id, int)
+                and isinstance(expected_generation, int)
+                and record.id == expected_id
+                and record.generation == expected_generation
+            )
+
+    @asynccontextmanager
+    async def delivery_authorization(self, incoming: IncomingMessage, turn: AgentTurn) -> AsyncIterator[str | None]:
+        """Hold deletion serialization from durable authorization through send.
+
+        The yielded token belongs to the replayable outbox record.  A missing
+        record is a confirmed tombstone and therefore deliberately yields no
+        authorization; callers must not turn a crisis exemption into a
+        tombstone bypass.
+        """
+        async with self._lock_for(incoming):
+            record = await self.store.get(incoming)
+            if record is None:
+                yield None
+                return
+            expected_id = turn.audit.get("conversation_id")
+            expected_generation = turn.audit.get("conversation_generation")
+            if (
+                not isinstance(expected_id, int)
+                or not isinstance(expected_generation, int)
+                or record.id != expected_id
+                or record.generation != expected_generation
+            ):
+                yield None
+                return
+            async with self.store.serialize_update(record):
+                token = await self.store.claim_outbound_delivery(record, incoming.message_id)
+                if token is None:
+                    yield None
+                    return
+                try:
+                    yield token
+                except BaseException:
+                    await self.store.release_outbound_delivery(record, incoming.message_id, token)
+                    raise
 
     async def claim_inbound(self, incoming: IncomingMessage) -> bool:
         """Claim a stateless command/media update so a Telegram retry has no side effect."""
@@ -148,7 +215,12 @@ class ConversationService:
     async def _delete(self, incoming: IncomingMessage) -> AgentTurn:
         record = await self.store.get(incoming)
         if record is not None:
-            await self.store.delete_data(record)
+            async with self.store.serialize_update(record):
+                # Re-read after acquiring the database lock: another request
+                # may have completed deletion while this command was waiting.
+                current = await self.store.get(incoming)
+                if current is not None and current.id == record.id:
+                    await self.store.delete_data(current)
         return self._turn(
             "Запрос на удаление данных принят. Если сейчас нужна помощь, можно продолжить писать здесь.",
         ).model_copy(update={"audit": {"skip_outbound_persistence": True}})
@@ -159,6 +231,15 @@ class ConversationService:
 
     async def _handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         record = await self.store.ensure(incoming)
+        async with self.store.serialize_update(record):
+            return await self._handle_callback_serialized(record, incoming, callback_id)
+
+    async def _handle_callback_serialized(
+        self,
+        record: ConversationRecord,
+        incoming: IncomingMessage,
+        callback_id: str,
+    ) -> AgentTurn:
         lease_token = await self.store.claim_callback(record, callback_id, incoming.message_id)
         if lease_token is None:
             return await self._replay_callback(record, callback_id)
@@ -191,7 +272,7 @@ class ConversationService:
         if callback_id == "pause":
             if record.state != ConversationState.GREETING.value:
                 return await self._state_turn(record)
-            await self.store.update(record, state=ConversationState.CLOSED.value)
+            await self._clear_abandoned_workflow(record, state=ConversationState.CLOSED)
             return self._turn(PAUSE)
         if callback_id == "continue_bot":
             if record.state != ConversationState.OPEN_CONVERSATION.value:
@@ -258,7 +339,7 @@ class ConversationService:
                 ConversationState.FOLLOWUP_ANSWERED.value,
             }:
                 return await self._state_turn(record)
-            await self.store.update(record, state=ConversationState.CLOSED.value)
+            await self._clear_abandoned_workflow(record, state=ConversationState.CLOSED)
             return self._turn("Хорошо. Этот чат всегда открыт — пишите, когда захотите.")
         if callback_id in {"followup:same", "followup:worse"}:
             if record.state != ConversationState.FOLLOWUP_ANSWERED.value:
@@ -317,8 +398,16 @@ class ConversationService:
             if preliminary_risk.level is RiskLevel.CRITICAL:
                 return self._render_resolved_turn(critical_resolved_turn(preliminary_risk))
             return self._persistence_unavailable_turn()
-        if preliminary_risk.level is RiskLevel.CRITICAL:
-            return await self._handle_persisted_critical(record, incoming, preliminary_risk, preliminary_signals)
+        async with self.store.serialize_update(record):
+            if preliminary_risk.level is RiskLevel.CRITICAL:
+                return await self._handle_persisted_critical(record, incoming, preliminary_risk, preliminary_signals)
+            return await self._handle_noncritical_text_serialized(record, incoming)
+
+    async def _handle_noncritical_text_serialized(
+        self,
+        record: ConversationRecord,
+        incoming: IncomingMessage,
+    ) -> AgentTurn:
         try:
             lease_token = await self.store.claim_text(record, incoming.message_id)
         except Exception:  # noqa: BLE001 - truthful retry is safer than a partial turn
@@ -451,7 +540,9 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - never let PII/storage preparation suppress crisis copy
             if "lease_token" in locals() and lease_token is not None:
                 await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
-            return self._render_resolved_turn(decision)
+            return self._render_resolved_turn(decision).model_copy(
+                update={"audit": {"skip_outbound_persistence": True, "critical_delivery": True}}
+            )
 
     async def _evaluate_diagnostics(self, record: ConversationRecord) -> AgentEvaluation:
         """Return exactly one diagnostic pair, or an explicit unavailable pair.
@@ -724,7 +815,10 @@ class ConversationService:
         choices = choices_for(decision.choice_set, decision.catalog_item_ids)
         if decision.choice_set is ChoiceSet.AID_CATALOG:
             choices = (*choices[:-1], Choice(id="need:other", label="Что-то другое"), choices[-1])
-        return ConversationService._turn(decision.text, choices)
+        turn = ConversationService._turn(decision.text, choices)
+        if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
+            return turn.model_copy(update={"audit": {**turn.audit, "critical_delivery": True}})
+        return turn
 
     async def _record_policy_decision(
         self,
@@ -787,13 +881,13 @@ class ConversationService:
         self,
         record: ConversationRecord,
         *,
-        state: ConversationState = ConversationState.OPEN_CONVERSATION,
+        state: ConversationState | str = ConversationState.OPEN_CONVERSATION,
     ) -> None:
         """Clear every finite-flow value before returning to conversation or a handoff."""
         await self.store.cancel_pending_reminder(record)
         await self.store.update(
             record,
-            state=state.value,
+            state=state.value if isinstance(state, ConversationState) else state,
             need=None,
             pending_aid_id=None,
             pending_contact_method=None,
@@ -824,9 +918,11 @@ class ConversationService:
         )
 
     @staticmethod
-    def _text_request_key(record: ConversationRecord, message_id: int | None, effect: PolicyEffect) -> str:
+    def _text_request_key(record: ConversationRecord, message_id: int | None, _effect: PolicyEffect) -> str:
         source_message_id = str(message_id) if message_id is not None else "missing"
-        origin = f"{record.id}:{source_message_id}:{effect.value}".encode()
+        # The update identity is fixed before policy evaluation.  A changed
+        # risk result on replay must never create a second request/escalation.
+        origin = f"{record.id}:{source_message_id}".encode()
         return f"text:{hashlib.sha256(origin).hexdigest()}"
 
     @staticmethod
@@ -859,7 +955,18 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - delivery remains independently attempted
             return turn
         if record is None:
-            return turn.model_copy(update={"audit": {**turn.audit, "skip_outbound_persistence": True}})
+            # A successful lookup with no record is a confirmed tombstone, not
+            # transient storage loss.  It suppresses every stale turn,
+            # including canonical crisis wording.
+            return turn.model_copy(
+                update={
+                    "audit": {
+                        **turn.audit,
+                        "skip_outbound_persistence": True,
+                        "suppress_delivery": True,
+                    }
+                }
+            )
         return turn.model_copy(
             update={
                 "audit": {
