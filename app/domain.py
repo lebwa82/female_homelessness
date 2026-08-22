@@ -192,6 +192,7 @@ class PolicyEffect(str, Enum):
     CAPTURE_LOCATION = "capture_location"
     COMPLETE_CONTACT = "complete_contact"
     REPLAY_WORKFLOW = "replay_workflow"
+    CANCEL_WORKFLOW = "cancel_workflow"
     CLOSE = "close"
 
 

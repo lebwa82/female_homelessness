@@ -19,6 +19,10 @@ _REQUIRED_COLUMNS = {
     ("callback_executions", "status"),
     ("callback_executions", "lease_token"),
     ("callback_executions", "lease_expires_at"),
+    ("inbound_text_executions", "source_message_id"),
+    ("inbound_text_executions", "status"),
+    ("inbound_text_executions", "lease_token"),
+    ("inbound_text_executions", "lease_expires_at"),
 }
 _REQUIRED_INDEXES = {
     "ix_escalations_cause",
@@ -26,6 +30,9 @@ _REQUIRED_INDEXES = {
     "ix_callback_executions_status",
     "uq_escalations_request_key",
     "uq_callback_executions_origin",
+    "ix_inbound_text_executions_status",
+    "ix_inbound_text_executions_lease_expires_at",
+    "uq_inbound_text_executions_origin",
 }
 
 

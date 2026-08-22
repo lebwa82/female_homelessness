@@ -36,7 +36,13 @@ async def test_fixture_replay_has_no_hard_failures_and_retains_all_cases() -> No
 
     assert report.hard_failures == ()
     assert report.diagnostic_deltas == ()
-    assert len(report.cases) == 53
+    assert len(report.cases) == 57
+    assert {
+        "suicide-direct-want-die",
+        "suicide-direct-kill-self",
+        "suicide-direct-self-harm-now",
+        "suicide-direct-not-want-live-help",
+    } <= {case.case_id for case in report.cases}
 
 
 @pytest.mark.asyncio
@@ -58,10 +64,20 @@ async def test_evaluator_replays_pending_offer_and_active_workflow_through_servi
     assert {key: by_id["multi-aid-completion-open-01"].hard_projection[key] for key in (
         "effect", "rendered_callback_ids", "state_after"
     )} == {
-        "effect": "none",
+        "effect": "cancel_workflow",
         "rendered_callback_ids": ("human",),
         "state_after": "open_conversation",
     }
+
+
+@pytest.mark.asyncio
+async def test_evaluator_reports_pending_offer_as_soft_state_without_authorizing_effects() -> None:
+    case = next(case for case in load_cases(DATASET) if case.id == "psychologist-considering-01")
+    payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
+
+    report = await evaluate_case(FixtureGateway.from_case(case, payloads), case)
+
+    assert report.soft_projection == {"pending_offer": "psychologist"}
 
 
 @pytest.mark.asyncio

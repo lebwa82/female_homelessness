@@ -15,6 +15,7 @@ from app.domain import (
     RiskAssessment,
     RiskLevel,
 )
+from app.pii import redact_for_model
 
 
 @dataclass
@@ -94,6 +95,7 @@ class InMemoryConversationStore:
     risk_assessments: list[tuple[int, RiskAssessment]] = field(default_factory=list)
     actions: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
     callback_claims: dict[tuple[int, str, str], StoredCallbackClaim] = field(default_factory=dict)
+    text_claims: dict[tuple[int, str], StoredCallbackClaim] = field(default_factory=dict)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -112,6 +114,9 @@ class InMemoryConversationStore:
             record.username = incoming.username
         return record
 
+    async def get(self, incoming: IncomingMessage) -> ConversationRecord | None:
+        return self.conversations.get(incoming.platform_user_id)
+
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
         for key, value in values.items():
             setattr(record, key, value)
@@ -125,8 +130,18 @@ class InMemoryConversationStore:
     async def history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
         return tuple((role, content) for conversation_id, role, content, _ in self.messages if conversation_id == record.id)
 
+    async def model_history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (
+                role,
+                "[CONTACT]" if audit.get("content_type") == "contact_value" else redact_for_model(content),
+            )
+            for conversation_id, role, content, audit in self.messages
+            if conversation_id == record.id
+        )
+
     async def record_agent_run(self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]) -> None:
-        self.agent_runs.append((record.id, agent_name, audit))
+        self.agent_runs.append((record.id, agent_name, db.sanitize_agent_audit(audit)))
 
     async def record_risk(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
         self.risk_assessments.append((record.id, assessment))
@@ -142,7 +157,9 @@ class InMemoryConversationStore:
         callback_id: str,
         message_id: int | None,
     ) -> str | None:
-        key = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        # Callback buttons emitted for one keyboard are mutually exclusive.  A second
+        # callback from the same source update must replay state, not enact another path.
+        key = (record.id, "keyboard-slot", str(message_id) if message_id is not None else "missing")
         current = self.callback_claims.get(key)
         now = datetime.now(UTC)
         if current is not None:
@@ -168,7 +185,7 @@ class InMemoryConversationStore:
         message_id: int | None,
         lease_token: str,
     ) -> None:
-        key = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        key = (record.id, "keyboard-slot", str(message_id) if message_id is not None else "missing")
         claim = self.callback_claims.get(key)
         if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
             claim.status = "completed"
@@ -182,7 +199,7 @@ class InMemoryConversationStore:
         message_id: int | None,
         lease_token: str,
     ) -> None:
-        key = (record.id, callback_id, str(message_id) if message_id is not None else "missing")
+        key = (record.id, "keyboard-slot", str(message_id) if message_id is not None else "missing")
         claim = self.callback_claims.get(key)
         if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
             claim.status = "failed"
@@ -232,25 +249,60 @@ class InMemoryConversationStore:
         )
         return request
 
+    async def claim_text(self, record: ConversationRecord, message_id: int | None) -> str | None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        current = self.text_claims.get(key)
+        now = datetime.now(UTC)
+        if current is not None:
+            is_expired = (
+                current.status == "processing"
+                and current.lease_expires_at is not None
+                and current.lease_expires_at <= now
+            )
+            if current.status == "completed" or (current.status == "processing" and not is_expired):
+                return None
+        lease_token = uuid4().hex
+        self.text_claims[key] = StoredCallbackClaim(
+            status="processing",
+            lease_token=lease_token,
+            lease_expires_at=now + timedelta(minutes=5),
+        )
+        return lease_token
+
+    async def complete_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        claim = self.text_claims.get(key)
+        if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
+            claim.status = "completed"
+            claim.lease_token = None
+            claim.lease_expires_at = None
+
+    async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        claim = self.text_claims.get(key)
+        if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
+            claim.status = "failed"
+            claim.lease_token = None
+            claim.lease_expires_at = None
+
     async def delete_data(self, record: ConversationRecord) -> None:
         self.messages = [item for item in self.messages if item[0] != record.id]
         request_ids = {item.id for item in self.aid_requests if item.conversation_id == record.id}
         self.aid_requests = [item for item in self.aid_requests if item.conversation_id != record.id]
         self.followup_jobs = [item for item in self.followup_jobs if item.aid_request_id not in request_ids]
         self.callback_claims = {key: claim for key, claim in self.callback_claims.items() if key[0] != record.id}
-        record.state = "greeting"
-        record.need = None
-        record.pending_aid_id = None
-        record.pending_contact_method = None
-        record.pending_city = None
-        record.pending_district = None
-        record.pending_offer = None
+        self.text_claims = {key: claim for key, claim in self.text_claims.items() if key[0] != record.id}
+        self.agent_runs = [item for item in self.agent_runs if item[0] != record.id]
+        self.risk_assessments = [item for item in self.risk_assessments if item[0] != record.id]
+        self.actions = [item for item in self.actions if item[0] != record.id]
+        self.escalations = [item for item in self.escalations if item.conversation_id != record.id]
+        self.conversations.pop(record.platform_user_id, None)
 
     async def cancel_pending_reminder(self, record: ConversationRecord) -> None:
         self.followup_jobs = [
             job
             for job in self.followup_jobs
-            if not (job.conversation_id == record.id and job.kind == "followup_reminder" and job.status == "pending")
+            if not (job.conversation_id == record.id and job.status == "pending")
         ]
 
 
@@ -267,6 +319,17 @@ class PostgresConversationStore:
             self._identity_hash_key,
         )
         return self._record_from_row(row)
+
+    async def get(self, incoming: IncomingMessage) -> ConversationRecord | None:
+        async with db.Session() as session:
+            result = await session.execute(
+                db.select(db.Conversation).where(
+                    db.Conversation.channel == incoming.channel,
+                    db.Conversation.channel_user_id == incoming.platform_user_id,
+                )
+            )
+            row = result.scalar_one_or_none()
+            return self._record_from_row(row) if row is not None else None
 
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
         async with db.Session() as session:
@@ -291,6 +354,9 @@ class PostgresConversationStore:
 
     async def history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
         return tuple(await db.load_history(record.id))
+
+    async def model_history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
+        return tuple(await db.load_model_history(record.id))
 
     async def record_agent_run(self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]) -> None:
         await db.record_agent_run(record.id, agent_name, audit)
@@ -382,7 +448,7 @@ class PostgresConversationStore:
                         aid_request_id=request.id,
                         method=contact_method,
                         value=contact_value,
-                        expires_at=datetime.now(UTC) + timedelta(days=30),
+                        expires_at=db.content_expiry_at(),
                     )
                 )
             session.add(
@@ -410,6 +476,15 @@ class PostgresConversationStore:
 
     async def cancel_pending_reminder(self, record: ConversationRecord) -> None:
         await db.cancel_followup_reminders(record.id)
+
+    async def claim_text(self, record: ConversationRecord, message_id: int | None) -> str | None:
+        return await db.claim_text_execution(record.id, message_id)
+
+    async def complete_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
+        await db.complete_text_execution(record.id, message_id, lease_token)
+
+    async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
+        await db.fail_text_execution(record.id, message_id, lease_token)
 
     @staticmethod
     def _record_from_row(row: db.Conversation) -> ConversationRecord:

@@ -6,10 +6,10 @@ from unicodedata import normalize
 
 from app.domain import DeterministicSignals, HardSignalKind, NeedKind, SignalMatch, SupportOffer
 
-MATCHER_VERSION = "deterministic-signals-v1"
+MATCHER_VERSION = "deterministic-signals-v2"
 
 _HUMAN_TRANSFER_VERBS = frozenset({"позови", "позовите", "переключи", "переключите", "соедини", "соедините"})
-_HUMAN_TRANSFER_FILLERS = frozenset({"меня", "на", "с", "к", "живого", "живым"})
+_HUMAN_TRANSFER_FILLERS = frozenset({"меня", "на", "с", "к", "живого", "живым", "пожалуйста"})
 _HUMAN_ROLES = frozenset(
     {
         "человек",
@@ -112,13 +112,16 @@ def _add_human_request_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
                 add(HardSignalKind.EXPLICIT_HUMAN_REQUEST, "human.transfer.role", start, role_index + 1)
             break
 
-    for preposition in ("с", "со"):
-        for start in _find_phrase(tokens, ("хочу", "поговорить", preposition)):
-            if start > 0 and tokens[start - 1] == "не":
-                continue
-            role_index = start + 3
-            if role_index < len(tokens) and tokens[role_index] in _HUMAN_ROLES:
-                add(HardSignalKind.EXPLICIT_HUMAN_REQUEST, "human.want_talk.role", start, role_index + 1)
+    for lead in ("хочу", "можно"):
+        for preposition in ("с", "со"):
+            for start in _find_phrase(tokens, (lead, "поговорить", preposition)):
+                if _is_predicate_negated(tokens, start):
+                    continue
+                for role_index in range(start + 3, min(start + 6, len(tokens))):
+                    if tokens[role_index] in _HUMAN_ROLES:
+                        if all(part in _HUMAN_TRANSFER_FILLERS for part in tokens[start + 3 : role_index]):
+                            add(HardSignalKind.EXPLICIT_HUMAN_REQUEST, "human.want_talk.role", start, role_index + 1)
+                        break
 
 
 def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
@@ -132,6 +135,10 @@ def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> N
         ("поговорите", "со", "мной"),
         ("выслушай", "меня"),
         ("выслушайте", "меня"),
+        ("отмена",),
+        ("отменить",),
+        ("не", "хочу", "продолжать"),
+        ("не", "нужно", "продолжать"),
     ):
         for start in _find_phrase(tokens, phrase):
             add(
@@ -148,7 +155,7 @@ def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
     for start in _find_phrase(tokens, ("нет", "где", "ночевать")):
         add(HardSignalKind.CONCRETE_AID, "aid.housing.no_shelter", start, start + 3, NeedKind.HOUSING)
     for start, token in enumerate(tokens):
-        if token in _EVICTION_WORDS:
+        if token in _EVICTION_WORDS and not _is_predicate_negated(tokens, start):
             add(HardSignalKind.CONCRETE_AID, "aid.housing.eviction", start, start + 1, NeedKind.HOUSING)
     for phrase, rule_id, need in (
         (("нужны", "продукты"), "aid.food.products", NeedKind.FOOD_MONEY),
@@ -159,16 +166,18 @@ def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
         (("нужна", "помощь", "с", "проездом"), "aid.transport", NeedKind.FOOD_MONEY),
     ):
         for start in _find_phrase(tokens, phrase):
-            add(HardSignalKind.CONCRETE_AID, rule_id, start, start + len(phrase), need)
+            if not _is_predicate_negated(tokens, start):
+                add(HardSignalKind.CONCRETE_AID, rule_id, start, start + len(phrase), need)
     for phrase in (("нужны", "вещи", "для", "ребенка"), ("не", "хватает", "вещей", "для", "ребенка")):
         for start in _find_phrase(tokens, phrase):
-            add(
-                HardSignalKind.CONCRETE_AID,
-                "aid.children.items",
-                start,
-                start + len(phrase),
-                NeedKind.CHILDREN,
-            )
+            if not _is_predicate_negated(tokens, start):
+                add(
+                    HardSignalKind.CONCRETE_AID,
+                    "aid.children.items",
+                    start,
+                    start + len(phrase),
+                    NeedKind.CHILDREN,
+                )
     for phrase in (("какую", "практическую", "помощь", "можно", "получить"), ("какую", "помощь", "можно", "получить")):
         for start in _find_phrase(tokens, phrase):
             add(HardSignalKind.GENERIC_AID_INTEREST, "aid.generic.available", start, start + len(phrase))
@@ -176,9 +185,11 @@ def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
 
 def _add_psychologist_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
     for start in _find_phrase(tokens, ("хочу", "поговорить", "с", "психологом")):
-        add(HardSignalKind.PSYCHOLOGIST_REQUEST, "psychologist.accept", start, start + 4)
+        if not _is_predicate_negated(tokens, start):
+            add(HardSignalKind.PSYCHOLOGIST_REQUEST, "psychologist.accept", start, start + 4)
     for start in _find_phrase(tokens, ("запишите", "меня", "к", "психологу")):
-        add(HardSignalKind.PSYCHOLOGIST_REQUEST, "psychologist.book", start, start + 4)
+        if not _is_predicate_negated(tokens, start):
+            add(HardSignalKind.PSYCHOLOGIST_REQUEST, "psychologist.book", start, start + 4)
     for start in _find_phrase(tokens, ("расскажите", "про", "психолога")):
         add(HardSignalKind.PSYCHOLOGIST_CONSIDERING, "psychologist.explain", start, start + 3)
     for start in _find_phrase(tokens, ("возможно", "психолог", "мог", "бы", "помочь")):
@@ -211,7 +222,7 @@ def _add_pending_offer_matches(
 def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
     for phrase in (("не", "хочу", "жить"), ("не", "хочу", "больше", "жить")):
         for start in _find_phrase(tokens, phrase):
-            if start + len(phrase) == len(tokens):
+            if _is_bounded_not_want_to_live(tokens, start, len(phrase)):
                 add(
                     HardSignalKind.SUICIDE_OR_SELF_HARM,
                     "safety.suicide.not_want_to_live",
@@ -219,20 +230,23 @@ def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
                     start + len(phrase),
                 )
     for start in _find_phrase(tokens, ("хочу", "покончить", "с", "собой")):
-        if not _is_negated(tokens, start, start + 4):
+        if not _is_predicate_negated(tokens, start):
             add(HardSignalKind.SUICIDE_OR_SELF_HARM, "safety.suicide.end_life", start, start + 4)
-    for start in _find_phrase(tokens, ("причиню", "себе", "вред")):
-        marker = _nearby_marker(tokens, start, start + 3)
-        if marker is not None:
-            token_start, token_end = _marker_action_span(marker, start, start + 3)
-            if not _is_negated(tokens, token_start, token_end):
-                add(HardSignalKind.SUICIDE_OR_SELF_HARM, "safety.self_harm.now", token_start, token_end)
+    for phrase, rule_id in (
+        (("хочу", "умереть"), "safety.suicide.want_to_die"),
+        (("убью", "себя"), "safety.suicide.kill_self"),
+        (("хочу", "сейчас", "причинить", "себе", "вред"), "safety.self_harm.now"),
+        (("причиню", "себе", "вред"), "safety.self_harm.now"),
+    ):
+        for start in _find_phrase(tokens, phrase):
+            if not _is_predicate_negated(tokens, start):
+                add(HardSignalKind.SUICIDE_OR_SELF_HARM, rule_id, start, start + len(phrase))
     for start, token in enumerate(tokens):
         if token in _ASSAULT_WORDS:
             marker = _nearby_marker(tokens, start, start + 1)
             if marker is not None:
                 token_start, token_end = _marker_action_span(marker, start, start + 1)
-                if not _is_negated(tokens, token_start, token_end):
+                if not _is_predicate_negated(tokens, start):
                     add(
                         HardSignalKind.VIOLENCE_OR_THREAT_NOW,
                         "safety.violence.assault_now",
@@ -242,11 +256,11 @@ def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
         if token in _THREAT_WORDS:
             marker = _nearby_marker(tokens, start, start + 1)
             if marker is None:
-                if not _is_negated(tokens, start, start + 1):
+                if not _is_predicate_negated(tokens, start):
                     add(HardSignalKind.SAFETY_CONCERN, "safety.concern.ongoing_threat", start, start + 1)
             else:
                 token_start, token_end = _marker_action_span(marker, start, start + 1)
-                if not _is_negated(tokens, token_start, token_end):
+                if not _is_predicate_negated(tokens, start):
                     add(
                         HardSignalKind.VIOLENCE_OR_THREAT_NOW,
                         "safety.violence.threat_now",
@@ -264,9 +278,9 @@ def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
         if token not in _EVICTION_WORDS:
             continue
         marker = _nearby_marker(tokens, start, start + 1)
-        if marker is None:
+        if marker is None and not _is_predicate_negated(tokens, start):
             add(HardSignalKind.SAFETY_CONCERN, "safety.concern.eviction", start, start + 1)
-        elif not _is_negated(tokens, min(marker, start), max(marker + 1, start + 1)):
+        elif marker is not None and not _is_predicate_negated(tokens, start):
             add(
                 HardSignalKind.URGENT_SHELTER,
                 "safety.shelter.eviction_now",
@@ -307,10 +321,15 @@ def _marker_action_span(marker: int, start: int, end: int) -> tuple[int, int]:
     return min(marker, start), max(marker + 1, end)
 
 
-def _is_negated(tokens: tuple[str, ...], start: int, end: int) -> bool:
-    window_start = max(0, start - 2)
-    window_end = min(len(tokens), end + 2)
-    return "не" in tokens[window_start:window_end]
+def _is_bounded_not_want_to_live(tokens: tuple[str, ...], start: int, width: int) -> bool:
+    """Keep direct suicidal language, but not residence or relationship grammar."""
+    tail = tokens[start + width :]
+    return tail in ((), ("помогите",), ("пожалуйста",), ("помогите", "пожалуйста"), ("пожалуйста", "помогите"))
+
+
+def _is_predicate_negated(tokens: tuple[str, ...], predicate_start: int) -> bool:
+    """Negation binds only to the following action predicate, never a later clause."""
+    return predicate_start > 0 and tokens[predicate_start - 1] == "не"
 
 
 type _AddMatch = Callable[[HardSignalKind, str, int, int, NeedKind | None], None]

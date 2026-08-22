@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import Any
 
-from app.agents import AgentContext, YandexAgentGateway
+from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
 from app.catalog import PSYCHOLOGIST_AID_ID, AidItem, available_aid_for_need, get_aid_item
 from app.domain import (
     AgentTurn,
@@ -11,6 +12,7 @@ from app.domain import (
     ChoiceSet,
     ContactMethod,
     ConversationState,
+    DiagnosticStatus,
     EscalationCause,
     EscalationRequest,
     IncomingMessage,
@@ -24,7 +26,7 @@ from app.domain import (
     SupportOffer,
 )
 from app.knowledge import find_verified_articles, format_verified_context
-from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, resolve_turn
+from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, critical_resolved_turn, resolve_turn
 from app.safety import assess_local_risk_from_signals
 from app.signals import MATCHER_VERSION, extract_signals
 from app.store import ConversationRecord, PostgresConversationStore
@@ -45,31 +47,88 @@ PAUSE = "Хорошо. Если захотите вернуться — напи
 NEED_PROMPT = "Что сейчас важнее всего? Можно выбрать или написать своими словами."
 OTHER_PROMPT = "Расскажите немного — что сейчас происходит? Не обязательно в деталях, только если хотите."
 UNKNOWN_PROMPT = "Я здесь. Можно продолжить разговор или позвать человека."
+PERSISTENCE_UNAVAILABLE_PROMPT = (
+    "Не получилось безопасно сохранить сообщение. Можно повторить позже или позвать человека."
+)
+
+
+def _diagnostics_unavailable() -> AgentEvaluation:
+    return AgentEvaluation(
+        safety_status=DiagnosticStatus.UNAVAILABLE,
+        support_status=DiagnosticStatus.UNAVAILABLE,
+        safety_audit={"status": "unavailable"},
+        support_audit={"status": "unavailable"},
+    )
 
 
 class ConversationService:
     def __init__(self, store: Any | None = None, gateway: YandexAgentGateway | None = None) -> None:
         self.store = store or PostgresConversationStore()
         self.gateway = gateway or YandexAgentGateway()
+        self._conversation_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
     async def start(self, incoming: IncomingMessage) -> AgentTurn:
-        record = await self.store.ensure(incoming)
-        await self.store.append_message(record, "user", "/start", {"telegram_message_id": incoming.message_id})
-        await self.store.record_action(record, "started", "completed")
+        async with self._lock_for(incoming):
+            return await self._start(incoming)
+
+    async def _start(self, incoming: IncomingMessage) -> AgentTurn:
+        try:
+            record = await self.store.ensure(incoming)
+            lease_token = await self.store.claim_text(record, incoming.message_id)
+        except Exception:  # noqa: BLE001 - a failed inbound write must not pretend to have succeeded
+            return self._persistence_unavailable_turn()
+        if lease_token is None:
+            return self._turn(WELCOME, CONTINUE_CHOICES).model_copy(
+                update={"audit": {"skip_outbound_persistence": True}}
+            )
+        try:
+            await self.store.append_message(record, "user", "/start", {"telegram_message_id": incoming.message_id})
+            await self.store.record_action(record, "started", "completed")
+            await self.store.complete_text(record, incoming.message_id, lease_token)
+        except Exception:  # noqa: BLE001 - an uncommitted inbound update must be retryable
+            await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
+            return self._persistence_unavailable_turn()
         return self._turn(WELCOME, CONTINUE_CHOICES)
 
     async def record_outbound(self, incoming: IncomingMessage, turn: AgentTurn) -> None:
-        record = await self.store.ensure(incoming)
-        await self.store.append_message(record, "assistant", turn.text, {"ui": {"choices": [choice.id for choice in turn.choices]}})
+        async with self._lock_for(incoming):
+            record = await self.store.ensure(incoming)
+            await self.store.append_message(record, "assistant", turn.text, {"ui": {"choices": [choice.id for choice in turn.choices]}})
+
+    async def claim_inbound(self, incoming: IncomingMessage) -> bool:
+        """Claim a stateless command/media update so a Telegram retry has no side effect."""
+        async with self._lock_for(incoming):
+            record = await self.store.ensure(incoming)
+            lease_token = await self.store.claim_text(record, incoming.message_id)
+            if lease_token is None:
+                return False
+            try:
+                await self.store.complete_text(record, incoming.message_id, lease_token)
+            except Exception:  # leave the update recoverable for a delivery retry
+                await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
+                raise
+            return True
 
     async def delete(self, incoming: IncomingMessage) -> AgentTurn:
-        record = await self.store.ensure(incoming)
-        await self.store.delete_data(record)
+        async with self._lock_for(incoming):
+            try:
+                return await self._delete(incoming)
+            except Exception:  # noqa: BLE001 - deletion must never falsely claim completion
+                return self._persistence_unavailable_turn()
+
+    async def _delete(self, incoming: IncomingMessage) -> AgentTurn:
+        record = await self.store.get(incoming)
+        if record is not None:
+            await self.store.delete_data(record)
         return self._turn(
-            "Запрос на удаление данных принят. Если сейчас нужна помощь, можно продолжить писать здесь."
-        )
+            "Запрос на удаление данных принят. Если сейчас нужна помощь, можно продолжить писать здесь.",
+        ).model_copy(update={"audit": {"skip_outbound_persistence": True}})
 
     async def handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
+        async with self._lock_for(incoming):
+            return await self._handle_callback(incoming, callback_id)
+
+    async def _handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         record = await self.store.ensure(incoming)
         lease_token = await self.store.claim_callback(record, callback_id, incoming.message_id)
         if lease_token is None:
@@ -209,59 +268,160 @@ class ConversationService:
         return await self._state_turn(record)
 
     async def handle_text(self, incoming: IncomingMessage) -> AgentTurn:
-        record = await self.store.ensure(incoming)
-        await self.store.append_message(record, "user", incoming.text, {"telegram_message_id": incoming.message_id})
-        history = await self.store.history(record)
-        knowledge_query = " ".join(content for role, content in history if role == "user")
-        verified_articles = find_verified_articles(knowledge_query)
-        evaluation = await self.gateway.evaluate(
-            AgentContext(
-                history=history,
-                state=record.state,
-                catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
-                knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
-            )
-        )
-        await self.store.record_agent_run(record, "safety", evaluation.safety_audit)
-        await self.store.record_agent_run(record, "support", evaluation.support_audit)
+        async with self._lock_for(incoming):
+            return await self._handle_text(incoming)
+
+    async def _handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         try:
-            pending_offer = SupportOffer(record.pending_offer) if record.pending_offer else None
-            signals = extract_signals(incoming.text, pending_offer=pending_offer)
-            local_risk = assess_local_risk_from_signals(signals)
-        except Exception:  # noqa: BLE001 - a local inspection failure has its own deterministic route
-            signals = None
-            local_risk = RiskAssessment(
+            preliminary_signals = extract_signals(incoming.text)
+            preliminary_risk = assess_local_risk_from_signals(preliminary_signals)
+        except Exception:  # noqa: BLE001 - the persisted route below has an unavailable projection
+            preliminary_risk = RiskAssessment(
                 level=RiskLevel.UNKNOWN,
                 rationale="local inspection unavailable",
                 detector="local-signals",
             )
-        await self.store.record_risk(record, local_risk)
-        state_before = record.state
-        decision = resolve_turn(
-            PolicyContext(
-                state=state_before,
-                signals=signals,
-                local_risk=local_risk,
-                safety_status=evaluation.safety_status,
-                support_status=evaluation.support_status,
-                safety=evaluation.safety,
-                support=evaluation.support,
-                pending_offer=pending_offer,
-                workflow_value=incoming.text,
-                need=record.need,
+        try:
+            record = await self.store.ensure(incoming)
+        except Exception:  # noqa: BLE001 - do not claim storage succeeded when it did not
+            if preliminary_risk.level is RiskLevel.CRITICAL:
+                return self._render_resolved_turn(critical_resolved_turn(preliminary_risk))
+            return self._persistence_unavailable_turn()
+        if preliminary_risk.level is RiskLevel.CRITICAL:
+            return await self._handle_persisted_critical(record, incoming, preliminary_risk, preliminary_signals)
+        try:
+            lease_token = await self.store.claim_text(record, incoming.message_id)
+        except Exception:  # noqa: BLE001 - truthful retry is safer than a partial turn
+            return self._persistence_unavailable_turn()
+        if lease_token is None:
+            return await self._state_turn(record)
+        try:
+            try:
+                pending_offer = SupportOffer(record.pending_offer) if record.pending_offer else None
+                signals = extract_signals(incoming.text, pending_offer=pending_offer)
+                local_risk = assess_local_risk_from_signals(signals)
+            except Exception:  # noqa: BLE001 - local safety has an explicit unavailable route
+                pending_offer = None
+                signals = None
+                local_risk = RiskAssessment(
+                    level=RiskLevel.UNKNOWN,
+                    rationale="local inspection unavailable",
+                    detector="local-signals",
+                )
+
+            # A workflow contact is retained locally only for the requested aid path.  Its
+            # every model view is an exact generic marker, including this current message.
+            audit: dict[str, Any] = {"telegram_message_id": incoming.message_id}
+            if record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
+                audit["content_type"] = "contact_value"
+            await self.store.append_message(record, "user", incoming.text, audit)
+
+            # Local critical signals are authoritative and run before any fallible PII,
+            # knowledge, or provider preparation.  This also prevents orphan diagnostics.
+            evaluation = _diagnostics_unavailable()
+            try:
+                history = await self.store.model_history(record)
+                knowledge_query = " ".join(content for role, content in history if role == "user")
+                verified_articles = find_verified_articles(knowledge_query)
+                evaluation = await self.gateway.evaluate(
+                    AgentContext(
+                        history=history,
+                        state=record.state,
+                        catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
+                        knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - diagnostics never alter the local safe route
+                evaluation = _diagnostics_unavailable()
+            await self.store.record_agent_run(record, "safety", evaluation.safety_audit)
+            await self.store.record_agent_run(record, "support", evaluation.support_audit)
+            await self.store.record_risk(record, local_risk)
+            state_before = record.state
+            decision = resolve_turn(
+                PolicyContext(
+                    state=state_before,
+                    signals=signals,
+                    local_risk=local_risk,
+                    safety_status=evaluation.safety_status,
+                    support_status=evaluation.support_status,
+                    safety=evaluation.safety,
+                    support=evaluation.support,
+                    pending_offer=pending_offer,
+                    workflow_value=incoming.text,
+                    need=record.need,
+                )
             )
+            turn = await self._execute_resolved_turn(record, decision, local_risk)
+            await self._record_policy_decision(
+                record,
+                state_before,
+                local_risk,
+                signals,
+                evaluation,
+                decision,
+                turn,
+            )
+            await self.store.complete_text(record, incoming.message_id, lease_token)
+            return turn
+        except Exception:  # noqa: BLE001 - retain a recoverable inbound claim on any partial turn
+            await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
+            return self._persistence_unavailable_turn()
+
+    async def _handle_persisted_critical(
+        self,
+        record: ConversationRecord,
+        incoming: IncomingMessage,
+        assessment: RiskAssessment,
+        signals: Any,
+    ) -> AgentTurn:
+        """Persist a critical turn opportunistically without delaying its canonical response."""
+        decision = critical_resolved_turn(assessment)
+        try:
+            lease_token = await self.store.claim_text(record, incoming.message_id)
+            if lease_token is None:
+                return self._render_resolved_turn(decision)
+            audit: dict[str, Any] = {"telegram_message_id": incoming.message_id}
+            if record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
+                audit["content_type"] = "contact_value"
+            await self.store.append_message(record, "user", incoming.text, audit)
+            evaluation = _diagnostics_unavailable()
+            await self.store.record_agent_run(record, "safety", evaluation.safety_audit)
+            await self.store.record_agent_run(record, "support", evaluation.support_audit)
+            await self.store.record_risk(record, assessment)
+            state_before = record.state
+            turn = await self._execute_resolved_turn(record, decision, assessment)
+            await self._record_policy_decision(
+                record,
+                state_before,
+                assessment,
+                signals,
+                evaluation,
+                decision,
+                turn,
+            )
+            await self.store.complete_text(record, incoming.message_id, lease_token)
+            return turn
+        except Exception:  # noqa: BLE001 - never let PII/storage preparation suppress crisis copy
+            if "lease_token" in locals() and lease_token is not None:
+                await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
+            return self._render_resolved_turn(decision)
+
+    async def _fail_text_claim_safely(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+        lease_token: str,
+    ) -> None:
+        try:
+            await self.store.fail_text(record, message_id, lease_token)
+        except Exception:  # noqa: BLE001 - original failure remains the truthful retry condition
+            return
+
+    @staticmethod
+    def _persistence_unavailable_turn() -> AgentTurn:
+        return ConversationService._turn(PERSISTENCE_UNAVAILABLE_PROMPT).model_copy(
+            update={"audit": {"skip_outbound_persistence": True}}
         )
-        turn = await self._execute_resolved_turn(record, decision, local_risk)
-        await self._record_policy_decision(
-            record,
-            state_before,
-            local_risk,
-            signals,
-            evaluation,
-            decision,
-            turn,
-        )
-        return turn
 
     async def _handle_need_choice(self, record: ConversationRecord, raw_need: str) -> AgentTurn:
         try:
@@ -370,11 +530,7 @@ class ConversationService:
                 await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
 
         if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
-            await self.store.update(
-                record,
-                pending_offer=None,
-                state=ConversationState.OPEN_CONVERSATION.value,
-            )
+            await self._clear_abandoned_workflow(record)
             await self.store.record_action(record, "critical_escalation", "completed")
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.HUMAN_HANDOFF:
@@ -383,12 +539,12 @@ class ConversationService:
                 handoff_request
                 or EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason="verified_signal"),
             )
-            await self.store.update(
-                record,
-                pending_offer=None,
-                state=ConversationState.OPEN_CONVERSATION.value,
-            )
+            await self._clear_abandoned_workflow(record)
             await self.store.record_action(record, "human_handoff", "simulated")
+            return self._render_resolved_turn(decision)
+        if decision.effect is PolicyEffect.CANCEL_WORKFLOW:
+            await self._clear_abandoned_workflow(record)
+            await self.store.record_action(record, "workflow_cancelled", "completed")
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.OFFER_AID and decision.need is not None:
             await self.store.update(
@@ -425,7 +581,7 @@ class ConversationService:
         if decision.effect is PolicyEffect.REPLAY_WORKFLOW:
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.CLOSE:
-            await self.store.update(record, pending_offer=None, state=ConversationState.CLOSED.value)
+            await self._clear_abandoned_workflow(record, state=ConversationState.CLOSED.value)
             return self._render_resolved_turn(decision)
 
         update_values: dict[str, str | None] = {
@@ -506,6 +662,25 @@ class ConversationService:
             handoff_request=EscalationRequest(cause=cause, reason=reason, request_key=request_key),
         )
 
+    async def _clear_abandoned_workflow(
+        self,
+        record: ConversationRecord,
+        *,
+        state: ConversationState = ConversationState.OPEN_CONVERSATION,
+    ) -> None:
+        """Clear every finite-flow value before returning to conversation or a handoff."""
+        await self.store.cancel_pending_reminder(record)
+        await self.store.update(
+            record,
+            state=state.value,
+            need=None,
+            pending_aid_id=None,
+            pending_contact_method=None,
+            pending_city=None,
+            pending_district=None,
+            pending_offer=None,
+        )
+
     async def _replay_callback(self, record: ConversationRecord, callback_id: str) -> AgentTurn:
         if callback_id == "human":
             return self._render_resolved_turn(
@@ -531,6 +706,12 @@ class ConversationService:
         source_message_id = str(message_id) if message_id is not None else "missing"
         origin = f"{record.id}:{callback_id}:{source_message_id}".encode()
         return f"callback:{hashlib.sha256(origin).hexdigest()}"
+
+    def _lock_for(self, incoming: IncomingMessage) -> asyncio.Lock:
+        return self._conversation_locks.setdefault(
+            (incoming.channel, incoming.platform_user_id),
+            asyncio.Lock(),
+        )
 
     @staticmethod
     def _turn(text: str, choices: tuple[Choice, ...] = ()) -> AgentTurn:

@@ -33,6 +33,67 @@ from app.domain import ConversationState, EscalationRequest, RiskAssessment
 from app.pii import redact_with_audit
 
 CALLBACK_PROCESSING_LEASE = timedelta(minutes=5)
+_AUDIT_FIELDS = frozenset({
+    "status",
+    "diagnostic_status",
+    "provider",
+    "agent",
+    "input_hash",
+    "request",
+    "pii_redaction",
+    "latency_ms",
+    "usage",
+    "output_shape",
+    "validation_errors",
+    "normalization",
+    "rationale_alias_used",
+    "evidence",
+    "error_type",
+})
+_VALIDATION_FIELDS = frozenset({
+    "level",
+    "categories",
+    "confidence",
+    "rationale",
+    "rationale_alias_used",
+    "evidence_claims",
+    "intent",
+    "need_hint",
+    "draft_text",
+    "suggested_support",
+})
+_VALIDATION_TYPES = frozenset({
+    "missing",
+    "extra_forbidden",
+    "enum",
+    "string_type",
+    "string_too_short",
+    "string_too_long",
+    "float_type",
+    "float_parsing",
+    "greater_than_equal",
+    "less_than_equal",
+    "tuple_type",
+    "list_type",
+    "too_long",
+    "bool_type",
+    "bool_parsing",
+    "model_type",
+    "dict_type",
+    "json_invalid",
+})
+_SAFE_ERROR_TYPES = frozenset({
+    "TimeoutError",
+    "ConnectionError",
+    "OSError",
+    "AuthenticationError",
+    "PermissionDeniedError",
+    "RateLimitError",
+    "BadRequestError",
+    "InternalServerError",
+    "APIStatusError",
+    "UnexpectedModelBehavior",
+})
 
 
 class Base(AsyncAttrs, DeclarativeBase):
@@ -148,6 +209,21 @@ class CallbackExecution(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class InboundTextExecution(Base):
+    __tablename__ = "inbound_text_executions"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "source_message_id", name="uq_inbound_text_executions_origin"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
+    source_message_id: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="processing", index=True)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AidRequest(Base):
     __tablename__ = "aid_requests"
 
@@ -175,6 +251,7 @@ class ContactPoint(Base):
 
 class Escalation(Base):
     __tablename__ = "escalations"
+    __table_args__ = (UniqueConstraint("request_key", name="uq_escalations_request_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
@@ -182,7 +259,7 @@ class Escalation(Base):
     level: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     categories: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     reason: Mapped[str] = mapped_column(String(240), default="")
-    request_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    request_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="simulated", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -204,6 +281,108 @@ class FollowupJob(Base):
 
 engine: AsyncEngine = create_async_engine(settings.database_url)
 Session = async_sessionmaker(engine, expire_on_commit=False)
+
+
+def content_expiry_at(now: datetime | None = None, *, retention_days: int | None = None) -> datetime:
+    """Return the one configurable retention deadline for messages and contacts."""
+    return (now or datetime.now(UTC)) + timedelta(
+        days=settings.message_retention_days if retention_days is None else retention_days
+    )
+
+
+def sanitize_agent_audit(audit: dict[str, Any]) -> dict[str, Any]:
+    """Persist only finite, non-content diagnostics from an untrusted provider boundary."""
+    result: dict[str, Any] = {}
+    if not isinstance(audit, dict):
+        return {"status": "unknown"}
+    for field in sorted(_AUDIT_FIELDS.intersection(audit)):
+        value = audit[field]
+        if field in {"status", "diagnostic_status"}:
+            result[field] = _audit_category(value, {"completed", "invalid", "unavailable", "error", "not_configured", "fixture"})
+        elif field == "provider":
+            result[field] = "yandex_ai_studio" if value == "yandex_ai_studio" else "other_provider"
+        elif field == "agent":
+            result[field] = _audit_category(value, {"risk", "support", "safety"})
+        elif field == "input_hash" and isinstance(value, str) and len(value) == 64:
+            result[field] = value
+        elif field == "request" and isinstance(value, dict):
+            result[field] = {
+                key: value[key]
+                for key in ("temperature", "max_tokens", "reasoning_effort", "data_logging_enabled")
+                if isinstance(value.get(key), (str, int, float, bool))
+            }
+        elif field == "pii_redaction" and isinstance(value, dict):
+            result[field] = _safe_pii_audit(value)
+        elif field == "latency_ms" and isinstance(value, (int, float)):
+            result[field] = max(0, min(int(value), 120_000))
+        elif field == "usage" and isinstance(value, dict):
+            result[field] = {
+                key: max(0, min(int(value[key]), 1_000_000))
+                for key in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens")
+                if isinstance(value.get(key), int)
+            }
+        elif field == "output_shape" and isinstance(value, dict):
+            result[field] = {
+                key: value[key]
+                for key in ("characters", "nonempty", "starts_json", "ends_object", "starts_code_fence", "ends_code_fence")
+                if isinstance(value.get(key), (int, bool))
+            }
+        elif field == "validation_errors" and isinstance(value, dict):
+            result[field] = {
+                "fields": sorted({_validation_field_category(item) for item in value.get("fields", []) if isinstance(item, str)}),
+                "types": sorted({_validation_type_category(item) for item in value.get("types", []) if isinstance(item, str)}),
+            }
+        elif field == "normalization" and isinstance(value, dict):
+            categories = value.get("categories", [])
+            result[field] = {
+                "categories": sorted(
+                    category
+                    for category in categories
+                    if category in {"safety_rationale_truncated", "support_unknown_intent_cleared", "support_unknown_need_hint_cleared"}
+                )
+            }
+        elif field == "rationale_alias_used" and isinstance(value, bool):
+            result[field] = value
+        elif field == "evidence" and isinstance(value, dict):
+            result[field] = {
+                key: max(0, min(int(value[key]), 100))
+                for key in ("claims", "valid", "invalid")
+                if isinstance(value.get(key), int)
+            }
+        elif field == "error_type":
+            result[field] = _audit_category(value, _SAFE_ERROR_TYPES, fallback="OtherTransportError")
+    return result or {"status": "unknown"}
+
+
+def _audit_category(value: Any, allowed: set[str] | frozenset[str], fallback: str = "unknown") -> str:
+    return value if isinstance(value, str) and value in allowed else fallback
+
+
+def _validation_field_category(value: str) -> str:
+    return value if value in _VALIDATION_FIELDS else "unknown_field"
+
+
+def _validation_type_category(value: str) -> str:
+    return value if value in _VALIDATION_TYPES else "other_validation_error"
+
+
+def _safe_pii_audit(value: dict[str, Any]) -> dict[str, Any]:
+    counts = value.get("entity_counts", {})
+    allowed_entities = {"PERSON", "LOCATION", "PHONE_NUMBER", "EMAIL_ADDRESS", "CREDIT_CARD", "IP_ADDRESS", "URL", "TELEGRAM_HANDLE"}
+    safe_counts = {
+        (key if key in allowed_entities else "OTHER"): max(0, min(int(count), 10_000))
+        for key, count in counts.items()
+        if isinstance(key, str) and isinstance(count, int)
+    } if isinstance(counts, dict) else {}
+    return {
+        "engine": "presidio" if value.get("engine") == "presidio" else "other",
+        "language": "ru" if value.get("language") == "ru" else "other",
+        "detected": bool(value.get("detected")),
+        "entity_counts": safe_counts,
+        "entities_total": max(0, min(int(value.get("entities_total", 0)), 10_000))
+        if isinstance(value.get("entities_total", 0), int)
+        else 0,
+    }
 
 
 def conversation_identity_hash(channel: str, platform_user_id: int, key: str) -> str:
@@ -233,6 +412,8 @@ async def init_db() -> None:
             "ALTER TABLE escalations ALTER COLUMN level DROP NOT NULL",
             "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS request_key VARCHAR(128)",
             "CREATE INDEX IF NOT EXISTS ix_escalations_cause ON escalations (cause)",
+            "ALTER TABLE escalations DROP CONSTRAINT IF EXISTS escalations_request_key_key",
+            "DROP INDEX IF EXISTS escalations_request_key_key",
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_escalations_request_key "
                 "ON escalations (request_key)"
@@ -261,6 +442,30 @@ async def init_db() -> None:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS uq_callback_executions_origin
             ON callback_executions (conversation_id, callback_id, source_message_id)
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS inbound_text_executions (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+                source_message_id VARCHAR(32) NOT NULL,
+                status VARCHAR(16) NOT NULL DEFAULT 'processing',
+                lease_token VARCHAR(64),
+                lease_expires_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT now()
+            )
+            """,
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS status VARCHAR(16) NOT NULL DEFAULT 'completed'",
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS lease_token VARCHAR(64)",
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            "UPDATE inbound_text_executions SET status = 'completed' WHERE status IS NULL",
+            "CREATE INDEX IF NOT EXISTS ix_inbound_text_executions_status ON inbound_text_executions (status)",
+            (
+                "CREATE INDEX IF NOT EXISTS ix_inbound_text_executions_lease_expires_at "
+                "ON inbound_text_executions (lease_expires_at)"
+            ),
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_inbound_text_executions_origin
+            ON inbound_text_executions (conversation_id, source_message_id)
             """,
         ):
             await connection.execute(text(statement))
@@ -303,7 +508,7 @@ async def append_message(
     role: str,
     content: str,
     audit: dict[str, Any] | None = None,
-    retention_days: int = 30,
+    retention_days: int | None = None,
 ) -> ConversationMessage:
     redaction = redact_with_audit(content)
     async with Session() as session:
@@ -313,7 +518,7 @@ async def append_message(
             content=content,
             redacted_content=redaction.text,
             audit={"pii_redaction": redaction.audit, **(audit or {})},
-            expires_at=datetime.now(UTC) + timedelta(days=retention_days),
+            expires_at=content_expiry_at(retention_days=retention_days),
         )
         session.add(message)
         await session.commit()
@@ -322,13 +527,50 @@ async def append_message(
 
 
 async def load_history(conversation_id: int) -> list[tuple[str, str]]:
+    now = datetime.now(UTC)
     async with Session() as session:
         result = await session.execute(
             select(ConversationMessage)
-            .where(ConversationMessage.conversation_id == conversation_id)
+            .where(
+                ConversationMessage.conversation_id == conversation_id,
+                or_(ConversationMessage.expires_at.is_(None), ConversationMessage.expires_at > now),
+            )
             .order_by(ConversationMessage.id)
         )
         return [(item.role, item.content) for item in result.scalars()]
+
+
+async def load_model_history(conversation_id: int) -> list[tuple[str, str]]:
+    """Load only active pre-redacted history for provider-bound context."""
+    now = datetime.now(UTC)
+    async with Session() as session:
+        result = await session.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.conversation_id == conversation_id,
+                or_(ConversationMessage.expires_at.is_(None), ConversationMessage.expires_at > now),
+            )
+            .order_by(ConversationMessage.id)
+        )
+        return [
+            (
+                item.role,
+                "[CONTACT]" if item.audit.get("content_type") == "contact_value" else (item.redacted_content or ""),
+            )
+            for item in result.scalars()
+        ]
+
+
+async def load_active_contact_points(aid_request_id: int) -> list[ContactPoint]:
+    now = datetime.now(UTC)
+    async with Session() as session:
+        result = await session.execute(
+            select(ContactPoint).where(
+                ContactPoint.aid_request_id == aid_request_id,
+                or_(ContactPoint.expires_at.is_(None), ContactPoint.expires_at > now),
+            )
+        )
+        return list(result.scalars())
 
 
 async def record_event(
@@ -340,16 +582,15 @@ async def record_event(
 
 
 async def record_agent_run(conversation_id: int, agent_name: str, audit: dict[str, Any]) -> None:
+    safe_audit = sanitize_agent_audit(audit)
     async with Session() as session:
         session.add(
             AgentRun(
                 conversation_id=conversation_id,
                 agent_name=agent_name,
-                status=str(audit.get("status", "unknown")),
-                response_id=audit.get("response_id"),
-                model=audit.get("model"),
-                input_hash=str(audit.get("input_hash", "")),
-                audit=audit,
+                status=str(safe_audit.get("status", "unknown")),
+                input_hash=str(safe_audit.get("input_hash", "")),
+                audit=safe_audit,
             )
         )
         await session.commit()
@@ -383,7 +624,9 @@ async def claim_callback_execution(
     callback_id: str,
     message_id: int | None,
 ) -> str | None:
+    del callback_id
     source_message_id = str(message_id) if message_id is not None else "missing"
+    callback_slot = "keyboard-slot"
     now = datetime.now(UTC)
     lease_token = uuid4().hex
     async with Session() as session:
@@ -391,7 +634,7 @@ async def claim_callback_execution(
             postgres_insert(CallbackExecution)
             .values(
                 conversation_id=conversation_id,
-                callback_id=callback_id,
+                callback_id=callback_slot,
                 source_message_id=source_message_id,
                 status="processing",
                 lease_token=lease_token,
@@ -429,13 +672,15 @@ async def complete_callback_execution(
     message_id: int | None,
     lease_token: str,
 ) -> bool:
+    del callback_id
     source_message_id = str(message_id) if message_id is not None else "missing"
+    callback_slot = "keyboard-slot"
     async with Session() as session:
         result = await session.execute(
             update(CallbackExecution)
             .where(
                 CallbackExecution.conversation_id == conversation_id,
-                CallbackExecution.callback_id == callback_id,
+                CallbackExecution.callback_id == callback_slot,
                 CallbackExecution.source_message_id == source_message_id,
                 CallbackExecution.status == "processing",
                 CallbackExecution.lease_token == lease_token,
@@ -452,16 +697,90 @@ async def fail_callback_execution(
     message_id: int | None,
     lease_token: str,
 ) -> bool:
+    del callback_id
     source_message_id = str(message_id) if message_id is not None else "missing"
+    callback_slot = "keyboard-slot"
     async with Session() as session:
         result = await session.execute(
             update(CallbackExecution)
             .where(
                 CallbackExecution.conversation_id == conversation_id,
-                CallbackExecution.callback_id == callback_id,
+                CallbackExecution.callback_id == callback_slot,
                 CallbackExecution.source_message_id == source_message_id,
                 CallbackExecution.status == "processing",
                 CallbackExecution.lease_token == lease_token,
+            )
+            .values(status="failed", lease_token=None, lease_expires_at=None)
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def claim_text_execution(conversation_id: int, message_id: int | None) -> str | None:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    now = datetime.now(UTC)
+    lease_token = uuid4().hex
+    async with Session() as session:
+        result = await session.execute(
+            postgres_insert(InboundTextExecution)
+            .values(
+                conversation_id=conversation_id,
+                source_message_id=source_message_id,
+                status="processing",
+                lease_token=lease_token,
+                lease_expires_at=now + CALLBACK_PROCESSING_LEASE,
+            )
+            .on_conflict_do_update(
+                index_elements=(
+                    InboundTextExecution.conversation_id,
+                    InboundTextExecution.source_message_id,
+                ),
+                set_={
+                    "status": "processing",
+                    "lease_token": lease_token,
+                    "lease_expires_at": now + CALLBACK_PROCESSING_LEASE,
+                },
+                where=or_(
+                    InboundTextExecution.status == "failed",
+                    and_(
+                        InboundTextExecution.status == "processing",
+                        InboundTextExecution.lease_expires_at <= now,
+                    ),
+                ),
+            )
+            .returning(InboundTextExecution.lease_token)
+        )
+        await session.commit()
+        return result.scalar_one_or_none()
+
+
+async def complete_text_execution(conversation_id: int, message_id: int | None, lease_token: str) -> bool:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.status == "processing",
+                InboundTextExecution.lease_token == lease_token,
+            )
+            .values(status="completed", lease_token=None, lease_expires_at=None)
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def fail_text_execution(conversation_id: int, message_id: int | None, lease_token: str) -> bool:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.status == "processing",
+                InboundTextExecution.lease_token == lease_token,
             )
             .values(status="failed", lease_token=None, lease_expires_at=None)
         )
@@ -520,6 +839,11 @@ async def purge_expired_content(now: datetime | None = None) -> int:
 
 
 async def delete_conversation_data(conversation_id: int) -> None:
+    """Irreversibly remove all identity-linked records in one transaction.
+
+    No post-delete event is retained: the deletion confirmation is intentionally
+    non-persistent so it cannot recreate a conversation identity.
+    """
     async with Session() as session:
         request_ids = select(AidRequest.id).where(AidRequest.conversation_id == conversation_id)
         await session.execute(delete(ContactPoint).where(ContactPoint.aid_request_id.in_(request_ids)))
@@ -527,16 +851,13 @@ async def delete_conversation_data(conversation_id: int) -> None:
         await session.execute(delete(AidRequest).where(AidRequest.conversation_id == conversation_id))
         await session.execute(delete(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id))
         await session.execute(delete(CallbackExecution).where(CallbackExecution.conversation_id == conversation_id))
-        conversation = await session.get(Conversation, conversation_id)
-        if conversation is not None:
-            conversation.state = ConversationState.GREETING.value
-            conversation.requested_help = None
-            conversation.pending_aid_id = None
-            conversation.pending_contact_method = None
-            conversation.pending_city = None
-            conversation.pending_district = None
-            conversation.pending_offer = None
-        session.add(Event(conversation_id=conversation_id, kind="data_deleted", payload="", audit={}))
+        await session.execute(delete(InboundTextExecution).where(InboundTextExecution.conversation_id == conversation_id))
+        await session.execute(delete(AgentRun).where(AgentRun.conversation_id == conversation_id))
+        await session.execute(delete(RiskAssessmentRecord).where(RiskAssessmentRecord.conversation_id == conversation_id))
+        await session.execute(delete(ActionExecution).where(ActionExecution.conversation_id == conversation_id))
+        await session.execute(delete(Escalation).where(Escalation.conversation_id == conversation_id))
+        await session.execute(delete(Event).where(Event.conversation_id == conversation_id))
+        await session.execute(delete(Conversation).where(Conversation.id == conversation_id))
         await session.commit()
 
 
@@ -545,7 +866,6 @@ async def cancel_followup_reminders(conversation_id: int) -> None:
         await session.execute(
             delete(FollowupJob).where(
                 FollowupJob.conversation_id == conversation_id,
-                FollowupJob.kind == "followup_reminder",
                 FollowupJob.status == "pending",
             )
         )

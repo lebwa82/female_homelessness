@@ -242,9 +242,9 @@ def test_concern_narrative_without_request_has_no_aid_menu_but_records_safety() 
     assert [effect.value for effect in decision.side_effects] == ["record_safety"]
 
 
-def test_all_53_final_user_turns_have_a_deterministic_route_and_open_rows_stay_open() -> None:
+def test_all_57_final_user_turns_have_a_deterministic_route_and_open_rows_stay_open() -> None:
     rows = [json.loads(line) for line in FIXTURE_PATH.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 53
+    assert len(rows) == 57
 
     for row in rows:
         history = tuple((str(role), str(text)) for role, text in row["history"])

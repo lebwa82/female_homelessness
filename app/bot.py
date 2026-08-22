@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.config import settings
 from app.db import init_db
 from app.domain import AgentTurn, Choice, IncomingMessage
-from app.service import ConversationService
+from app.service import PERSISTENCE_UNAVAILABLE_PROMPT, ConversationService
 from app.worker import worker_loop
 
 logging.basicConfig(level=logging.INFO)
@@ -52,8 +52,29 @@ def render_keyboard(turn: AgentTurn) -> InlineKeyboardMarkup | None:
 
 
 async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn) -> None:
-    await conversation_service.record_outbound(incoming, turn)
+    if not turn.audit.get("skip_outbound_persistence"):
+        await conversation_service.record_outbound(incoming, turn)
     await message.answer(turn.text, reply_markup=render_keyboard(turn))
+
+
+async def claim_stateless_update(incoming: IncomingMessage) -> bool:
+    """Avoid repeating stateless command/media effects on a redelivered update."""
+    claim = getattr(conversation_service, "claim_inbound", None)
+    return True if claim is None else await claim(incoming)
+
+
+def persistence_unavailable_turn() -> AgentTurn:
+    return AgentTurn(text=PERSISTENCE_UNAVAILABLE_PROMPT).with_human_choice().model_copy(
+        update={"audit": {"skip_outbound_persistence": True}}
+    )
+
+
+async def claim_stateless_update_or_reply(message: Message, incoming: IncomingMessage) -> bool:
+    try:
+        return await claim_stateless_update(incoming)
+    except Exception:  # noqa: BLE001 - failed persistence gets an honest local retry/handoff response
+        await send_turn(message, incoming, persistence_unavailable_turn())
+        return False
 
 
 @dp.message(CommandStart())
@@ -73,6 +94,8 @@ async def delete_request(message: Message) -> None:
 @dp.message(Command("system_info"))
 async def system_info(message: Message) -> None:
     incoming = incoming_from_message(message, text="/system_info")
+    if not await claim_stateless_update_or_reply(message, incoming):
+        return
     llm_status = "включена" if settings.llm_enabled else "выключена"
     turn = AgentTurn(
         text=(
@@ -81,7 +104,7 @@ async def system_info(message: Message) -> None:
             f"Сборка: {settings.build_version}\n"
             f"LLM: {llm_status}"
         )
-    )
+    ).with_human_choice()
     await send_turn(message, incoming, turn)
 
 
@@ -91,7 +114,10 @@ async def callback(query: CallbackQuery) -> None:
         await query.answer()
         return
     incoming = incoming_from_message(query.message, text=query.data, user=query.from_user)
-    turn = await conversation_service.handle_callback(incoming, query.data)
+    try:
+        turn = await conversation_service.handle_callback(incoming, query.data)
+    except Exception:  # noqa: BLE001 - callback lease remains retryable; user gets an honest fallback
+        turn = persistence_unavailable_turn()
     await query.answer()
     await send_turn(query.message, incoming, turn)
 
@@ -106,6 +132,8 @@ async def reply(message: Message) -> None:
 @dp.message()
 async def unsupported_content(message: Message) -> None:
     incoming = incoming_from_message(message, text="[non-text content]")
+    if not await claim_stateless_update_or_reply(message, incoming):
+        return
     turn = AgentTurn(
         text="Пока я могу общаться только текстом. Можно написать несколькими словами, что сейчас важнее всего.",
         choices=(Choice(id="human", label="Поговорить с живым человеком"),),

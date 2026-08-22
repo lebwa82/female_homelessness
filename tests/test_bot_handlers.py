@@ -58,13 +58,28 @@ async def test_media_handler_uses_text_only_fallback_with_human_button(monkeypat
     value = message()
     value.text = None
     send_turn = AsyncMock()
+    service = SimpleNamespace(claim_inbound=AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "send_turn", send_turn)
+    monkeypatch.setattr(bot, "conversation_service", service)
 
     await bot.unsupported_content(value)
 
     turn = send_turn.await_args.args[2]
     assert "текстом" in turn.text.lower()
     assert any(choice.id == "human" for choice in turn.choices)
+
+
+@pytest.mark.asyncio
+async def test_stateless_redelivery_is_not_rendered_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SimpleNamespace(claim_inbound=AsyncMock(return_value=False))
+    send_turn = AsyncMock()
+    monkeypatch.setattr(bot, "conversation_service", service)
+    monkeypatch.setattr(bot, "send_turn", send_turn)
+
+    await bot.system_info(message())
+    await bot.unsupported_content(message())
+
+    assert send_turn.await_count == 0
 
 
 @pytest.mark.asyncio

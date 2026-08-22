@@ -9,11 +9,11 @@
 - путь уровня 1: потребность → 3 подходящих варианта → один выбранный вариант → город при необходимости → способ связи → заявка;
 - варианты связи: текущий Telegram, другой Telegram, телефон, email или «позже»;
 - кнопка «Поговорить с живым человеком» на каждом экране; пока это сохраняет simulated-эскалацию в PostgreSQL и не прекращает разговор с ботом;
-- два параллельных структурированных вызова Qwen: независимая оценка риска и выбор следующего действия;
+- два параллельных структурированных вызова Qwen дают только диагностические наблюдения; локальная policy владеет риском, UI, workflow и side effects;
 - критический риск перекрывает обычный сценарий; для суицидального кризиса неизменно показан `8-800-2000-122`;
 - один фолоуап через 7 дней и не более одного напоминания через 48 часов;
-- полный локальный журнал сообщений, заявок, рисков, действий модели и эскалаций в PostgreSQL 18;
-- Presidio маскирует персональные данные перед отправкой всей истории в Yandex AI Studio; серверное логирование Yandex отключено;
+- локально ограниченный по сроку журнал в PostgreSQL 18; `/delete` удаляет связанную identity/conversation data без сохранения нового события;
+- Presidio маскирует PII перед model context, Telegram-handles и typed workflow-контакты заменяются ровно на `[CONTACT]`; публичный suffix-list не обновляется во время обработки;
 - курируемая база знаний пропускает в модель только approved, неистёкшие статьи с источником и датой проверки.
 
 ## Быстрый запуск
@@ -43,8 +43,8 @@
 `human_requested` может оставаться в старых строках аудита, но новый код не
 создаёт его как уровень риска.
 
-Перед деплоем запустите `just check`, `just scenario-smoke`, `just db-assure`,
-`just llm-health` и `just eval-dialogues`. `just eval-dialogues` воспроизводит
+Перед деплоем staged artifact проходит `just check`, `just scenario-smoke`,
+`just eval-dialogues` и `just db-assure` до activation/restart. `just eval-dialogues` воспроизводит
 все versioned cases через `ConversationService` с offline diagnostics и проверяет
 мутационную инвариантность policy. Команда `just eval-dialogues-live` прогоняет
 тот же обезличенный набор против настроенной Qwen и расходует оплачиваемые токены
@@ -103,11 +103,13 @@ sudo systemctl status women-help-bot
 just deploy-prod
 ```
 
-Команда получает актуальный публичный IP инстанса `female-homelessness-test`
-через настроенный `yc`, затем отправляет на VM только содержимое текущего
-Git-коммита (без `.env` и других неотслеживаемых файлов), синхронизирует зависимости, задаёт
-`APP_ENV=production` и `BUILD_VERSION`, перезапускает бота, затем проверяет
-статус systemd и запускает `just check`. Другой SSH-хост можно передать как
+Команда получает актуальный production-host через настроенный resolver и отправляет
+на VM только содержимое текущего Git-коммита (без `.env` и других неотслеживаемых
+файлов). На VM она распаковывает revision в staging, запускает offline checks и
+PostgreSQL assurance из staged artifact через существующий root-only EnvironmentFile,
+требует healthy существующий PostgreSQL container и только затем atomically activates
+release. При неуспешном restart прежний release восстанавливается. Скрипт не печатает
+EnvironmentFile и не запускает/пересоздаёт PostgreSQL container. Другой SSH-хост можно передать как
 `just deploy-prod user@example.org`.
 
 Проверить доступ к модели двумя реальными структурированными вызовами: `just llm-health`.
@@ -123,13 +125,15 @@ Git-коммита (без `.env` и других неотслеживаемых
 
 ## Контекст диалога
 
-Бот сохраняет полный текст входящих и исходящих сообщений в локальный Postgres
-на 30 дней; контактные данные имеют такой же срок. На каждом обычном ходе вся
-история передаётся в Yandex AI Studio с отключённым серверным логированием.
-Перед отправкой Presidio и русская spaCy NER-модель заменяют распознанные
-персональные данные; исходный текст не попадает в prompt. `/delete` удаляет
-содержимое диалога, контакты, заявки и ожидающие фолоуапы, оставляя только событие
-аудита удаления.
+Сообщения и contact points получают configurable `MESSAGE_RETENTION_DAYS`; истёкшие
+строки исключены из чтения ещё до purge, а worker повторяет purge после transient
+ошибки. На обычном некризисном ходе в Yandex AI Studio идёт только redacted context
+с отключённым серверным логированием. Typed workflow-контакты всегда становятся
+`[CONTACT]` в current и historical model view. `/delete` в одной транзакции удаляет
+identity, conversation, messages, agent/risk/action/escalation/event rows, контакты,
+заявки, callbacks и follow-ups; confirmation deliberately не сохраняется, чтобы не
+создать conversation заново. Provider audit сохраняет только allow-listed categories
+и counts, а не provider-controlled keys или raw text.
 
 ## Перед пилотом
 

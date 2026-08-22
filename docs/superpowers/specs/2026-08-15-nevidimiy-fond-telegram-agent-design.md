@@ -1,7 +1,7 @@
 # Telegram-агент Невидимого фонда: дизайн MVP
 
 Дата: 2026-08-15
-Статус: реализовано; актуализировано политикой свободного разговора 2026-08-21
+Статус: superseded — исторический документ; действующий нормативный контракт: [`2026-08-21-open-conversation-policy-design.md`](./2026-08-21-open-conversation-policy-design.md).
 Продуктовый источник: [`chatbot_spec_nevidimiy_fond.md`](../../../chatbot_spec_nevidimiy_fond.md)
 
 ## Цель и границы

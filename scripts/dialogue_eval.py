@@ -175,6 +175,7 @@ class CaseReport:
     case_id: str
     diagnostics: dict[str, object]
     hard_projection: dict[str, Any]
+    soft_projection: dict[str, Any]
     hard_hash: str
     rule_ids: tuple[str, ...]
     hard_failures: tuple[str, ...]
@@ -352,10 +353,15 @@ async def evaluate_case(
         "canonical_copy_ok": copy_contains is None or copy_contains in turn.text,
         "rule_ids": rule_ids,
     }
+    soft_projection = {"pending_offer": record.pending_offer}
     diagnostics = _diagnostic_projection(store, audit)
     history_matches = await store.history(record) == case.history
     hard_failures = _behavior_failures(case.behavior, projection, audit, history_matches)
-    deltas = _diagnostic_deltas(case.diagnostics, diagnostics)
+    deltas = _diagnostic_deltas(
+        case.diagnostics,
+        diagnostics,
+        local_critical=projection["local_risk"] == RiskLevel.CRITICAL.value,
+    )
     provider_failures = _provider_failures(diagnostics) if require_provider_health else ()
     provider_failure_metadata = (
         _provider_failure_metadata(store, diagnostics) if require_provider_health else ()
@@ -364,6 +370,7 @@ async def evaluate_case(
         case.id,
         diagnostics,
         projection,
+        soft_projection,
         _hard_hash(projection),
         rule_ids,
         tuple(hard_failures),
@@ -433,6 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "diagnostics": case.diagnostics,
             "diagnostic_deltas": case.diagnostic_deltas,
             "hard_projection": case.hard_projection,
+            "soft_projection": case.soft_projection,
             "hard_hash": case.hard_hash,
             "rule_ids": case.rule_ids,
             "hard_failures": case.hard_failures,
@@ -482,13 +490,31 @@ def _load_jsonl(path: Path, label: str) -> list[tuple[int, dict[str, Any]]]:
         if not line.strip():
             raise DatasetError(f"{label} line {line_number}: blank lines are not allowed")
         try:
-            row = json.loads(line)
-        except json.JSONDecodeError as error:
+            row = json.loads(
+                line,
+                object_pairs_hook=_json_object_without_duplicates,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
+        except (json.JSONDecodeError, ValueError) as error:
             raise DatasetError(f"{label} line {line_number}: invalid JSON") from error
         if not isinstance(row, dict):
             raise DatasetError(f"{label} line {line_number}: row must be an object")
         rows.append((line_number, row))
     return rows
+
+
+def _json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate_json_key")
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    del value
+    raise ValueError("nonstandard_json_constant")
 
 
 def _parse_case(row: dict[str, Any], line: int) -> DialogueCase:
@@ -639,27 +665,34 @@ def _behavior_failures(expected: Mapping[str, Any], actual: Mapping[str, Any], a
     return failures
 
 
-def _diagnostic_deltas(expected: Mapping[str, tuple[str, ...]], actual: Mapping[str, object]) -> tuple[str, ...]:
+def _diagnostic_deltas(
+    expected: Mapping[str, tuple[str, ...]],
+    actual: Mapping[str, object],
+    *,
+    local_critical: bool = False,
+) -> tuple[str, ...]:
     deltas: list[str] = []
-    if actual["safety_status"] != DiagnosticStatus.COMPLETED.value:
-        deltas.append(f"safety_status:{actual['safety_status']}")
-    elif actual["safety_level"] not in expected["safety_levels"]:
-        deltas.append(f"safety_level:{actual['safety_level']}")
+    if not local_critical:
+        if actual["safety_status"] != DiagnosticStatus.COMPLETED.value:
+            deltas.append(f"safety_status:{actual['safety_status']}")
+        elif actual["safety_level"] not in expected["safety_levels"]:
+            deltas.append(f"safety_level:{actual['safety_level']}")
     deltas.extend(
         f"safety_normalization:{category}"
         for category in _normalization_categories_from_projection(actual, "safety_normalizations")
     )
-    if actual["support_status"] != DiagnosticStatus.COMPLETED.value:
-        deltas.append(f"support_status:{actual['support_status']}")
-    elif actual["support_intent"] is None:
-        intent_delta = (
-            "support_intent:normalized_unknown"
-            if "support_unknown_intent_cleared" in _normalization_categories_from_projection(actual, "support_normalizations")
-            else "support_intent:missing"
-        )
-        deltas.append(intent_delta)
-    elif actual["support_intent"] not in expected["support_intents"]:
-        deltas.append(f"support_intent:{actual['support_intent']}")
+    if not local_critical:
+        if actual["support_status"] != DiagnosticStatus.COMPLETED.value:
+            deltas.append(f"support_status:{actual['support_status']}")
+        elif actual["support_intent"] is None:
+            intent_delta = (
+                "support_intent:normalized_unknown"
+                if "support_unknown_intent_cleared" in _normalization_categories_from_projection(actual, "support_normalizations")
+                else "support_intent:missing"
+            )
+            deltas.append(intent_delta)
+        elif actual["support_intent"] not in expected["support_intents"]:
+            deltas.append(f"support_intent:{actual['support_intent']}")
     deltas.extend(
         f"support_normalization:{category}"
         for category in _normalization_categories_from_projection(actual, "support_normalizations")

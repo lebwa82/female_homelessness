@@ -56,7 +56,13 @@ def test_conversation_and_escalation_models_persist_policy_context() -> None:
     assert Escalation.__table__.c.cause.default.arg == "safety"
     assert Escalation.__table__.c.level.nullable is True
     assert Escalation.__table__.c.request_key.nullable is True
-    assert Escalation.__table__.c.request_key.unique is True
+    assert Escalation.__table__.c.request_key.unique is not True
+    constraints = [
+        constraint
+        for constraint in Escalation.__table__.constraints
+        if constraint.name == "uq_escalations_request_key"
+    ]
+    assert len(constraints) == 1
 
 
 @pytest.mark.asyncio
@@ -90,6 +96,7 @@ async def test_init_db_and_assurance_require_callback_lease_scan_indexes(
     expected_indexes = {
         "ix_callback_executions_status",
         "ix_callback_executions_lease_expires_at",
+        "uq_inbound_text_executions_origin",
     }
     assert expected_indexes <= _REQUIRED_INDEXES
     for index_name in expected_indexes:

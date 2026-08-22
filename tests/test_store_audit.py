@@ -181,14 +181,14 @@ async def test_postgres_update_mutates_the_supplied_record_in_place(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_delete_data_resets_pending_offer() -> None:
+async def test_delete_data_removes_the_conversation_and_pending_offer() -> None:
     store = InMemoryConversationStore()
     record = await store.ensure(identity())
     await store.update(record, pending_offer="psychologist")
 
     await store.delete_data(record)
 
-    assert record.pending_offer is None
+    assert record.platform_user_id not in store.conversations
 
 
 @pytest.mark.asyncio
@@ -223,7 +223,7 @@ async def test_in_memory_callback_claim_can_be_reclaimed_after_lease_expiry() ->
 
     claim = await store.claim_callback(record, "human", 303)
     assert claim
-    store.callback_claims[(record.id, "human", "303")].lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    store.callback_claims[(record.id, "keyboard-slot", "303")].lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
 
     assert await store.claim_callback(record, "human", 303)
 

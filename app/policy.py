@@ -41,6 +41,7 @@ _FINITE_WORKFLOW_STATES = frozenset(
         ConversationState.FOLLOWUP_ANSWERED.value,
     }
 )
+_WORKFLOW_ESCAPE_STATES = _FINITE_WORKFLOW_STATES | {ConversationState.DISCOVERING_NEED.value}
 _EXTERNAL_COMPLETION_FAMILIES = (
     (
         frozenset({"заявка", "заявку", "заявки", "заявке", "запрос", "запроса", "запросу", "запросом"}),
@@ -118,6 +119,11 @@ _EXTERNAL_COMPLETION_PHRASES = (
     ("с", "тобой", "свяжутся"),
     ("вас", "уже", "записали"),
     ("вы", "уже", "записаны"),
+    ("я", "уже", "вызвала", "специалистку"),
+    ("я", "передаю", "вашу", "заявку", "специалистке"),
+    ("специалистка", "вам", "позвонит"),
+    ("я", "сейчас", "отправлю", "заявку"),
+    ("мы", "свяжемся", "завтра"),
 )
 _NON_COMPLETION_TOKENS = frozenset({"не", "может", "могут", "могу", "можем", "будет", "будут", "если"})
 _MAX_COMPLETION_TOKEN_GAP = 6
@@ -149,11 +155,16 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 fallback_reason="local_input_unavailable",
             ),
         )
-    if (
-        context.state == ConversationState.AID_REQUESTED.value
-        and _has_signal(context, HardSignalKind.OPEN_CONVERSATION_REQUEST)
+    if context.state in _WORKFLOW_ESCAPE_STATES and _has_signal(
+        context, HardSignalKind.OPEN_CONVERSATION_REQUEST
     ):
-        return _finalize_turn(context, _open_conversation_turn(context))
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text=_SAFE_FALLBACK,
+                effect=PolicyEffect.CANCEL_WORKFLOW,
+            ),
+        )
     if context.state in _FINITE_WORKFLOW_STATES:
         return resolve_workflow_turn(context)
     if _has_signal(context, HardSignalKind.PSYCHOLOGIST_REQUEST):

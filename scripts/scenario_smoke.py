@@ -49,13 +49,13 @@ class PsychologistSmokeGateway:
         )
 
 
-def incoming(text: str = "") -> IncomingMessage:
+def incoming(text: str = "", message_id: int = 1) -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=900_001,
         chat_id=900_002,
         username="scenario_smoke",
         text=text,
-        message_id=1,
+        message_id=message_id,
     )
 
 
@@ -71,11 +71,11 @@ async def run_scenarios() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=SmokeGateway())
 
-    await service.start(incoming())
-    await service.handle_callback(incoming(), "continue")
-    await service.handle_callback(incoming(), "need:food_money")
-    await service.handle_callback(incoming(), "aid:food_card")
-    await service.handle_callback(incoming(), "contact:current_telegram")
+    await service.start(incoming(message_id=11))
+    await service.handle_callback(incoming(message_id=12), "continue")
+    await service.handle_callback(incoming(message_id=13), "need:food_money")
+    await service.handle_callback(incoming(message_id=14), "aid:food_card")
+    await service.handle_callback(incoming(message_id=15), "contact:current_telegram")
     assert len(store.aid_requests) == 1
     assert len(store.followup_jobs) == 1
 

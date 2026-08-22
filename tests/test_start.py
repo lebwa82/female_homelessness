@@ -37,7 +37,9 @@ async def test_system_info_stays_hidden_and_has_no_secrets(monkeypatch: pytest.M
         date=SimpleNamespace(isoformat=lambda: "2026-08-20T10:00:00+00:00"),
     )
     send_turn = AsyncMock()
+    service = SimpleNamespace(claim_inbound=AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "send_turn", send_turn)
+    monkeypatch.setattr(bot, "conversation_service", service)
     monkeypatch.setattr(bot.settings, "app_env", "production")
     monkeypatch.setattr(bot.settings, "build_version", "abc1234")
     monkeypatch.setattr(bot.settings, "llm_enabled", True)

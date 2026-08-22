@@ -116,9 +116,19 @@ async def run_due_jobs(bot: Bot, repository: JobRepository, now: datetime | None
     return sent
 
 
+async def purge_expired_content_safely() -> bool:
+    """Keep the worker alive when retention maintenance has a transient DB failure."""
+    try:
+        await purge_expired_content()
+    except Exception as error:  # noqa: BLE001 - maintenance must retry on the next poll
+        logger.warning("Retention purge failed: %s", type(error).__name__)
+        return False
+    return True
+
+
 async def worker_loop(bot: Bot, repository: JobRepository | None = None) -> None:
     repository = repository or PostgresJobRepository()
     while True:
         await run_due_jobs(bot, repository)
-        await purge_expired_content()
+        await purge_expired_content_safely()
         await asyncio.sleep(settings.worker_poll_seconds)
