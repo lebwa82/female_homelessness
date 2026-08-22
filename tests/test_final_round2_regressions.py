@@ -457,6 +457,8 @@ async def test_migration_backfills_legacy_message_and_contact_expiry(
     migration = "\n".join(statements)
     assert "UPDATE conversation_messages SET expires_at" in migration
     assert "UPDATE contact_points SET expires_at" in migration
+    assert "UPDATE followup_jobs SET status = 'pending', lease_token = NULL" in migration
+    assert "status = 'processing' AND lease_expires_at IS NULL" in migration
 
 
 def test_deploy_script_never_evaluates_environment_file_and_has_activation_err_trap() -> None:
@@ -504,11 +506,11 @@ def test_deploy_script_runs_staged_gate_without_evaluating_unrelated_environment
     environment = {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "WOMEN_HELP_STAGED_PATH": f"{fake_bin}:/usr/bin:/bin",
+        "WOMEN_HELP_TEST_TOOL_ROOT": str(fake_bin),
         "WOMEN_HELP_ENV_FILE": str(env_file),
     }
     result = subprocess.run(
-        ["bash", "scripts/deploy_prod.sh", "stub-host", str(target)],
+        ["bash", "scripts/deploy_prod_test_harness.sh", "stub-host", str(target)],
         check=False,
         capture_output=True,
         text=True,
@@ -546,14 +548,14 @@ def test_deploy_script_err_trap_restores_moved_legacy_target_on_restart_failure(
     stub("systemctl", '[[ "$1" == "restart" ]] && exit 1\nexit 0\n')
     stub("mv", 'if [[ "${1:-}" == "-Tf" ]]; then shift; /bin/rm -f "$2"; fi\nexec /bin/mv "$@"\n')
     result = subprocess.run(
-        ["bash", "scripts/deploy_prod.sh", "stub-host", str(target)],
+        ["bash", "scripts/deploy_prod_test_harness.sh", "stub-host", str(target)],
         check=False,
         capture_output=True,
         text=True,
         env={
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "WOMEN_HELP_STAGED_PATH": f"{fake_bin}:/usr/bin:/bin",
+            "WOMEN_HELP_TEST_TOOL_ROOT": str(fake_bin),
             "WOMEN_HELP_ENV_FILE": str(env_file),
         },
     )
@@ -565,7 +567,7 @@ def test_deploy_script_err_trap_restores_moved_legacy_target_on_restart_failure(
 
 def test_evaluator_requires_explicit_soft_lifecycle_expectations(tmp_path: Any) -> None:
     row = {
-        "version": 2,
+        "version": 3,
         "id": "soft-lifecycle",
         "group": "test",
         "history": [["user", "мне тяжело"]],

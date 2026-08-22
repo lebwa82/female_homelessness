@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import db
+from app.store import ConversationRecord, PostgresConversationStore
+from app.worker import PostgresJobRepository
 
 _REQUIRED_COLUMNS = {
     ("conversations", "pending_offer"), ("conversations", "generation"), ("conversations", "version"),
@@ -36,6 +38,7 @@ class IndexExpectation:
     columns: tuple[str, ...]
     unique: bool = False
     predicate: str | None = None
+    method: str = "btree"
 
 
 # A name match is insufficient: columns, uniqueness and partial-index predicate
@@ -70,7 +73,7 @@ def _index_projection(indexdef: str) -> IndexExpectation | None:
     compact = re.sub(r"\s+", " ", indexdef.strip())
     match = re.search(
         r"^CREATE\s+(?P<unique>UNIQUE\s+)?INDEX\s+.+?\s+ON\s+(?:[^. ]+\.)?(?P<table>[^ ]+)"
-        r"(?:\s+USING\s+[^ ]+)?\s*\((?P<columns>[^)]+)\)(?:\s+WHERE\s+(?P<predicate>.+))?$",
+        r"(?:\s+USING\s+(?P<method>[^ ]+))?\s*\((?P<columns>[^)]+)\)(?:\s+WHERE\s+(?P<predicate>.+))?$",
         compact,
         flags=re.IGNORECASE,
     )
@@ -81,100 +84,140 @@ def _index_projection(indexdef: str) -> IndexExpectation | None:
         columns=tuple(_identifier(column) for column in match.group("columns").split(",")),
         unique=match.group("unique") is not None,
         predicate=_predicate(match.group("predicate")),
+        method=_identifier(match.group("method") or "btree"),
     )
 
 
-class RollbackRepository:
-    """Exercise application table paths only through the caller's rollback connection."""
+async def _seed_legacy_followup_and_null_retention(
+    conversation: db.Conversation,
+    token: str,
+    now: datetime,
+) -> int:
+    """Create through production code, then shape legacy nullable fields."""
+    record = ConversationRecord(
+        id=conversation.id,
+        channel=conversation.channel,
+        platform_user_id=conversation.channel_user_id,
+        chat_id=conversation.chat_id or conversation.channel_user_id,
+        username=conversation.username,
+        generation=conversation.generation,
+        version=conversation.version,
+    )
+    request = await PostgresConversationStore(token).create_aid_request(
+        record,
+        "legal_consultation",
+        "email",
+        "assurance@example.invalid",
+        request_key=f"assurance:{token}",
+    )
+    message = await db.append_message(conversation.id, "assistant", "assurance", retention_days=1)
+    async with db.repository_session() as session:
+        followup = (
+            await session.execute(
+                select(db.FollowupJob).where(db.FollowupJob.aid_request_id == request.id)
+            )
+        ).scalar_one()
+        contact = (
+            await session.execute(
+                select(db.ContactPoint).where(db.ContactPoint.aid_request_id == request.id)
+            )
+        ).scalar_one()
+        stored_message = await session.get(db.ConversationMessage, message.id)
+        if stored_message is None:
+            raise RuntimeError("retention_fixture_missing")
+        # These are the exact pre-migration shapes the production queries must
+        # reclaim/purge; setup is direct so the exercised operations are not.
+        followup.due_at = now - timedelta(seconds=1)
+        followup.status = "processing"
+        followup.lease_token = None
+        followup.lease_expires_at = None
+        contact.expires_at = None
+        stored_message.expires_at = None
+        await db.finish_repository_write(session)
+    return request.id
 
-    def __init__(self, connection: object) -> None:
-        self.connection = connection
 
-    async def seed_conversation(self) -> int:
-        token = uuid4().hex
-        result = await self.connection.execute(
-            db.postgres_insert(db.Conversation)
-            .values(
-                channel="assurance",
-                channel_user_id=int(token[:15], 16),
-                platform_user_hash=hashlib.sha256(token.encode()).hexdigest(),
-            )
-            .returning(db.Conversation.id)
+async def _assert_delete_tombstone(conversation: db.Conversation) -> None:
+    async with db.repository_session() as session:
+        remaining = await session.execute(
+            select(db.Conversation.id).where(db.Conversation.id == conversation.id)
         )
-        return result.scalar_one()
+        tombstone = await session.execute(
+            select(db.ConversationTombstone.generation).where(
+                db.ConversationTombstone.channel == conversation.channel,
+                db.ConversationTombstone.platform_user_hash == conversation.platform_user_hash,
+            )
+        )
+        if remaining.scalar_one_or_none() is not None:
+            raise RuntimeError("comprehensive_delete_failed")
+        if tombstone.scalar_one_or_none() != conversation.generation + 1:
+            raise RuntimeError("delete_tombstone_failed")
 
-    async def claim_reclaim_and_ack_outbox(self, conversation_id: int) -> None:
-        """Run claim → fail/reclaim → outcome → delivery acknowledgement on real models."""
-        source_id, first, second = f"assurance:{uuid4().hex}", uuid4().hex, uuid4().hex
-        now = datetime.now(UTC)
-        await self.connection.execute(
-            db.postgres_insert(db.InboundTextExecution).values(
-                conversation_id=conversation_id, source_message_id=source_id, status="processing",
-                lease_token=first, lease_expires_at=now + timedelta(minutes=5),
-            )
-        )
-        for where, values in (
-            ((db.InboundTextExecution.lease_token == first,), {"status": "failed", "lease_token": None, "lease_expires_at": None}),
-            ((db.InboundTextExecution.status == "failed",), {"status": "processing", "lease_token": second, "lease_expires_at": now + timedelta(minutes=5)}),
-            ((db.InboundTextExecution.lease_token == second,), {"status": "completed", "lease_token": None, "outcome": {"text": "assurance", "choices": []}}),
-        ):
-            await self.connection.execute(
-                update(db.InboundTextExecution)
-                .where(db.InboundTextExecution.conversation_id == conversation_id, db.InboundTextExecution.source_message_id == source_id, *where)
-                .values(**values)
-            )
-        outcome = await self.connection.execute(
-            select(db.InboundTextExecution.outcome).where(
-                db.InboundTextExecution.conversation_id == conversation_id,
-                db.InboundTextExecution.source_message_id == source_id,
-            )
-        )
-        if outcome.scalar_one() != {"text": "assurance", "choices": []}:
-            raise RuntimeError("outbox_outcome_unreadable")
-        await self.connection.execute(
-            update(db.InboundTextExecution)
-            .where(db.InboundTextExecution.conversation_id == conversation_id, db.InboundTextExecution.source_message_id == source_id)
-            .values(delivered_at=now)
-        )
 
-    async def retention_purge_and_read(self, conversation_id: int) -> None:
-        await self.connection.execute(
-            db.postgres_insert(db.ConversationMessage).values(
-                conversation_id=conversation_id, role="assistant", content="assurance",
-                expires_at=datetime.now(UTC) - timedelta(seconds=1),
-            )
-        )
-        await self.connection.execute(
-            delete(db.ConversationMessage).where(
-                db.ConversationMessage.conversation_id == conversation_id,
-                db.ConversationMessage.expires_at <= datetime.now(UTC),
-            )
-        )
-        unreadable = await self.connection.execute(
-            select(db.ConversationMessage.id).where(db.ConversationMessage.conversation_id == conversation_id)
-        )
-        if unreadable.scalar_one_or_none() is not None:
-            raise RuntimeError("retention_purge_unreadable")
+async def _exercise_production_repository() -> None:
+    """Call the exact application repository functions bound to rollback."""
+    token = uuid4().hex
+    platform_user_id = int(token[:15], 16)
+    message_id = int(token[15:27], 16)
+    conversation = await db.get_or_create_conversation_record(
+        "assurance",
+        platform_user_id,
+        platform_user_id,
+        None,
+        token,
+    )
+    lease = await db.claim_text_execution(conversation.id, message_id)
+    if lease is None or not await db.fail_text_execution(conversation.id, message_id, lease):
+        raise RuntimeError("outbox_initial_claim_failed")
+    reclaimed = await db.claim_text_execution(conversation.id, message_id)
+    if reclaimed is None:
+        raise RuntimeError("outbox_reclaim_failed")
+    payload = {
+        "text": "assurance",
+        "choices": [],
+        "critical_delivery": False,
+        "conversation_generation": conversation.generation,
+        "inbound_execution_kind": "message",
+    }
+    if not await db.save_text_execution_outcome(conversation.id, message_id, reclaimed, payload):
+        raise RuntimeError("outbox_outcome_failed")
+    stored = await db.load_text_execution_outcome(conversation.id, message_id)
+    if stored is None or stored[0] != payload:
+        raise RuntimeError("outbox_outcome_unreadable")
+    delivery_token = await db.claim_text_execution_delivery(conversation.id, message_id)
+    if delivery_token is None:
+        raise RuntimeError("outbox_delivery_claim_failed")
+    await db.acknowledge_text_execution_outcome(conversation.id, message_id)
 
-    async def delete_everything(self, conversation_id: int) -> None:
-        """Use the exact production dependency set under rollback, not ad-hoc fixture SQL."""
-        request_ids = select(db.AidRequest.id).where(db.AidRequest.conversation_id == conversation_id)
-        statements = (
-            delete(db.ContactPoint).where(db.ContactPoint.aid_request_id.in_(request_ids)),
-            delete(db.FollowupJob).where(db.FollowupJob.conversation_id == conversation_id),
-            delete(db.AidRequest).where(db.AidRequest.conversation_id == conversation_id),
-            delete(db.ConversationMessage).where(db.ConversationMessage.conversation_id == conversation_id),
-            delete(db.CallbackExecution).where(db.CallbackExecution.conversation_id == conversation_id),
-            delete(db.InboundTextExecution).where(db.InboundTextExecution.conversation_id == conversation_id),
-            delete(db.AgentRun).where(db.AgentRun.conversation_id == conversation_id),
-            delete(db.RiskAssessmentRecord).where(db.RiskAssessmentRecord.conversation_id == conversation_id),
-            delete(db.ActionExecution).where(db.ActionExecution.conversation_id == conversation_id),
-            delete(db.Escalation).where(db.Escalation.conversation_id == conversation_id),
-            delete(db.Event).where(db.Event.conversation_id == conversation_id),
-            delete(db.Conversation).where(db.Conversation.id == conversation_id),
-        )
-        for statement in statements:
-            await self.connection.execute(statement)
+    now = datetime.now(UTC)
+    request_id = await _seed_legacy_followup_and_null_retention(
+        conversation,
+        token,
+        now,
+    )
+    jobs = await PostgresJobRepository().claim_due_jobs(now)
+    if len(jobs) != 1 or jobs[0].lease_token is None:
+        raise RuntimeError("followup_null_lease_reclaim_failed")
+    first_job = jobs[0]
+    await PostgresJobRepository().complete_job(first_job, False)
+    reclaimed_jobs = await PostgresJobRepository().claim_due_jobs(now)
+    if (
+        len(reclaimed_jobs) != 1
+        or reclaimed_jobs[0].id != first_job.id
+        or reclaimed_jobs[0].lease_token in {None, first_job.lease_token}
+    ):
+        raise RuntimeError("followup_error_reclaim_failed")
+    await PostgresJobRepository().discard_job(reclaimed_jobs[0])
+
+    purged = await db.purge_expired_content(now)
+    if purged < 2:
+        raise RuntimeError("null_retention_purge_failed")
+    if await db.load_history(conversation.id):
+        raise RuntimeError("retention_purge_unreadable")
+    if await db.load_active_contact_points(request_id):
+        raise RuntimeError("contact_retention_purge_unreadable")
+    await db.delete_conversation_data(conversation.id)
+    await _assert_delete_tombstone(conversation)
 
 
 async def assure() -> dict[str, object]:
@@ -200,16 +243,19 @@ async def assure() -> dict[str, object]:
             }
             if missing_columns or missing_indexes or wrong_index_definition:
                 raise RuntimeError("schema_assurance_failed")
-            repository = RollbackRepository(connection)
-            conversation_id = await repository.seed_conversation()
-            await repository.claim_reclaim_and_ack_outbox(conversation_id)
-            await repository.retention_purge_and_read(conversation_id)
-            await repository.delete_everything(conversation_id)
+            session = AsyncSession(bind=connection, expire_on_commit=False)
+            try:
+                with db.bind_repository_session(session):
+                    await _exercise_production_repository()
+            finally:
+                await session.close()
         finally:
             await transaction.rollback()
     return {
         "init_runs": 2, "required_columns": len(_REQUIRED_COLUMNS), "required_indexes": len(_REQUIRED_INDEXES),
-        "claim_reclaim_outcome": True, "retention_purge_read": True, "comprehensive_delete": True,
+        "claim_reclaim_outcome": True, "followup_claim_reclaim": True,
+        "null_retention_purge": True, "retention_purge_read": True,
+        "comprehensive_delete": True, "delete_tombstone": True,
     }
 
 

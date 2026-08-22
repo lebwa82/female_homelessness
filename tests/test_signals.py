@@ -347,7 +347,7 @@ def test_audit_model_contains_hash_and_offsets_but_never_raw_input() -> None:
     signals = extract_signals(text)
     dump = signals.model_dump(mode="json")
 
-    assert dump["matcher_version"] == "deterministic-signals-v2"
+    assert dump["matcher_version"] == "deterministic-signals-v3"
     assert len(dump["input_hash"]) == 64
     assert dump["matches"] == [
         {

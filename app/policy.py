@@ -19,6 +19,7 @@ from app.domain import (
     RiskLevel,
     SupportOffer,
 )
+from app.signals import scan_signal_input
 
 POLICY_VERSION = "deterministic-policy-v2"
 _SAFE_FALLBACK = "Я рядом и готова продолжить. Можно написать, что сейчас важно."
@@ -120,13 +121,19 @@ _OPERATIONAL_ACTORS = frozenset({
     "я", "мы", "оператор", "оператора", "специалист", "специалиста", "специалистка", "специалистке",
     "человек", "человека", "вам", "вас", "вы", "тобой", "тебе", "с", "вами",
 })
-_OPERATIONAL_ACTIONS = frozenset({
-    "передали", "передал", "передала", "передаю", "отправили", "отправил", "отправила", "отправлю",
-    "оформили", "оформил", "оформила", "оформим", "записали", "записал", "записала",
-    "позвонит", "свяжутся", "свяжемся", "вызвали", "вызвал", "вызвала", "подключен", "подключена",
-    "подключили", "связались", "зарегистрировали", "зарегистрировал", "зарегистрировала",
-    "позвонят", "перезвоним",
-})
+_OPERATIONAL_ACTION_STEMS = (
+    "вызв",
+    "зарегистр",
+    "запис",
+    "оформ",
+    "отправ",
+    "переда",
+    "перезвон",
+    "подключ",
+    "позвон",
+    "связ",
+    "свяж",
+)
 
 
 def resolve_turn(context: PolicyContext) -> ResolvedTurn:
@@ -300,11 +307,15 @@ def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
 
 
 def _claims_external_action(draft: str) -> bool:
-    tokens = _draft_tokens(draft)
-    return _contains_operational_claim(tokens) or any(
-        _contains_completed_family(tokens, referents, completions)
-        for referents, completions in _EXTERNAL_COMPLETION_FAMILIES
-    )
+    signal_input = scan_signal_input(draft)
+    for clause in signal_input.clauses:
+        tokens = signal_input.values[clause.token_start : clause.token_end]
+        if _contains_operational_claim(tokens) or any(
+            _contains_completed_family(tokens, referents, completions)
+            for referents, completions in _EXTERNAL_COMPLETION_FAMILIES
+        ):
+            return True
+    return False
 
 
 def _draft_tokens(draft: str) -> tuple[str, ...]:
@@ -330,7 +341,7 @@ def _contains_operational_claim(tokens: tuple[str, ...]) -> bool:
     has been performed or will definitely be performed.
     """
     for action_index, action in enumerate(tokens):
-        if action not in _OPERATIONAL_ACTIONS:
+        if not action.startswith(_OPERATIONAL_ACTION_STEMS) or _is_action_infinitive(action):
             continue
         start = max(0, action_index - _MAX_COMPLETION_TOKEN_GAP)
         end = min(len(tokens), action_index + _MAX_COMPLETION_TOKEN_GAP + 1)
@@ -344,6 +355,10 @@ def _contains_operational_claim(tokens: tuple[str, ...]) -> bool:
         if (has_actor or has_referent) and not _has_noncompletion_context(tokens, start, end):
             return True
     return False
+
+
+def _is_action_infinitive(token: str) -> bool:
+    return token.endswith(("ть", "ться", "ти"))
 
 
 def _contains_completed_family(

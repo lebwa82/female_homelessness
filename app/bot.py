@@ -12,7 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.config import settings
 from app.db import init_db
-from app.domain import AgentTurn, Choice, IncomingMessage
+from app.domain import AgentTurn, Choice, DeliveryAuthorization, IncomingMessage
 from app.service import PERSISTENCE_UNAVAILABLE_PROMPT, ConversationService
 from app.worker import worker_loop
 
@@ -57,25 +57,61 @@ async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn
     if not turn.audit.get("skip_outbound_persistence"):
         delivery_authorization = getattr(conversation_service, "delivery_authorization", None)
         if delivery_authorization is not None:
+            manager = delivery_authorization(incoming, turn)
             try:
-                async with delivery_authorization(incoming, turn) as token:
-                    if token is None:
-                        return
-                    await message.answer(turn.text, reply_markup=render_keyboard(turn))
-            except Exception as error:  # noqa: BLE001 - a failed outbox lease is retried, never bypassed
-                logger.warning("Outbound delivery unavailable: %s", type(error).__name__)
+                authorization = await manager.__aenter__()
+            except Exception as error:  # noqa: BLE001 - distinguish outage from confirmed denial
+                logger.warning("Outbound delivery authorization unavailable: %s", type(error).__name__)
+                authorization = DeliveryAuthorization.UNAVAILABLE
+                manager = None
+            if authorization is None:
+                authorization = DeliveryAuthorization.DENY_CONFIRMED
+            elif not isinstance(authorization, DeliveryAuthorization):
+                # Compatibility for a pre-tristate context yielding a lease token.
+                authorization = DeliveryAuthorization.ALLOW
+            if authorization is DeliveryAuthorization.DENY_CONFIRMED:
+                if manager is not None:
+                    await manager.__aexit__(None, None, None)
+                return
+            if authorization is DeliveryAuthorization.UNAVAILABLE and not turn.audit.get("critical_delivery"):
+                if manager is not None:
+                    await manager.__aexit__(None, None, None)
+                return
+            try:
+                await message.answer(turn.text, reply_markup=render_keyboard(turn))
+            except Exception as error:  # noqa: BLE001 - release any durable lease after adapter failure
+                if manager is not None:
+                    await manager.__aexit__(type(error), error, error.__traceback__)
+                logger.warning("Outbound delivery failed: %s", type(error).__name__)
+                return
+            if manager is not None:
+                try:
+                    await manager.__aexit__(None, None, None)
+                except Exception as error:  # noqa: BLE001 - the durable lease remains reclaimable
+                    logger.warning("Outbound acknowledgement unavailable: %s", type(error).__name__)
+                    return
+            if authorization is DeliveryAuthorization.UNAVAILABLE:
                 return
         else:
+            delivery_status = getattr(conversation_service, "delivery_status", None)
             authorize_delivery = getattr(conversation_service, "authorize_delivery", None)
-            if authorize_delivery is not None:
+            if delivery_status is not None or authorize_delivery is not None:
                 try:
-                    authorized = await authorize_delivery(incoming, turn)
+                    authorization = (
+                        await delivery_status(incoming, turn)
+                        if delivery_status is not None
+                        else (
+                            DeliveryAuthorization.ALLOW
+                            if await authorize_delivery(incoming, turn)
+                            else DeliveryAuthorization.DENY_CONFIRMED
+                        )
+                    )
                 except Exception as error:  # noqa: BLE001 - only canonical crisis wording may fail open
-                    if not turn.audit.get("critical_delivery"):
-                        logger.warning("Outbound delivery authorization unavailable: %s", type(error).__name__)
-                        return
-                    authorized = True
-                if not authorized:
+                    logger.warning("Outbound delivery authorization unavailable: %s", type(error).__name__)
+                    authorization = DeliveryAuthorization.UNAVAILABLE
+                if authorization is DeliveryAuthorization.DENY_CONFIRMED:
+                    return
+                if authorization is DeliveryAuthorization.UNAVAILABLE and not turn.audit.get("critical_delivery"):
                     return
             await message.answer(turn.text, reply_markup=render_keyboard(turn))
     else:
@@ -134,7 +170,7 @@ async def system_info(message: Message) -> None:
             f"Сборка: {settings.build_version}\n"
             f"LLM: {llm_status}"
         )
-    ).with_human_choice()
+    ).with_human_choice().model_copy(update={"audit": {"skip_outbound_persistence": True}})
     await send_turn(message, incoming, turn)
 
 
@@ -167,6 +203,7 @@ async def unsupported_content(message: Message) -> None:
     turn = AgentTurn(
         text="Пока я могу общаться только текстом. Можно написать несколькими словами, что сейчас важнее всего.",
         choices=(Choice(id="human", label="Поговорить с живым человеком"),),
+        audit={"skip_outbound_persistence": True},
     )
     await send_turn(message, incoming, turn)
 

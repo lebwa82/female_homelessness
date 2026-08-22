@@ -12,7 +12,7 @@ DATASET = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
 
 def _valid_row(case_id: str) -> dict[str, object]:
     return {
-        "version": 2,
+        "version": 3,
         "id": case_id,
         "group": "open_conversation",
         "history": [["user", "анонимный текст"]],
@@ -60,7 +60,7 @@ def test_dataset_has_required_coverage() -> None:
         "crisis",
         "multi_turn",
     } <= {case.group for case in cases}
-    assert all(case.version == 2 for case in cases)
+    assert all(case.version == 3 for case in cases)
     assert {
         "psychologist-considering-01",
         "psychologist-request-01",

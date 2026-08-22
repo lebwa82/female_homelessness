@@ -54,6 +54,61 @@ class DiagnosticStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class DeliveryAuthorization(str, Enum):
+    """Durable delivery decision; absence and confirmed denial are distinct."""
+
+    ALLOW = "allow"
+    DENY_CONFIRMED = "deny_confirmed"
+    UNAVAILABLE = "unavailable"
+
+
+class InboundExecutionKind(str, Enum):
+    """Namespace for durable outcomes sharing one Telegram message-id domain."""
+
+    MESSAGE = "message"
+    CALLBACK = "callback"
+
+
+@dataclass(frozen=True, slots=True)
+class InboundExecutionKey:
+    """Stable storage identity for an inbound event and its durable outcome.
+
+    Telegram callback queries identify the bot message whose keyboard was
+    pressed, while ordinary inbound messages use a user-message id.  Both ids
+    are numeric and can coincide in synthetic adapters or other channels, so
+    callback outcomes require an explicit namespace.
+    """
+
+    kind: InboundExecutionKind
+    message_id: int | None
+
+    @classmethod
+    def message(cls, message_id: int | None) -> InboundExecutionKey:
+        return cls(InboundExecutionKind.MESSAGE, message_id)
+
+    @classmethod
+    def callback(cls, message_id: int | None) -> InboundExecutionKey:
+        return cls(InboundExecutionKind.CALLBACK, message_id)
+
+    @property
+    def storage_key(self) -> str:
+        value = str(self.message_id) if self.message_id is not None else "missing"
+        if self.kind is InboundExecutionKind.CALLBACK:
+            return f"callback:{value}"
+        # Preserve deployed message keys so an upgrade can replay old rows.
+        return value
+
+    @classmethod
+    def from_storage_key(cls, value: str) -> InboundExecutionKey:
+        kind = InboundExecutionKind.MESSAGE
+        raw_value = value
+        if value.startswith("callback:"):
+            kind = InboundExecutionKind.CALLBACK
+            raw_value = value.removeprefix("callback:")
+        message_id = None if raw_value == "missing" else int(raw_value)
+        return cls(kind, message_id)
+
+
 class HardSignalKind(str, Enum):
     EXPLICIT_HUMAN_REQUEST = "explicit_human_request"
     OPEN_CONVERSATION_REQUEST = "open_conversation_request"

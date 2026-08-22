@@ -6,16 +6,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import and_, or_, select
 
+from app import db
 from app.config import settings
-from app.db import Conversation, FollowupJob, Session, purge_expired_content
-from app.domain import ConversationState
+from app.db import Conversation, FollowupJob, purge_expired_content
+from app.domain import ConversationState, DeliveryAuthorization
 
 logger = logging.getLogger(__name__)
 FOLLOWUP_PROCESSING_LEASE = timedelta(minutes=5)
@@ -41,24 +42,32 @@ class JobRepository(Protocol):
     async def discard_job(self, job: DueJob) -> None: ...
 
 
+def followup_claim_statement(now: datetime):
+    """Production claim query, exposed so its reclaim predicate is auditable."""
+    return (
+        select(FollowupJob, Conversation.chat_id, FollowupJob.conversation_generation)
+        .join(Conversation, Conversation.id == FollowupJob.conversation_id)
+        .where(
+            FollowupJob.due_at <= now,
+            or_(
+                FollowupJob.status == "pending",
+                and_(
+                    FollowupJob.status == "processing",
+                    or_(
+                        FollowupJob.lease_expires_at.is_(None),
+                        FollowupJob.lease_expires_at <= now,
+                    ),
+                ),
+            ),
+        )
+        .with_for_update(skip_locked=True)
+    )
+
+
 class PostgresJobRepository:
     async def claim_due_jobs(self, now: datetime) -> list[DueJob]:
-        async with Session() as session:
-            result = await session.execute(
-                select(FollowupJob, Conversation.chat_id, FollowupJob.conversation_generation)
-                .join(Conversation, Conversation.id == FollowupJob.conversation_id)
-                .where(
-                    FollowupJob.due_at <= now,
-                    or_(
-                        FollowupJob.status == "pending",
-                        and_(
-                            FollowupJob.status == "processing",
-                            FollowupJob.lease_expires_at <= now,
-                        ),
-                    ),
-                )
-                .with_for_update(skip_locked=True)
-            )
+        async with db.repository_session() as session:
+            result = await session.execute(followup_claim_statement(now))
             rows = result.all()
             jobs: list[DueJob] = []
             for job, chat_id, generation in rows:
@@ -72,11 +81,11 @@ class PostgresJobRepository:
                     job.lease_expires_at = None
                 else:
                     jobs.append(DueJob(job.id, job.conversation_id, chat_id, job.kind, generation, job.lease_token))
-            await session.commit()
+            await db.finish_repository_write(session)
             return jobs
 
     async def complete_job(self, job: DueJob, success: bool) -> None:
-        async with Session() as session:
+        async with db.repository_session() as session:
             row = await session.get(FollowupJob, job.id)
             if (
                 row is None
@@ -88,7 +97,7 @@ class PostgresJobRepository:
                 row.status = "pending"
                 row.lease_token = None
                 row.lease_expires_at = None
-                await session.commit()
+                await db.finish_repository_write(session)
                 return
             row.status = "completed"
             row.lease_token = None
@@ -107,11 +116,11 @@ class PostgresJobRepository:
                 conversation = await session.get(Conversation, row.conversation_id)
                 if conversation is not None:
                     conversation.state = "followup_sent"
-            await session.commit()
+            await db.finish_repository_write(session)
 
     async def can_deliver(self, job: DueJob) -> bool:
         """Check the claimed job immediately before delivery without recreating state."""
-        async with Session() as session:
+        async with db.repository_session() as session:
             row = await session.get(FollowupJob, job.id)
             if (
                 row is None
@@ -137,7 +146,7 @@ class PostgresJobRepository:
         Cancellation/deletion takes the conversation lock before touching its jobs,
         so it linearizes entirely before this context or entirely after its send.
         """
-        async with Session() as session:
+        async with db.repository_session() as session:
             conversation = await session.scalar(
                 select(Conversation).where(Conversation.id == job.conversation_id).with_for_update()
             )
@@ -155,6 +164,41 @@ class PostgresJobRepository:
                 and conversation.state not in {ConversationState.CLOSED.value, "cancelled"}
             )
             if not allowed:
+                owns_lease = (
+                    row is not None
+                    and row.status == "processing"
+                    and row.lease_token == job.lease_token
+                    and row.conversation_id == job.conversation_id
+                )
+                terminal_denial = owns_lease and (
+                    conversation is None
+                    or conversation.chat_id != job.chat_id
+                    or row.conversation_generation
+                    != job.conversation_generation
+                    or conversation.generation != job.conversation_generation
+                    or conversation.state in {ConversationState.CLOSED.value, "cancelled"}
+                )
+                if terminal_denial:
+                    row.status = "cancelled"
+                    row.lease_token = None
+                    row.lease_expires_at = None
+                    try:
+                        yield False
+                    finally:
+                        await db.finish_repository_write(session)
+                    return
+                if owns_lease and (
+                    row.lease_expires_at is None
+                    or row.lease_expires_at <= datetime.now(UTC)
+                ):
+                    row.status = "pending"
+                    row.lease_token = None
+                    row.lease_expires_at = None
+                    try:
+                        yield False
+                    finally:
+                        await db.finish_repository_write(session)
+                    return
                 yield False
                 return
             try:
@@ -163,7 +207,7 @@ class PostgresJobRepository:
                 row.status = "pending"
                 row.lease_token = None
                 row.lease_expires_at = None
-                await session.commit()
+                await db.finish_repository_write(session)
                 raise
             else:
                 row.status = "completed"
@@ -181,16 +225,16 @@ class PostgresJobRepository:
                         )
                     )
                     conversation.state = "followup_sent"
-                await session.commit()
+                await db.finish_repository_write(session)
 
     async def discard_job(self, job: DueJob) -> None:
-        async with Session() as session:
+        async with db.repository_session() as session:
             row = await session.get(FollowupJob, job.id)
             if row is not None and row.status == "processing" and row.lease_token == job.lease_token:
                 row.status = "cancelled"
                 row.lease_token = None
                 row.lease_expires_at = None
-                await session.commit()
+                await db.finish_repository_write(session)
 
 
 def followup_markup() -> InlineKeyboardMarkup:
@@ -273,6 +317,39 @@ async def run_due_jobs(bot: Bot, repository: JobRepository, now: datetime | None
     return sent
 
 
+async def run_pending_outcomes(bot: Bot, service: Any) -> int:
+    """Deliver committed text outcomes without re-running model diagnostics."""
+    sent = 0
+    for pending in await service.store.pending_text_outcomes():
+        try:
+            async with service.delivery_authorization(pending.incoming, pending.turn) as authorization:
+                if authorization is not DeliveryAuthorization.ALLOW:
+                    continue
+                await bot.send_message(
+                    pending.incoming.chat_id,
+                    pending.turn.text,
+                    reply_markup=(
+                        InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(text=choice.label, callback_data=choice.id)]
+                                for choice in pending.turn.choices
+                            ]
+                        )
+                        if pending.turn.choices
+                        else None
+                    ),
+                )
+        except Exception as error:  # noqa: BLE001 - the delivery context releases the lease
+            logger.warning("Pending outcome delivery failed: %s", type(error).__name__)
+            continue
+        try:
+            await service.record_outbound(pending.incoming, pending.turn)
+        except Exception as error:  # noqa: BLE001 - acknowledgement already committed
+            logger.warning("Pending outcome audit failed: %s", type(error).__name__)
+        sent += 1
+    return sent
+
+
 async def purge_expired_content_safely() -> bool:
     """Keep the worker alive when retention maintenance has a transient DB failure."""
     try:
@@ -283,9 +360,19 @@ async def purge_expired_content_safely() -> bool:
     return True
 
 
-async def worker_loop(bot: Bot, repository: JobRepository | None = None) -> None:
+async def worker_loop(bot: Bot, repository: JobRepository | None = None, outbox_service: Any | None = None) -> None:
+    production_repository = repository is None
     repository = repository or PostgresJobRepository()
+    if production_repository and outbox_service is None:
+        from app.service import ConversationService
+
+        outbox_service = ConversationService()
     while True:
+        if outbox_service is not None:
+            try:
+                await run_pending_outcomes(bot, outbox_service)
+            except Exception as error:  # noqa: BLE001 - one outbox scan cannot stop later work
+                logger.warning("Pending outcome iteration failed: %s", type(error).__name__)
         try:
             await run_due_jobs(bot, repository)
         except Exception as error:  # noqa: BLE001 - one transient claim must not stop retention or later polls

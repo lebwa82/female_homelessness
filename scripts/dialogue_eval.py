@@ -34,7 +34,7 @@ from app.domain import (
 from app.service import ConversationService
 from app.store import InMemoryConversationStore
 
-DATASET_VERSION = 2
+DATASET_VERSION = 3
 MAX_CASE_CONCURRENCY = 4
 _VALIDATION_FIELD_CATEGORIES = frozenset({
     "level",
@@ -414,7 +414,7 @@ async def evaluate_cases(
     if isinstance(gateway, FixtureGateway):
         gateway.validate_case_ids(cases)
     soft_cases = tuple(case for case in cases if case.group == "soft_lifecycle")
-    if soft_cases and not require_provider_health:
+    if soft_cases:
         reports = await _evaluate_cases_with_soft_lifecycle(
             gateway,
             cases,
@@ -465,6 +465,8 @@ async def _evaluate_cases_with_soft_lifecycle(
         )
         record = await store.ensure(incoming)
         await store.update(record, **case.initial.store_values())
+        for role, content in case.history[:-1]:
+            await store.append_message(record, role, content)
         return store, record, identity
 
     # Branch one: None → psychologist → None by accepting the offer.
@@ -476,19 +478,35 @@ async def _evaluate_cases_with_soft_lifecycle(
         text=_final_user_text(create_case.history),
         message_id=1,
     )
-    create_turn = await ConversationService(store=store, gateway=_gateway_for_case(gateway, create_case)).handle_text(first_incoming)
+    create_service = ConversationService(store=store, gateway=_gateway_for_case(gateway, create_case))
+    create_turn = await create_service.handle_text(first_incoming)
     reports[create_case.id] = await _report_turn(
-        create_case, store, record, create_turn, history_matches=True, require_provider_health=require_provider_health
+        create_case,
+        store,
+        record,
+        create_turn,
+        history_matches=await store.history(record) == create_case.history,
+        require_provider_health=require_provider_health,
     )
+    await create_service.record_outbound(first_incoming, create_turn)
     consume_incoming = IncomingMessage(
         platform_user_id=identity,
         chat_id=identity,
         text=_final_user_text(consume_case.history),
         message_id=2,
     )
-    consume_turn = await ConversationService(store=store, gateway=_gateway_for_case(gateway, consume_case)).handle_text(consume_incoming)
+    consume_turn = await ConversationService(
+        store=store,
+        gateway=_gateway_for_case(gateway, consume_case),
+    ).handle_text(consume_incoming)
+    expected_consume_history = (*create_case.history, ("assistant", create_turn.text), *consume_case.history)
     reports[consume_case.id] = await _report_turn(
-        consume_case, store, record, consume_turn, history_matches=True, require_provider_health=require_provider_health
+        consume_case,
+        store,
+        record,
+        consume_turn,
+        history_matches=await store.history(record) == expected_consume_history,
+        require_provider_health=require_provider_health,
     )
 
     # Branch two: create a fresh offer, then prove unrelated text expires it.
@@ -500,16 +518,34 @@ async def _evaluate_cases_with_soft_lifecycle(
         text=_final_user_text(create_case.history),
         message_id=1,
     )
-    await ConversationService(store=expiry_store, gateway=_gateway_for_case(gateway, create_case)).handle_text(expiry_create)
+    expiry_service = ConversationService(
+        store=expiry_store,
+        gateway=_gateway_for_case(gateway, create_case),
+    )
+    expiry_create_turn = await expiry_service.handle_text(expiry_create)
+    await expiry_service.record_outbound(expiry_create, expiry_create_turn)
     expire_incoming = IncomingMessage(
         platform_user_id=expiry_identity,
         chat_id=expiry_identity,
         text=_final_user_text(expire_case.history),
         message_id=2,
     )
-    expire_turn = await ConversationService(store=expiry_store, gateway=_gateway_for_case(gateway, expire_case)).handle_text(expire_incoming)
+    expire_turn = await ConversationService(
+        store=expiry_store,
+        gateway=_gateway_for_case(gateway, expire_case),
+    ).handle_text(expire_incoming)
+    expected_expire_history = (
+        *create_case.history,
+        ("assistant", expiry_create_turn.text),
+        *expire_case.history,
+    )
     reports[expire_case.id] = await _report_turn(
-        expire_case, expiry_store, expiry_record, expire_turn, history_matches=True, require_provider_health=require_provider_health
+        expire_case,
+        expiry_store,
+        expiry_record,
+        expire_turn,
+        history_matches=await expiry_store.history(expiry_record) == expected_expire_history,
+        require_provider_health=require_provider_health,
     )
 
     normal_reports = {

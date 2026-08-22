@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -16,6 +18,8 @@ from app.domain import (
     Choice,
     EscalationCause,
     EscalationRequest,
+    InboundExecutionKey,
+    InboundExecutionKind,
     IncomingMessage,
     RiskAssessment,
     RiskLevel,
@@ -100,6 +104,16 @@ class StoredTurnOutcome:
     delivery_lease_expires_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class PendingTextOutcome:
+    incoming: IncomingMessage
+    turn: AgentTurn
+
+
+def _execution_key(value: InboundExecutionKey | int | None) -> InboundExecutionKey:
+    return value if isinstance(value, InboundExecutionKey) else InboundExecutionKey.message(value)
+
+
 @dataclass
 class InMemoryConversationStore:
     conversations: dict[int, ConversationRecord] = field(default_factory=dict)
@@ -116,6 +130,7 @@ class InMemoryConversationStore:
     text_outcomes: dict[tuple[int, str], StoredTurnOutcome] = field(default_factory=dict)
     tombstone_generations: dict[tuple[str, int], int] = field(default_factory=dict)
     _update_locks: dict[int, asyncio.Lock] = field(default_factory=dict, repr=False)
+    _identity_locks: dict[tuple[str, int], asyncio.Lock] = field(default_factory=dict, repr=False)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -137,6 +152,51 @@ class InMemoryConversationStore:
 
     async def get(self, incoming: IncomingMessage) -> ConversationRecord | None:
         return self.conversations.get(incoming.platform_user_id)
+
+    @asynccontextmanager
+    async def unit_of_work(
+        self,
+        incoming: IncomingMessage,
+        *,
+        create: bool = True,
+    ) -> AsyncIterator[ConversationRecord | None]:
+        """Serialize an identity and roll every durable mutation back together."""
+        lock = self._identity_locks.setdefault((incoming.channel, incoming.platform_user_id), asyncio.Lock())
+        async with lock:
+            record_values = {
+                key: copy.deepcopy(record.__dict__)
+                for key, record in self.conversations.items()
+            }
+            snapshots = {
+                name: copy.deepcopy(getattr(self, name))
+                for name in (
+                    "messages",
+                    "aid_requests",
+                    "escalations",
+                    "followup_jobs",
+                    "agent_runs",
+                    "risk_assessments",
+                    "actions",
+                    "action_effect_keys",
+                    "callback_claims",
+                    "text_claims",
+                    "text_outcomes",
+                    "tombstone_generations",
+                )
+            }
+            original_records = dict(self.conversations)
+            try:
+                record = await self.ensure(incoming) if create else await self.get(incoming)
+                yield record
+            except BaseException:
+                for key, record in original_records.items():
+                    record.__dict__.clear()
+                    record.__dict__.update(record_values[key])
+                self.conversations.clear()
+                self.conversations.update(original_records)
+                for name, value in snapshots.items():
+                    setattr(self, name, value)
+                raise
 
     @asynccontextmanager
     async def serialize_update(self, record: ConversationRecord) -> AsyncIterator[None]:
@@ -288,8 +348,12 @@ class InMemoryConversationStore:
         )
         return request
 
-    async def claim_text(self, record: ConversationRecord, message_id: int | None) -> str | None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+    async def claim_text(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> str | None:
+        key = (record.id, _execution_key(message_id).storage_key)
         current = self.text_claims.get(key)
         now = datetime.now(UTC)
         if current is not None:
@@ -308,8 +372,13 @@ class InMemoryConversationStore:
         )
         return lease_token
 
-    async def complete_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+    async def complete_text(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+        lease_token: str,
+    ) -> None:
+        key = (record.id, _execution_key(message_id).storage_key)
         claim = self.text_claims.get(key)
         if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
             claim.status = "completed"
@@ -319,35 +388,57 @@ class InMemoryConversationStore:
     async def save_text_outcome(
         self,
         record: ConversationRecord,
-        message_id: int | None,
+        message_id: InboundExecutionKey | int | None,
         lease_token: str,
         turn: AgentTurn,
     ) -> None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+        execution_key = _execution_key(message_id)
+        key = (record.id, execution_key.storage_key)
         claim = self.text_claims.get(key)
         if claim is None or claim.status != "processing" or claim.lease_token != lease_token:
             raise RuntimeError("text_outcome_claim_lost")
-        self.text_outcomes[key] = StoredTurnOutcome(turn=turn)
+        bound_turn = turn.model_copy(
+            update={
+                "audit": {
+                    **turn.audit,
+                    "conversation_id": record.id,
+                    "conversation_generation": record.generation,
+                    "inbound_execution_kind": execution_key.kind.value,
+                }
+            }
+        )
+        self.text_outcomes[key] = StoredTurnOutcome(turn=bound_turn)
+        claim.status = "completed"
+        claim.lease_token = None
+        claim.lease_expires_at = None
 
     async def load_text_outcome(
         self,
         record: ConversationRecord,
-        message_id: int | None,
+        message_id: InboundExecutionKey | int | None,
     ) -> tuple[AgentTurn, bool] | None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+        key = (record.id, _execution_key(message_id).storage_key)
         outcome = self.text_outcomes.get(key)
         return (outcome.turn, outcome.delivered) if outcome is not None else None
 
-    async def acknowledge_text_outcome(self, record: ConversationRecord, message_id: int | None) -> None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+    async def acknowledge_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> None:
+        key = (record.id, _execution_key(message_id).storage_key)
         outcome = self.text_outcomes.get(key)
         if outcome is not None:
             outcome.delivered = True
             outcome.delivery_token = None
             outcome.delivery_lease_expires_at = None
 
-    async def claim_outbound_delivery(self, record: ConversationRecord, message_id: int | None) -> str | None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+    async def claim_outbound_delivery(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> str | None:
+        key = (record.id, _execution_key(message_id).storage_key)
         outcome = self.text_outcomes.get(key)
         now = datetime.now(UTC)
         if outcome is None or outcome.delivered:
@@ -366,17 +457,54 @@ class InMemoryConversationStore:
     async def release_outbound_delivery(
         self,
         record: ConversationRecord,
-        message_id: int | None,
+        message_id: InboundExecutionKey | int | None,
         delivery_token: str,
     ) -> None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+        key = (record.id, _execution_key(message_id).storage_key)
         outcome = self.text_outcomes.get(key)
         if outcome is not None and outcome.delivery_token == delivery_token and not outcome.delivered:
             outcome.delivery_token = None
             outcome.delivery_lease_expires_at = None
 
-    async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
-        key = (record.id, str(message_id) if message_id is not None else "missing")
+    async def pending_text_outcomes(self, limit: int = 50) -> tuple[PendingTextOutcome, ...]:
+        pending: list[PendingTextOutcome] = []
+        records_by_id = {record.id: record for record in self.conversations.values()}
+        now = datetime.now(UTC)
+        for (conversation_id, source_message_id), outcome in self.text_outcomes.items():
+            if outcome.delivered or (
+                outcome.delivery_token is not None
+                and outcome.delivery_lease_expires_at is not None
+                and outcome.delivery_lease_expires_at > now
+            ):
+                continue
+            record = records_by_id.get(conversation_id)
+            if record is None or outcome.turn.audit.get("conversation_generation") != record.generation:
+                continue
+            execution_key = InboundExecutionKey.from_storage_key(source_message_id)
+            pending.append(
+                PendingTextOutcome(
+                    incoming=IncomingMessage(
+                        channel=record.channel,
+                        platform_user_id=record.platform_user_id,
+                        chat_id=record.chat_id,
+                        username=record.username,
+                        text="",
+                        message_id=execution_key.message_id,
+                    ),
+                    turn=outcome.turn,
+                )
+            )
+            if len(pending) >= limit:
+                break
+        return tuple(pending)
+
+    async def fail_text(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+        lease_token: str,
+    ) -> None:
+        key = (record.id, _execution_key(message_id).storage_key)
         claim = self.text_claims.get(key)
         if claim is not None and claim.status == "processing" and claim.lease_token == lease_token:
             claim.status = "failed"
@@ -426,7 +554,7 @@ class PostgresConversationStore:
         return self._record_from_row(row)
 
     async def get(self, incoming: IncomingMessage) -> ConversationRecord | None:
-        async with db.Session() as session:
+        async with db.repository_session() as session:
             result = await session.execute(
                 db.select(db.Conversation).where(
                     db.Conversation.channel == incoming.channel,
@@ -437,18 +565,34 @@ class PostgresConversationStore:
             return self._record_from_row(row) if row is not None else None
 
     @asynccontextmanager
+    async def unit_of_work(
+        self,
+        incoming: IncomingMessage,
+        *,
+        create: bool = True,
+    ) -> AsyncIterator[ConversationRecord | None]:
+        """Run one inbound update under an identity lock and one transaction."""
+        identity = f"{incoming.channel}:{incoming.platform_user_id}".encode()
+        advisory_key = int.from_bytes(hashlib.sha256(identity).digest()[:8], "big", signed=True)
+        async with db.Session() as session, session.begin():
+            await session.execute(db.select(db.func.pg_advisory_xact_lock(advisory_key)))
+            with db.bind_repository_session(session):
+                record = await self.ensure(incoming) if create else await self.get(incoming)
+                yield record
+
+    @asynccontextmanager
     async def serialize_update(self, record: ConversationRecord) -> AsyncIterator[None]:
         """Hold a database-backed advisory lock across one policy derivation."""
-        async with db.Session() as session:
+        async with db.repository_session() as session:
             await session.execute(db.select(db.func.pg_advisory_lock(record.id)))
             try:
                 yield
             finally:
                 await session.execute(db.select(db.func.pg_advisory_unlock(record.id)))
-                await session.commit()
+                await db.finish_repository_write(session)
 
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
-        async with db.Session() as session:
+        async with db.repository_session() as session:
             result = await session.execute(
                 db.select(db.Conversation)
                 .where(db.Conversation.id == record.id)
@@ -465,7 +609,7 @@ class PostgresConversationStore:
                 else:
                     setattr(row, key, value)
             row.version += 1
-            await session.commit()
+            await db.finish_repository_write(session)
             await session.refresh(row)
             updated = self._record_from_row(row)
             record.__dict__.update(updated.__dict__)
@@ -541,7 +685,7 @@ class PostgresConversationStore:
         request_key: str | None = None,
     ) -> StoredAidRequest:
         request_key = request_key or uuid4().hex
-        async with db.Session() as session:
+        async with db.repository_session() as session:
             result = await session.execute(
                 db.postgres_insert(db.AidRequest)
                 .values(
@@ -560,7 +704,7 @@ class PostgresConversationStore:
                     db.select(db.AidRequest).where(db.AidRequest.request_key == request_key)
                 )
                 request = existing.scalar_one()
-                await session.commit()
+                await db.finish_repository_write(session)
                 return StoredAidRequest(
                     id=request.id,
                     conversation_id=record.id,
@@ -592,7 +736,7 @@ class PostgresConversationStore:
                     due_at=datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
                 )
             )
-            await session.commit()
+            await db.finish_repository_write(session)
             return StoredAidRequest(
                 id=request.id,
                 conversation_id=record.id,
@@ -610,19 +754,29 @@ class PostgresConversationStore:
     async def cancel_pending_reminder(self, record: ConversationRecord) -> None:
         await db.cancel_followup_reminders(record.id)
 
-    async def claim_text(self, record: ConversationRecord, message_id: int | None) -> str | None:
+    async def claim_text(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> str | None:
         return await db.claim_text_execution(record.id, message_id)
 
-    async def complete_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
+    async def complete_text(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+        lease_token: str,
+    ) -> None:
         await db.complete_text_execution(record.id, message_id, lease_token)
 
     async def save_text_outcome(
         self,
         record: ConversationRecord,
-        message_id: int | None,
+        message_id: InboundExecutionKey | int | None,
         lease_token: str,
         turn: AgentTurn,
     ) -> None:
+        execution_key = _execution_key(message_id)
         if not await db.save_text_execution_outcome(
             record.id,
             message_id,
@@ -630,6 +784,9 @@ class PostgresConversationStore:
             {
                 "text": turn.text,
                 "choices": [choice.model_dump(mode="json") for choice in turn.choices],
+                "critical_delivery": turn.audit.get("critical_delivery") is True,
+                "conversation_generation": record.generation,
+                "inbound_execution_kind": execution_key.kind.value,
             },
         ):
             raise RuntimeError("text_outcome_claim_lost")
@@ -637,40 +794,116 @@ class PostgresConversationStore:
     async def load_text_outcome(
         self,
         record: ConversationRecord,
-        message_id: int | None,
+        message_id: InboundExecutionKey | int | None,
     ) -> tuple[AgentTurn, bool] | None:
         stored = await db.load_text_execution_outcome(record.id, message_id)
         if stored is None:
             return None
         outcome, delivered = stored
+        return self._turn_from_outcome(record, outcome), delivered
+
+    @staticmethod
+    def _turn_from_outcome(record: ConversationRecord, outcome: dict[str, Any]) -> AgentTurn:
         try:
             text = outcome["text"]
             choices = outcome["choices"]
             if not isinstance(text, str) or not isinstance(choices, list):
                 raise TypeError
+            critical_delivery = outcome.get("critical_delivery", False)
+            conversation_generation = outcome.get("conversation_generation", record.generation)
+            inbound_execution_kind = outcome.get(
+                "inbound_execution_kind",
+                InboundExecutionKind.MESSAGE.value,
+            )
+            if (
+                not isinstance(critical_delivery, bool)
+                or not isinstance(conversation_generation, int)
+                or inbound_execution_kind not in InboundExecutionKind
+            ):
+                raise TypeError
             turn = AgentTurn(
                 text=text,
                 choices=tuple(Choice.model_validate(choice) for choice in choices),
+                audit={
+                    "critical_delivery": critical_delivery,
+                    "conversation_id": record.id,
+                    "conversation_generation": conversation_generation,
+                    "inbound_execution_kind": inbound_execution_kind,
+                },
             )
         except (KeyError, TypeError, ValueError):
             raise RuntimeError("text_outcome_invalid") from None
-        return turn, delivered
+        return turn
 
-    async def acknowledge_text_outcome(self, record: ConversationRecord, message_id: int | None) -> None:
+    async def acknowledge_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> None:
         await db.acknowledge_text_execution_outcome(record.id, message_id)
 
-    async def claim_outbound_delivery(self, record: ConversationRecord, message_id: int | None) -> str | None:
+    async def claim_outbound_delivery(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> str | None:
         return await db.claim_text_execution_delivery(record.id, message_id)
 
     async def release_outbound_delivery(
         self,
         record: ConversationRecord,
-        message_id: int | None,
+        message_id: InboundExecutionKey | int | None,
         delivery_token: str,
     ) -> None:
         await db.release_text_execution_delivery(record.id, message_id, delivery_token)
 
-    async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
+    async def pending_text_outcomes(self, limit: int = 50) -> tuple[PendingTextOutcome, ...]:
+        now = datetime.now(UTC)
+        async with db.repository_session() as session:
+            result = await session.execute(
+                db.select(db.InboundTextExecution, db.Conversation)
+                .join(db.Conversation, db.Conversation.id == db.InboundTextExecution.conversation_id)
+                .where(
+                    db.InboundTextExecution.status == "completed",
+                    db.InboundTextExecution.outcome.is_not(None),
+                    db.InboundTextExecution.delivered_at.is_(None),
+                    db.or_(
+                        db.InboundTextExecution.delivery_token.is_(None),
+                        db.InboundTextExecution.delivery_lease_expires_at.is_(None),
+                        db.InboundTextExecution.delivery_lease_expires_at <= now,
+                    ),
+                )
+                .order_by(db.InboundTextExecution.id)
+                .limit(limit)
+            )
+            pending: list[PendingTextOutcome] = []
+            for execution, conversation in result.all():
+                record = self._record_from_row(conversation)
+                turn = self._turn_from_outcome(record, execution.outcome)
+                if turn.audit.get("conversation_generation") != record.generation:
+                    continue
+                execution_key = InboundExecutionKey.from_storage_key(execution.source_message_id)
+                pending.append(
+                    PendingTextOutcome(
+                        incoming=IncomingMessage(
+                            channel=record.channel,
+                            platform_user_id=record.platform_user_id,
+                            chat_id=record.chat_id,
+                            username=record.username,
+                            text="",
+                            message_id=execution_key.message_id,
+                        ),
+                        turn=turn,
+                    )
+                )
+            return tuple(pending)
+
+    async def fail_text(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+        lease_token: str,
+    ) -> None:
         await db.fail_text_execution(record.id, message_id, lease_token)
 
     @staticmethod

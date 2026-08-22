@@ -1,12 +1,64 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
 from hashlib import sha256
 from unicodedata import normalize
 
-from app.domain import DeterministicSignals, HardSignalKind, NeedKind, SignalMatch, SupportOffer
+from app.domain import (
+    ConversationState,
+    DeterministicSignals,
+    HardSignalKind,
+    NeedKind,
+    SignalMatch,
+    SupportOffer,
+)
 
-MATCHER_VERSION = "deterministic-signals-v2"
+MATCHER_VERSION = "deterministic-signals-v3"
+
+
+class ClauseBoundaryKind(str, Enum):
+    COMMA = "comma"
+    DASH = "dash"
+    TERMINAL = "terminal"
+    NEWLINE = "newline"
+
+
+@dataclass(frozen=True)
+class BoundarySpan:
+    kind: ClauseBoundaryKind
+    char_start: int
+    char_end: int
+
+
+@dataclass(frozen=True)
+class ClauseSpan:
+    token_start: int
+    token_end: int
+    char_start: int
+    char_end: int
+    boundary_after: BoundarySpan | None = None
+
+
+@dataclass(frozen=True)
+class SignalToken:
+    value: str
+    char_start: int
+    char_end: int
+    clause_index: int
+
+
+@dataclass(frozen=True)
+class SignalInput:
+    """Normalized tokens plus the punctuation spans that delimit clauses."""
+
+    tokens: tuple[SignalToken, ...]
+    clauses: tuple[ClauseSpan, ...]
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        return tuple(token.value for token in self.tokens)
 
 _HUMAN_TRANSFER_VERBS = frozenset({"позови", "позовите", "переключи", "переключите", "соедини", "соедините"})
 _HUMAN_TRANSFER_FILLERS = frozenset({"меня", "на", "с", "к", "живого", "живым", "пожалуйста"})
@@ -36,9 +88,11 @@ def extract_signals(
     text: str,
     *,
     pending_offer: SupportOffer | None = None,
+    state: ConversationState | str | None = None,
 ) -> DeterministicSignals:
     """Extract bounded token-sequence signals without retaining the input text."""
-    tokens = _scan_tokens(text)
+    signal_input = scan_signal_input(text)
+    tokens = signal_input.values
     matches: list[SignalMatch] = []
     seen: set[tuple[HardSignalKind, str, int, int, NeedKind | None]] = set()
 
@@ -63,11 +117,11 @@ def extract_signals(
             )
 
     _add_human_request_matches(tokens, add)
-    _add_open_conversation_matches(tokens, add)
+    _add_open_conversation_matches(signal_input, state, add)
     _add_aid_matches(tokens, add)
     _add_psychologist_matches(tokens, add)
     _add_pending_offer_matches(tokens, pending_offer, add)
-    _add_safety_matches(tokens, add)
+    _add_safety_matches(signal_input, add)
 
     return DeterministicSignals(
         matcher_version=MATCHER_VERSION,
@@ -76,19 +130,78 @@ def extract_signals(
     )
 
 
-def _scan_tokens(text: str) -> tuple[str, ...]:
+def scan_signal_input(text: str) -> SignalInput:
+    """Scan text once while retaining token, clause, and boundary spans."""
     normalized = normalize("NFKC", text).casefold().replace("ё", "е")
-    tokens: list[str] = []
+    tokens: list[SignalToken] = []
+    clauses: list[ClauseSpan] = []
     current: list[str] = []
-    for char in normalized:
+    token_start = 0
+    clause_token_start = 0
+    clause_char_start = 0
+    clause_index = 0
+
+    def finish_token(char_end: int) -> None:
+        nonlocal current
+        if not current:
+            return
+        tokens.append(
+            SignalToken(
+                value="".join(current),
+                char_start=token_start,
+                char_end=char_end,
+                clause_index=clause_index,
+            )
+        )
+        current = []
+
+    def finish_clause(boundary: BoundarySpan | None, char_end: int) -> None:
+        nonlocal clause_token_start, clause_char_start, clause_index
+        if len(tokens) > clause_token_start:
+            clauses.append(
+                ClauseSpan(
+                    token_start=clause_token_start,
+                    token_end=len(tokens),
+                    char_start=clause_char_start,
+                    char_end=char_end,
+                    boundary_after=boundary,
+                )
+            )
+            clause_index += 1
+        clause_token_start = len(tokens)
+        clause_char_start = boundary.char_end if boundary is not None else char_end
+
+    for index, char in enumerate(normalized):
         if char.isalnum():
+            if not current:
+                token_start = index
             current.append(char)
-        elif current:
-            tokens.append("".join(current))
-            current.clear()
-    if current:
-        tokens.append("".join(current))
-    return tuple(tokens)
+            continue
+        finish_token(index)
+        boundary_kind: ClauseBoundaryKind | None = None
+        if char == ",":
+            boundary_kind = ClauseBoundaryKind.COMMA
+        elif char in {"—", "–"} or (
+            char == "-"
+            and (index == 0 or normalized[index - 1].isspace())
+            and (index + 1 == len(normalized) or normalized[index + 1].isspace())
+        ):
+            boundary_kind = ClauseBoundaryKind.DASH
+        elif char in {".", "!", "?", ";", ":"}:
+            boundary_kind = ClauseBoundaryKind.TERMINAL
+        elif char in {"\n", "\r"}:
+            boundary_kind = ClauseBoundaryKind.NEWLINE
+        if boundary_kind is not None:
+            boundary = BoundarySpan(boundary_kind, index, index + 1)
+            finish_clause(boundary, index)
+    finish_token(len(normalized))
+    finish_clause(None, len(normalized))
+    return SignalInput(tokens=tuple(tokens), clauses=tuple(clauses))
+
+
+def _scan_tokens(text: str) -> tuple[str, ...]:
+    """Compatibility projection for callers that need token values only."""
+    return scan_signal_input(text).values
 
 
 def _add_human_request_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
@@ -124,8 +237,19 @@ def _add_human_request_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
                         break
 
 
-def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
-    """Recognise a bounded request to leave a completed workflow for ordinary conversation."""
+def _add_open_conversation_matches(
+    signal_input: SignalInput,
+    state: ConversationState | str | None,
+    add: _AddMatch,
+) -> None:
+    """Recognise explicit conversation requests and field-specific refusals.
+
+    Refusals are parsed as clause-local grammar instead of an ever-growing list
+    of full sentences.  Supplying the workflow state narrows the vocabulary to
+    the field the user is currently being asked for; the state-less mode keeps
+    the deterministic extractor useful to offline evaluators and older callers.
+    """
+    tokens = signal_input.values
     for phrase in (
         ("можно", "просто", "поговорить"),
         ("хочу", "просто", "поговорить"),
@@ -139,18 +263,6 @@ def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> N
         ("отменить",),
         ("не", "хочу", "продолжать"),
         ("не", "нужно", "продолжать"),
-        ("не", "нужна", "заявка"),
-        ("не", "хочу", "указывать", "город"),
-        ("не", "хочу", "указывать", "место"),
-        ("не", "хочу", "оставлять", "контакт"),
-        ("не", "буду", "оставлять", "контакт"),
-        # Refusals occur in natural word orders as well as in the prompt's
-        # wording.  These are workflow escapes, never field values.
-        ("город", "указывать", "не", "хочу"),
-        ("место", "не", "укажу"),
-        ("контакт", "оставлять", "не", "буду"),
-        ("не", "дам", "номер"),
-        ("заявку", "не", "надо"),
         ("давайте", "пропустим"),
         ("пропустить",),
     ):
@@ -161,6 +273,125 @@ def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> N
                 start,
                 start + len(phrase),
             )
+
+    _add_workflow_refusal_matches(signal_input, state, add)
+
+
+_LOCATION_OBJECT_STEMS = ("город", "мест", "локац", "адрес", "регион")
+_LOCATION_ACTION_STEMS = ("указ", "укаж", "наз", "сообщ", "говор", "пис")
+_CONTACT_OBJECT_STEMS = ("контакт", "номер", "телефон", "почт", "email", "телеграм", "ник")
+_CONTACT_ACTION_STEMS = ("да", "остав", "указ", "укаж", "наз", "сообщ", "говор", "пис", "отправ")
+_REQUEST_OBJECT_STEMS = ("заяв", "запрос", "помощ")
+_REQUEST_ACTION_STEMS = ("оформ", "созда", "остав", "пода", "продолж")
+_REFUSAL_MODALS = frozenset(
+    {
+        "буду",
+        "будем",
+        "будет",
+        "стану",
+        "станем",
+        "станет",
+        "хочу",
+        "хотим",
+    }
+)
+_REFUSAL_NECESSITY = frozenset({"надо", "нужно", "нужен", "нужна", "нужны"})
+_MAX_REFUSAL_TOKEN_GAP = 4
+
+
+def _add_workflow_refusal_matches(
+    signal_input: SignalInput,
+    state: ConversationState | str | None,
+    add: _AddMatch,
+) -> None:
+    state_value = state.value if isinstance(state, ConversationState) else state
+    grammars: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    if state_value in {None, ConversationState.COLLECTING_LOCATION.value}:
+        grammars.append((_LOCATION_OBJECT_STEMS, _LOCATION_ACTION_STEMS))
+    if state_value in {
+        None,
+        ConversationState.COLLECTING_CONTACT_METHOD.value,
+        ConversationState.COLLECTING_CONTACT_VALUE.value,
+    }:
+        grammars.append((_CONTACT_OBJECT_STEMS, _CONTACT_ACTION_STEMS))
+    if state_value in {
+        None,
+        ConversationState.CHOOSING_AID.value,
+        ConversationState.COLLECTING_LOCATION.value,
+        ConversationState.COLLECTING_CONTACT_METHOD.value,
+        ConversationState.COLLECTING_CONTACT_VALUE.value,
+    }:
+        grammars.append((_REQUEST_OBJECT_STEMS, _REQUEST_ACTION_STEMS))
+
+    tokens = signal_input.values
+    for clause in signal_input.clauses:
+        clause_tokens = tokens[clause.token_start : clause.token_end]
+        for object_stems, action_stems in grammars:
+            object_positions = _stem_positions(clause_tokens, object_stems)
+            if not object_positions:
+                continue
+            action_positions = _stem_positions(clause_tokens, action_stems)
+            if not action_positions and object_stems is not _REQUEST_OBJECT_STEMS:
+                continue
+            if not _has_refusal_grammar(clause_tokens, action_positions, object_positions):
+                continue
+            start = clause.token_start + min((*object_positions, *(action_positions or object_positions)))
+            end = clause.token_start + max((*object_positions, *(action_positions or object_positions))) + 1
+            add(
+                HardSignalKind.OPEN_CONVERSATION_REQUEST,
+                "conversation.continue.explicit",
+                start,
+                end,
+            )
+            break
+
+
+def _stem_positions(tokens: tuple[str, ...], stems: tuple[str, ...]) -> tuple[int, ...]:
+    return tuple(index for index, token in enumerate(tokens) if token.startswith(stems))
+
+
+def _has_refusal_grammar(
+    tokens: tuple[str, ...],
+    action_positions: tuple[int, ...],
+    object_positions: tuple[int, ...],
+) -> bool:
+    linked_actions = {
+        action_index
+        for action_index in action_positions
+        if any(abs(action_index - object_index) <= _MAX_REFUSAL_TOKEN_GAP for object_index in object_positions)
+    }
+    if action_positions and not linked_actions:
+        return False
+    negated_modals = {
+        index + 1
+        for index in range(len(tokens) - 1)
+        if tokens[index] == "не" and tokens[index + 1] in _REFUSAL_MODALS
+    }
+    if any(
+        any(abs(modal_index - action_index) <= _MAX_REFUSAL_TOKEN_GAP for action_index in linked_actions)
+        for modal_index in negated_modals
+    ):
+        return True
+    if not action_positions and any(
+        abs(modal_index - object_index) <= _MAX_REFUSAL_TOKEN_GAP
+        for modal_index in negated_modals
+        for object_index in object_positions
+    ):
+        return True
+    if any(
+        action_index > 0
+        and tokens[action_index - 1] == "не"
+        and not tokens[action_index].endswith(("ть", "ться"))
+        for action_index in linked_actions
+    ):
+        return True
+    return any(
+        index + 1 < len(tokens)
+        and tokens[index] == "не"
+        and tokens[index + 1] in _REFUSAL_NECESSITY
+        and any(abs(index + 1 - object_index) <= _MAX_REFUSAL_TOKEN_GAP for object_index in object_positions)
+        for index in range(len(tokens))
+    )
 
 
 def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
@@ -233,10 +464,11 @@ def _add_pending_offer_matches(
         add(HardSignalKind.PSYCHOLOGIST_CONSIDERING, "psychologist.pending.format", start, start + 3)
 
 
-def _add_safety_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
+def _add_safety_matches(signal_input: SignalInput, add: _AddMatch) -> None:
+    tokens = signal_input.values
     for phrase in (("не", "хочу", "жить"), ("не", "хочу", "больше", "жить")):
-        for start in _find_phrase(tokens, phrase):
-            if _is_bounded_not_want_to_live(tokens, start, len(phrase)):
+        for start in _find_phrase_in_clauses(signal_input, phrase):
+            if _is_bounded_not_want_to_live(signal_input, start, len(phrase)):
                 add(
                     HardSignalKind.SUICIDE_OR_SELF_HARM,
                     "safety.suicide.not_want_to_live",
@@ -322,6 +554,17 @@ def _find_phrase(tokens: tuple[str, ...], phrase: tuple[str, ...]) -> tuple[int,
     )
 
 
+def _find_phrase_in_clauses(signal_input: SignalInput, phrase: tuple[str, ...]) -> tuple[int, ...]:
+    tokens = signal_input.values
+    return tuple(
+        start
+        for start in _find_phrase(tokens, phrase)
+        if tokens
+        and signal_input.tokens[start].clause_index
+        == signal_input.tokens[start + len(phrase) - 1].clause_index
+    )
+
+
 def _nearby_marker(tokens: tuple[str, ...], start: int, end: int) -> int | None:
     window_start = max(0, start - 3)
     window_end = min(len(tokens), end + 3)
@@ -335,7 +578,7 @@ def _marker_action_span(marker: int, start: int, end: int) -> tuple[int, int]:
     return min(marker, start), max(marker + 1, end)
 
 
-def _is_bounded_not_want_to_live(tokens: tuple[str, ...], start: int, width: int) -> bool:
+def _is_bounded_not_want_to_live(signal_input: SignalInput, start: int, width: int) -> bool:
     """Keep direct suicidal language, but not residence or relationship grammar.
 
     A completed ``не хочу жить`` clause is itself a high-severity signal.  Only
@@ -343,11 +586,13 @@ def _is_bounded_not_want_to_live(tokens: tuple[str, ...], start: int, width: int
     relationship predicate are excluded.  Ordinary distress after the clause
     must not weaken its local crisis route.
     """
-    tail = tokens[start + width :]
-    # Tokenisation intentionally drops punctuation, so a bare preposition is
-    # not enough to redefine the completed clause.  Suppress only the two
-    # reviewed continuations, preserving crisis language such as "в последнее
-    # время" and "с каждым днём" after a punctuation boundary.
+    tokens = signal_input.values
+    clause_index = signal_input.tokens[start].clause_index
+    clause = signal_input.clauses[clause_index]
+    tail = tokens[start + width : clause.token_end]
+    # Residence and relationship complements suppress the match only inside
+    # the same clause.  A comma, dash, sentence ending, or newline closes the
+    # suicidal predicate before any following context is considered.
     return tuple(tail[:3]) != ("в", "этом", "городе") and tuple(tail[:2]) != ("с", "ним")
 
 

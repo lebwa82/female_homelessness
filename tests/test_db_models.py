@@ -101,3 +101,8 @@ async def test_init_db_and_assurance_require_callback_lease_scan_indexes(
     assert expected_indexes <= _REQUIRED_INDEXES
     for index_name in expected_indexes:
         assert any(index_name in statement for statement in statements)
+    assert any(
+        "UPDATE followup_jobs SET status = 'pending', lease_token = NULL" in statement
+        and "status = 'processing' AND lease_expires_at IS NULL" in statement
+        for statement in statements
+    )

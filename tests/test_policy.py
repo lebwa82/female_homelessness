@@ -244,7 +244,7 @@ def test_concern_narrative_without_request_has_no_aid_menu_but_records_safety() 
 
 def test_all_versioned_final_user_turns_have_a_deterministic_route_and_open_rows_stay_open() -> None:
     rows = [json.loads(line) for line in FIXTURE_PATH.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 63
+    assert len(rows) == 65
 
     for row in rows:
         history = tuple((str(role), str(text)) for role, text in row["history"])

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -25,11 +28,17 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
-from sqlalchemy.ext.asyncio import AsyncAttrs, AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncAttrs,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
-from app.domain import ConversationState, EscalationRequest, RiskAssessment
+from app.domain import ConversationState, EscalationRequest, InboundExecutionKey, RiskAssessment
 from app.pii import redact_with_audit
 
 CALLBACK_PROCESSING_LEASE = timedelta(minutes=5)
@@ -305,6 +314,38 @@ class FollowupJob(Base):
 
 engine: AsyncEngine = create_async_engine(settings.database_url)
 Session = async_sessionmaker(engine, expire_on_commit=False)
+_BOUND_REPOSITORY_SESSION: ContextVar[AsyncSession | None] = ContextVar(
+    "bound_repository_session",
+    default=None,
+)
+
+
+@contextmanager
+def bind_repository_session(session: AsyncSession) -> Iterator[None]:
+    """Bind production repository functions to one caller-owned transaction."""
+    token = _BOUND_REPOSITORY_SESSION.set(session)
+    try:
+        yield
+    finally:
+        _BOUND_REPOSITORY_SESSION.reset(token)
+
+
+@asynccontextmanager
+async def repository_session() -> AsyncIterator[AsyncSession]:
+    bound = _BOUND_REPOSITORY_SESSION.get()
+    if bound is not None:
+        yield bound
+        return
+    async with Session() as session:
+        yield session
+
+
+async def finish_repository_write(session: AsyncSession) -> None:
+    """Flush inside a bound UoW; otherwise preserve the standalone commit API."""
+    if _BOUND_REPOSITORY_SESSION.get() is session:
+        await session.flush()
+    else:
+        await session.commit()
 
 
 def content_expiry_at(now: datetime | None = None, *, retention_days: int | None = None) -> datetime:
@@ -459,6 +500,10 @@ async def init_db() -> None:
             "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS conversation_generation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS lease_token VARCHAR(64)",
             "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            (
+                "UPDATE followup_jobs SET status = 'pending', lease_token = NULL "
+                "WHERE status = 'processing' AND lease_expires_at IS NULL"
+            ),
             "CREATE INDEX IF NOT EXISTS ix_followup_jobs_lease_expires_at ON followup_jobs (lease_expires_at)",
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS outcome JSONB",
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ",
@@ -540,7 +585,7 @@ async def get_or_create_conversation_record(
     identity_hash_key: str,
 ) -> Conversation:
     identity_hash = conversation_identity_hash(channel, platform_user_id, identity_hash_key)
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             select(Conversation).where(
                 Conversation.channel == channel,
@@ -587,7 +632,7 @@ async def get_or_create_conversation_record(
         else:
             conversation.chat_id = chat_id
             conversation.username = username
-        await session.commit()
+        await finish_repository_write(session)
         await session.refresh(conversation)
         return conversation
 
@@ -600,7 +645,7 @@ async def append_message(
     retention_days: int | None = None,
 ) -> ConversationMessage:
     redaction = redact_with_audit(content)
-    async with Session() as session:
+    async with repository_session() as session:
         message = ConversationMessage(
             conversation_id=conversation_id,
             role=role,
@@ -610,14 +655,14 @@ async def append_message(
             expires_at=content_expiry_at(retention_days=retention_days),
         )
         session.add(message)
-        await session.commit()
+        await finish_repository_write(session)
         await session.refresh(message)
         return message
 
 
 async def load_history(conversation_id: int) -> list[tuple[str, str]]:
     now = datetime.now(UTC)
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             select(ConversationMessage)
             .where(
@@ -633,7 +678,7 @@ async def load_history(conversation_id: int) -> list[tuple[str, str]]:
 async def load_model_history(conversation_id: int) -> list[tuple[str, str]]:
     """Load only active pre-redacted history for provider-bound context."""
     now = datetime.now(UTC)
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             select(ConversationMessage)
             .where(
@@ -654,7 +699,7 @@ async def load_model_history(conversation_id: int) -> list[tuple[str, str]]:
 
 async def load_active_contact_points(aid_request_id: int) -> list[ContactPoint]:
     now = datetime.now(UTC)
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             select(ContactPoint).where(
                 ContactPoint.aid_request_id == aid_request_id,
@@ -668,14 +713,14 @@ async def load_active_contact_points(aid_request_id: int) -> list[ContactPoint]:
 async def record_event(
     conversation_id: int, kind: str, payload: str = "", audit: dict[str, Any] | None = None
 ) -> None:
-    async with Session() as session:
+    async with repository_session() as session:
         session.add(Event(conversation_id=conversation_id, kind=kind, payload=payload[:1200], audit=audit or {}))
-        await session.commit()
+        await finish_repository_write(session)
 
 
 async def record_agent_run(conversation_id: int, agent_name: str, audit: dict[str, Any]) -> None:
     safe_audit = sanitize_agent_audit(audit)
-    async with Session() as session:
+    async with repository_session() as session:
         session.add(
             AgentRun(
                 conversation_id=conversation_id,
@@ -685,11 +730,11 @@ async def record_agent_run(conversation_id: int, agent_name: str, audit: dict[st
                 audit=safe_audit,
             )
         )
-        await session.commit()
+        await finish_repository_write(session)
 
 
 async def record_risk_assessment(conversation_id: int, assessment: RiskAssessment) -> None:
-    async with Session() as session:
+    async with repository_session() as session:
         session.add(
             RiskAssessmentRecord(
                 conversation_id=conversation_id,
@@ -700,7 +745,7 @@ async def record_risk_assessment(conversation_id: int, assessment: RiskAssessmen
                 rationale=assessment.rationale,
             )
         )
-        await session.commit()
+        await finish_repository_write(session)
 
 
 async def record_action(
@@ -710,7 +755,7 @@ async def record_action(
     audit: dict[str, Any] | None = None,
     effect_key: str | None = None,
 ) -> None:
-    async with Session() as session:
+    async with repository_session() as session:
         values = {
             "conversation_id": conversation_id,
             "kind": kind,
@@ -726,7 +771,7 @@ async def record_action(
                 .values(**values)
                 .on_conflict_do_nothing(index_elements=(ActionExecution.effect_key,))
             )
-        await session.commit()
+        await finish_repository_write(session)
 
 
 async def claim_callback_execution(
@@ -739,7 +784,7 @@ async def claim_callback_execution(
     callback_slot = "keyboard-slot"
     now = datetime.now(UTC)
     lease_token = uuid4().hex
-    async with Session() as session:
+    async with repository_session() as session:
         statement = (
             postgres_insert(CallbackExecution)
             .values(
@@ -772,7 +817,7 @@ async def claim_callback_execution(
             .returning(CallbackExecution.lease_token)
         )
         result = await session.execute(statement)
-        await session.commit()
+        await finish_repository_write(session)
         return result.scalar_one_or_none()
 
 
@@ -785,7 +830,7 @@ async def complete_callback_execution(
     del callback_id
     source_message_id = str(message_id) if message_id is not None else "missing"
     callback_slot = "keyboard-slot"
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             update(CallbackExecution)
             .where(
@@ -797,7 +842,7 @@ async def complete_callback_execution(
             )
             .values(status="completed", lease_token=None, lease_expires_at=None)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.rowcount == 1
 
 
@@ -810,7 +855,7 @@ async def fail_callback_execution(
     del callback_id
     source_message_id = str(message_id) if message_id is not None else "missing"
     callback_slot = "keyboard-slot"
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             update(CallbackExecution)
             .where(
@@ -822,15 +867,24 @@ async def fail_callback_execution(
             )
             .values(status="failed", lease_token=None, lease_expires_at=None)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.rowcount == 1
 
 
-async def claim_text_execution(conversation_id: int, message_id: int | None) -> str | None:
-    source_message_id = str(message_id) if message_id is not None else "missing"
+def _execution_storage_key(message_id: InboundExecutionKey | int | None) -> str:
+    if isinstance(message_id, InboundExecutionKey):
+        return message_id.storage_key
+    return InboundExecutionKey.message(message_id).storage_key
+
+
+async def claim_text_execution(
+    conversation_id: int,
+    message_id: InboundExecutionKey | int | None,
+) -> str | None:
+    source_message_id = _execution_storage_key(message_id)
     now = datetime.now(UTC)
     lease_token = uuid4().hex
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             postgres_insert(InboundTextExecution)
             .values(
@@ -860,13 +914,17 @@ async def claim_text_execution(conversation_id: int, message_id: int | None) -> 
             )
             .returning(InboundTextExecution.lease_token)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.scalar_one_or_none()
 
 
-async def complete_text_execution(conversation_id: int, message_id: int | None, lease_token: str) -> bool:
-    source_message_id = str(message_id) if message_id is not None else "missing"
-    async with Session() as session:
+async def complete_text_execution(
+    conversation_id: int,
+    message_id: InboundExecutionKey | int | None,
+    lease_token: str,
+) -> bool:
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
         result = await session.execute(
             update(InboundTextExecution)
             .where(
@@ -877,19 +935,19 @@ async def complete_text_execution(conversation_id: int, message_id: int | None, 
             )
             .values(status="completed", lease_token=None, lease_expires_at=None)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.rowcount == 1
 
 
 async def save_text_execution_outcome(
     conversation_id: int,
-    message_id: int | None,
+    message_id: InboundExecutionKey | int | None,
     lease_token: str,
     outcome: dict[str, Any],
 ) -> bool:
     """Persist the deterministic rendered turn before the inbound claim completes."""
-    source_message_id = str(message_id) if message_id is not None else "missing"
-    async with Session() as session:
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
         result = await session.execute(
             update(InboundTextExecution)
             .where(
@@ -898,18 +956,23 @@ async def save_text_execution_outcome(
                 InboundTextExecution.status == "processing",
                 InboundTextExecution.lease_token == lease_token,
             )
-            .values(outcome=outcome)
+            .values(
+                outcome=outcome,
+                status="completed",
+                lease_token=None,
+                lease_expires_at=None,
+            )
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.rowcount == 1
 
 
 async def load_text_execution_outcome(
     conversation_id: int,
-    message_id: int | None,
+    message_id: InboundExecutionKey | int | None,
 ) -> tuple[dict[str, Any], bool] | None:
-    source_message_id = str(message_id) if message_id is not None else "missing"
-    async with Session() as session:
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
         result = await session.execute(
             select(InboundTextExecution.outcome, InboundTextExecution.delivered_at).where(
                 InboundTextExecution.conversation_id == conversation_id,
@@ -924,27 +987,34 @@ async def load_text_execution_outcome(
         return outcome, delivered_at is not None
 
 
-async def acknowledge_text_execution_outcome(conversation_id: int, message_id: int | None) -> None:
-    source_message_id = str(message_id) if message_id is not None else "missing"
-    async with Session() as session:
+async def acknowledge_text_execution_outcome(
+    conversation_id: int,
+    message_id: InboundExecutionKey | int | None,
+) -> None:
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
         await session.execute(
             update(InboundTextExecution)
             .where(
                 InboundTextExecution.conversation_id == conversation_id,
                 InboundTextExecution.source_message_id == source_message_id,
                 InboundTextExecution.outcome.is_not(None),
+                InboundTextExecution.delivered_at.is_(None),
             )
             .values(delivered_at=func.now(), delivery_token=None, delivery_lease_expires_at=None)
         )
-        await session.commit()
+        await finish_repository_write(session)
 
 
-async def claim_text_execution_delivery(conversation_id: int, message_id: int | None) -> str | None:
+async def claim_text_execution_delivery(
+    conversation_id: int,
+    message_id: InboundExecutionKey | int | None,
+) -> str | None:
     """Lease one durable outbox turn before handing it to Telegram."""
-    source_message_id = str(message_id) if message_id is not None else "missing"
+    source_message_id = _execution_storage_key(message_id)
     now = datetime.now(UTC)
     token = uuid4().hex
-    async with Session() as session:
+    async with repository_session() as session:
         result = await session.execute(
             update(InboundTextExecution)
             .where(
@@ -954,6 +1024,7 @@ async def claim_text_execution_delivery(conversation_id: int, message_id: int | 
                 InboundTextExecution.delivered_at.is_(None),
                 or_(
                     InboundTextExecution.delivery_token.is_(None),
+                    InboundTextExecution.delivery_lease_expires_at.is_(None),
                     InboundTextExecution.delivery_lease_expires_at <= now,
                 ),
             )
@@ -963,17 +1034,17 @@ async def claim_text_execution_delivery(conversation_id: int, message_id: int | 
             )
             .returning(InboundTextExecution.delivery_token)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.scalar_one_or_none()
 
 
 async def release_text_execution_delivery(
     conversation_id: int,
-    message_id: int | None,
+    message_id: InboundExecutionKey | int | None,
     delivery_token: str,
 ) -> bool:
-    source_message_id = str(message_id) if message_id is not None else "missing"
-    async with Session() as session:
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
         result = await session.execute(
             update(InboundTextExecution)
             .where(
@@ -984,13 +1055,17 @@ async def release_text_execution_delivery(
             )
             .values(delivery_token=None, delivery_lease_expires_at=None)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.rowcount == 1
 
 
-async def fail_text_execution(conversation_id: int, message_id: int | None, lease_token: str) -> bool:
-    source_message_id = str(message_id) if message_id is not None else "missing"
-    async with Session() as session:
+async def fail_text_execution(
+    conversation_id: int,
+    message_id: InboundExecutionKey | int | None,
+    lease_token: str,
+) -> bool:
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
         result = await session.execute(
             update(InboundTextExecution)
             .where(
@@ -1001,7 +1076,7 @@ async def fail_text_execution(conversation_id: int, message_id: int | None, leas
             )
             .values(status="failed", lease_token=None, lease_expires_at=None)
         )
-        await session.commit()
+        await finish_repository_write(session)
         return result.rowcount == 1
 
 
@@ -1014,7 +1089,7 @@ async def create_escalation(conversation_id: int, request: EscalationRequest) ->
         "reason": request.reason,
         "request_key": request.request_key,
     }
-    async with Session() as session:
+    async with repository_session() as session:
         if request.request_key is None:
             escalation = Escalation(**values)
             session.add(escalation)
@@ -1035,13 +1110,13 @@ async def create_escalation(conversation_id: int, request: EscalationRequest) ->
                 escalation = await session.get(Escalation, escalation_id)
                 if escalation is None:
                     raise LookupError(f"escalation {escalation_id} is missing")
-        await session.commit()
+        await finish_repository_write(session)
         return escalation
 
 
 async def purge_expired_content(now: datetime | None = None) -> int:
     now = now or datetime.now(UTC)
-    async with Session() as session:
+    async with repository_session() as session:
         messages = await session.execute(
             select(ConversationMessage).where(
                 or_(ConversationMessage.expires_at.is_(None), ConversationMessage.expires_at <= now)
@@ -1052,7 +1127,7 @@ async def purge_expired_content(now: datetime | None = None) -> int:
         items = [*messages.scalars(), *contacts.scalars()]
         for item in items:
             await session.delete(item)
-        await session.commit()
+        await finish_repository_write(session)
         return len(items)
 
 
@@ -1062,7 +1137,7 @@ async def delete_conversation_data(conversation_id: int) -> None:
     No post-delete event is retained: the deletion confirmation is intentionally
     non-persistent so it cannot recreate a conversation identity.
     """
-    async with Session() as session:
+    async with repository_session() as session:
         get_conversation = getattr(session, "get", None)
         if get_conversation is not None:
             conversation = await get_conversation(Conversation, conversation_id, with_for_update=True)
@@ -1093,11 +1168,11 @@ async def delete_conversation_data(conversation_id: int) -> None:
         await session.execute(delete(Escalation).where(Escalation.conversation_id == conversation_id))
         await session.execute(delete(Event).where(Event.conversation_id == conversation_id))
         await session.execute(delete(Conversation).where(Conversation.id == conversation_id))
-        await session.commit()
+        await finish_repository_write(session)
 
 
 async def cancel_followup_reminders(conversation_id: int) -> None:
-    async with Session() as session:
+    async with repository_session() as session:
         await session.get(Conversation, conversation_id, with_for_update=True)
         await session.execute(
             delete(FollowupJob).where(
@@ -1105,4 +1180,4 @@ async def cancel_followup_reminders(conversation_id: int) -> None:
                 FollowupJob.status.in_(("pending", "processing")),
             )
         )
-        await session.commit()
+        await finish_repository_write(session)
