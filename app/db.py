@@ -119,6 +119,8 @@ class Conversation(Base):
     pending_city: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pending_district: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pending_offer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     human_handoff: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -179,11 +181,13 @@ class AgentRun(Base):
 
 class ActionExecution(Base):
     __tablename__ = "action_executions"
+    __table_args__ = (UniqueConstraint("effect_key", name="uq_action_executions_effect_key"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
     kind: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32))
+    effect_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     audit: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -221,6 +225,8 @@ class InboundTextExecution(Base):
     status: Mapped[str] = mapped_column(String(16), default="processing", index=True)
     lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    outcome: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -269,6 +275,7 @@ class FollowupJob(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"), index=True)
+    conversation_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     aid_request_id: Mapped[int | None] = mapped_column(ForeignKey("aid_requests.id"), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(32), index=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
@@ -404,9 +411,24 @@ async def init_db() -> None:
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_city VARCHAR(120)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_district VARCHAR(120)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_offer VARCHAR(64)",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE action_executions ADD COLUMN IF NOT EXISTS effect_key VARCHAR(128)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_action_executions_effect_key ON action_executions (effect_key)",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS redacted_content TEXT",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+            (
+                "UPDATE conversation_messages SET expires_at = created_at + "
+                f"make_interval(days => {settings.message_retention_days}) WHERE expires_at IS NULL"
+            ),
+            (
+                "UPDATE contact_points SET expires_at = created_at + "
+                f"make_interval(days => {settings.message_retention_days}) WHERE expires_at IS NULL"
+            ),
+            "ALTER TABLE followup_jobs ADD COLUMN IF NOT EXISTS conversation_generation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS outcome JSONB",
+            "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ",
             "ALTER TABLE events ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE escalations ADD COLUMN IF NOT EXISTS cause VARCHAR(48) NOT NULL DEFAULT 'safety'",
             "ALTER TABLE escalations ALTER COLUMN level DROP NOT NULL",
@@ -533,7 +555,8 @@ async def load_history(conversation_id: int) -> list[tuple[str, str]]:
             select(ConversationMessage)
             .where(
                 ConversationMessage.conversation_id == conversation_id,
-                or_(ConversationMessage.expires_at.is_(None), ConversationMessage.expires_at > now),
+                ConversationMessage.expires_at.is_not(None),
+                ConversationMessage.expires_at > now,
             )
             .order_by(ConversationMessage.id)
         )
@@ -548,7 +571,8 @@ async def load_model_history(conversation_id: int) -> list[tuple[str, str]]:
             select(ConversationMessage)
             .where(
                 ConversationMessage.conversation_id == conversation_id,
-                or_(ConversationMessage.expires_at.is_(None), ConversationMessage.expires_at > now),
+                ConversationMessage.expires_at.is_not(None),
+                ConversationMessage.expires_at > now,
             )
             .order_by(ConversationMessage.id)
         )
@@ -567,7 +591,8 @@ async def load_active_contact_points(aid_request_id: int) -> list[ContactPoint]:
         result = await session.execute(
             select(ContactPoint).where(
                 ContactPoint.aid_request_id == aid_request_id,
-                or_(ContactPoint.expires_at.is_(None), ContactPoint.expires_at > now),
+                ContactPoint.expires_at.is_not(None),
+                ContactPoint.expires_at > now,
             )
         )
         return list(result.scalars())
@@ -612,10 +637,28 @@ async def record_risk_assessment(conversation_id: int, assessment: RiskAssessmen
 
 
 async def record_action(
-    conversation_id: int, kind: str, status: str, audit: dict[str, Any] | None = None
+    conversation_id: int,
+    kind: str,
+    status: str,
+    audit: dict[str, Any] | None = None,
+    effect_key: str | None = None,
 ) -> None:
     async with Session() as session:
-        session.add(ActionExecution(conversation_id=conversation_id, kind=kind, status=status, audit=audit or {}))
+        values = {
+            "conversation_id": conversation_id,
+            "kind": kind,
+            "status": status,
+            "audit": audit or {},
+            "effect_key": effect_key,
+        }
+        if effect_key is None:
+            session.add(ActionExecution(**values))
+        else:
+            await session.execute(
+                postgres_insert(ActionExecution)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=(ActionExecution.effect_key,))
+            )
         await session.commit()
 
 
@@ -771,6 +814,64 @@ async def complete_text_execution(conversation_id: int, message_id: int | None, 
         return result.rowcount == 1
 
 
+async def save_text_execution_outcome(
+    conversation_id: int,
+    message_id: int | None,
+    lease_token: str,
+    outcome: dict[str, Any],
+) -> bool:
+    """Persist the deterministic rendered turn before the inbound claim completes."""
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.status == "processing",
+                InboundTextExecution.lease_token == lease_token,
+            )
+            .values(outcome=outcome)
+        )
+        await session.commit()
+        return result.rowcount == 1
+
+
+async def load_text_execution_outcome(
+    conversation_id: int,
+    message_id: int | None,
+) -> tuple[dict[str, Any], bool] | None:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        result = await session.execute(
+            select(InboundTextExecution.outcome, InboundTextExecution.delivered_at).where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.outcome.is_not(None),
+            )
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        outcome, delivered_at = row
+        return outcome, delivered_at is not None
+
+
+async def acknowledge_text_execution_outcome(conversation_id: int, message_id: int | None) -> None:
+    source_message_id = str(message_id) if message_id is not None else "missing"
+    async with Session() as session:
+        await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.outcome.is_not(None),
+            )
+            .values(delivered_at=func.now())
+        )
+        await session.commit()
+
+
 async def fail_text_execution(conversation_id: int, message_id: int | None, lease_token: str) -> bool:
     source_message_id = str(message_id) if message_id is not None else "missing"
     async with Session() as session:
@@ -866,7 +967,7 @@ async def cancel_followup_reminders(conversation_id: int) -> None:
         await session.execute(
             delete(FollowupJob).where(
                 FollowupJob.conversation_id == conversation_id,
-                FollowupJob.status == "pending",
+                FollowupJob.status.in_(("pending", "processing")),
             )
         )
         await session.commit()

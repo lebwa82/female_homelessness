@@ -137,6 +137,8 @@ async def test_postgres_update_mutates_the_supplied_record_in_place(monkeypatch:
         pending_city=None,
         pending_district=None,
         pending_offer=None,
+        generation=0,
+        version=0,
     )
 
     class SessionDouble:
@@ -146,9 +148,9 @@ async def test_postgres_update_mutates_the_supplied_record_in_place(monkeypatch:
         async def __aexit__(self, *args):  # type: ignore[no-untyped-def]
             return None
 
-        async def get(self, model, record_id):  # type: ignore[no-untyped-def]
-            assert record_id == 1
-            return row
+        async def execute(self, statement):  # type: ignore[no-untyped-def]
+            assert "FOR UPDATE" in str(statement)
+            return SimpleNamespace(scalar_one_or_none=lambda: row)
 
         async def commit(self) -> None:
             return None
@@ -171,6 +173,7 @@ async def test_postgres_update_mutates_the_supplied_record_in_place(monkeypatch:
     )
 
     assert updated is record
+    assert record.version == 1
     assert record.state == "open_conversation"
     assert record.need == "housing"
     assert record.pending_aid_id == "hostel_3_nights"

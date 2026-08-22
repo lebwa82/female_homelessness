@@ -49,11 +49,11 @@ class FailAfterHumanEscalationStore(InMemoryConversationStore):
         super().__init__()
         self._fail_handoff_audit = True
 
-    async def record_action(self, record, kind, status, audit=None) -> None:  # type: ignore[no-untyped-def]
+    async def record_action(self, record, kind, status, audit=None, effect_key=None) -> None:  # type: ignore[no-untyped-def]
         if kind == "human_handoff" and self._fail_handoff_audit:
             self._fail_handoff_audit = False
             raise RuntimeError("simulated post-escalation failure")
-        await super().record_action(record, kind, status, audit)
+        await super().record_action(record, kind, status, audit, effect_key)
 
 
 def identity(text: str = "", message_id: int | None = 303) -> IncomingMessage:

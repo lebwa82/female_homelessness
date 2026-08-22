@@ -9,6 +9,8 @@ from uuid import uuid4
 from app import db
 from app.config import settings
 from app.domain import (
+    AgentTurn,
+    Choice,
     EscalationCause,
     EscalationRequest,
     IncomingMessage,
@@ -32,6 +34,8 @@ class ConversationRecord:
     pending_city: str | None = None
     pending_district: str | None = None
     pending_offer: str | None = None
+    generation: int = 0
+    version: int = 0
 
 
 @dataclass
@@ -75,6 +79,7 @@ class StoredFollowupJob:
     due_at: datetime
     kind: str = "followup"
     status: str = "pending"
+    conversation_generation: int = 0
 
 
 @dataclass
@@ -82,6 +87,12 @@ class StoredCallbackClaim:
     status: str
     lease_token: str | None
     lease_expires_at: datetime | None
+
+
+@dataclass
+class StoredTurnOutcome:
+    turn: AgentTurn
+    delivered: bool = False
 
 
 @dataclass
@@ -94,8 +105,10 @@ class InMemoryConversationStore:
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
     risk_assessments: list[tuple[int, RiskAssessment]] = field(default_factory=list)
     actions: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
+    action_effect_keys: dict[str, int] = field(default_factory=dict)
     callback_claims: dict[tuple[int, str, str], StoredCallbackClaim] = field(default_factory=dict)
     text_claims: dict[tuple[int, str], StoredCallbackClaim] = field(default_factory=dict)
+    text_outcomes: dict[tuple[int, str], StoredTurnOutcome] = field(default_factory=dict)
     _ids: Any = field(default_factory=lambda: count(1), repr=False)
 
     async def ensure(self, incoming: IncomingMessage) -> ConversationRecord:
@@ -120,6 +133,7 @@ class InMemoryConversationStore:
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
         for key, value in values.items():
             setattr(record, key, value)
+        record.version += 1
         return record
 
     async def append_message(
@@ -147,8 +161,17 @@ class InMemoryConversationStore:
         self.risk_assessments.append((record.id, assessment))
 
     async def record_action(
-        self, record: ConversationRecord, kind: str, status: str, audit: dict[str, Any] | None = None
+        self,
+        record: ConversationRecord,
+        kind: str,
+        status: str,
+        audit: dict[str, Any] | None = None,
+        effect_key: str | None = None,
     ) -> None:
+        if effect_key is not None:
+            if effect_key in self.action_effect_keys:
+                return
+            self.action_effect_keys[effect_key] = record.id
         self.actions.append((record.id, kind, status, audit or {}))
 
     async def claim_callback(
@@ -245,6 +268,7 @@ class InMemoryConversationStore:
                 record.id,
                 request.id,
                 datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
+                conversation_generation=record.generation,
             )
         )
         return request
@@ -277,6 +301,34 @@ class InMemoryConversationStore:
             claim.lease_token = None
             claim.lease_expires_at = None
 
+    async def save_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+        lease_token: str,
+        turn: AgentTurn,
+    ) -> None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        claim = self.text_claims.get(key)
+        if claim is None or claim.status != "processing" or claim.lease_token != lease_token:
+            raise RuntimeError("text_outcome_claim_lost")
+        self.text_outcomes[key] = StoredTurnOutcome(turn=turn)
+
+    async def load_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+    ) -> tuple[AgentTurn, bool] | None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        outcome = self.text_outcomes.get(key)
+        return (outcome.turn, outcome.delivered) if outcome is not None else None
+
+    async def acknowledge_text_outcome(self, record: ConversationRecord, message_id: int | None) -> None:
+        key = (record.id, str(message_id) if message_id is not None else "missing")
+        outcome = self.text_outcomes.get(key)
+        if outcome is not None:
+            outcome.delivered = True
+
     async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
         key = (record.id, str(message_id) if message_id is not None else "missing")
         claim = self.text_claims.get(key)
@@ -292,9 +344,15 @@ class InMemoryConversationStore:
         self.followup_jobs = [item for item in self.followup_jobs if item.aid_request_id not in request_ids]
         self.callback_claims = {key: claim for key, claim in self.callback_claims.items() if key[0] != record.id}
         self.text_claims = {key: claim for key, claim in self.text_claims.items() if key[0] != record.id}
+        self.text_outcomes = {key: outcome for key, outcome in self.text_outcomes.items() if key[0] != record.id}
         self.agent_runs = [item for item in self.agent_runs if item[0] != record.id]
         self.risk_assessments = [item for item in self.risk_assessments if item[0] != record.id]
         self.actions = [item for item in self.actions if item[0] != record.id]
+        self.action_effect_keys = {
+            key: conversation_id
+            for key, conversation_id in self.action_effect_keys.items()
+            if conversation_id != record.id
+        }
         self.escalations = [item for item in self.escalations if item.conversation_id != record.id]
         self.conversations.pop(record.platform_user_id, None)
 
@@ -302,7 +360,7 @@ class InMemoryConversationStore:
         self.followup_jobs = [
             job
             for job in self.followup_jobs
-            if not (job.conversation_id == record.id and job.status == "pending")
+            if not (job.conversation_id == record.id and job.status in {"pending", "processing"})
         ]
 
 
@@ -333,14 +391,22 @@ class PostgresConversationStore:
 
     async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
         async with db.Session() as session:
-            row = await session.get(db.Conversation, record.id)
+            result = await session.execute(
+                db.select(db.Conversation)
+                .where(db.Conversation.id == record.id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
             if row is None:
                 raise LookupError(f"conversation {record.id} is missing")
+            if row.version != record.version:
+                raise RuntimeError("conversation_version_conflict")
             for key, value in values.items():
                 if key == "need":
                     row.requested_help = value
                 else:
                     setattr(row, key, value)
+            row.version += 1
             await session.commit()
             await session.refresh(row)
             updated = self._record_from_row(row)
@@ -365,9 +431,17 @@ class PostgresConversationStore:
         await db.record_risk_assessment(record.id, assessment)
 
     async def record_action(
-        self, record: ConversationRecord, kind: str, status: str, audit: dict[str, Any] | None = None
+        self,
+        record: ConversationRecord,
+        kind: str,
+        status: str,
+        audit: dict[str, Any] | None = None,
+        effect_key: str | None = None,
     ) -> None:
-        await db.record_action(record.id, kind, status, audit)
+        if effect_key is None:
+            await db.record_action(record.id, kind, status, audit)
+            return
+        await db.record_action(record.id, kind, status, audit, effect_key)
 
     async def claim_callback(
         self,
@@ -454,6 +528,7 @@ class PostgresConversationStore:
             session.add(
                 db.FollowupJob(
                     conversation_id=record.id,
+                    conversation_generation=record.generation,
                     aid_request_id=request.id,
                     kind="followup",
                     due_at=datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
@@ -483,6 +558,49 @@ class PostgresConversationStore:
     async def complete_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
         await db.complete_text_execution(record.id, message_id, lease_token)
 
+    async def save_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+        lease_token: str,
+        turn: AgentTurn,
+    ) -> None:
+        if not await db.save_text_execution_outcome(
+            record.id,
+            message_id,
+            lease_token,
+            {
+                "text": turn.text,
+                "choices": [choice.model_dump(mode="json") for choice in turn.choices],
+            },
+        ):
+            raise RuntimeError("text_outcome_claim_lost")
+
+    async def load_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+    ) -> tuple[AgentTurn, bool] | None:
+        stored = await db.load_text_execution_outcome(record.id, message_id)
+        if stored is None:
+            return None
+        outcome, delivered = stored
+        try:
+            text = outcome["text"]
+            choices = outcome["choices"]
+            if not isinstance(text, str) or not isinstance(choices, list):
+                raise TypeError
+            turn = AgentTurn(
+                text=text,
+                choices=tuple(Choice.model_validate(choice) for choice in choices),
+            )
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError("text_outcome_invalid") from None
+        return turn, delivered
+
+    async def acknowledge_text_outcome(self, record: ConversationRecord, message_id: int | None) -> None:
+        await db.acknowledge_text_execution_outcome(record.id, message_id)
+
     async def fail_text(self, record: ConversationRecord, message_id: int | None, lease_token: str) -> None:
         await db.fail_text_execution(record.id, message_id, lease_token)
 
@@ -501,4 +619,6 @@ class PostgresConversationStore:
             pending_city=row.pending_city,
             pending_district=row.pending_district,
             pending_offer=row.pending_offer,
+            generation=row.generation,
+            version=row.version,
         )

@@ -114,19 +114,18 @@ _EXTERNAL_COMPLETION_FAMILIES = (
         frozenset({"подключен", "подключена", "подключены", "подключил", "подключила", "подключили", "позвал", "позвала", "позвали", "связались"}),
     ),
 )
-_EXTERNAL_COMPLETION_PHRASES = (
-    ("с", "вами", "свяжутся"),
-    ("с", "тобой", "свяжутся"),
-    ("вас", "уже", "записали"),
-    ("вы", "уже", "записаны"),
-    ("я", "уже", "вызвала", "специалистку"),
-    ("я", "передаю", "вашу", "заявку", "специалистке"),
-    ("специалистка", "вам", "позвонит"),
-    ("я", "сейчас", "отправлю", "заявку"),
-    ("мы", "свяжемся", "завтра"),
-)
 _NON_COMPLETION_TOKENS = frozenset({"не", "может", "могут", "могу", "можем", "будет", "будут", "если"})
 _MAX_COMPLETION_TOKEN_GAP = 6
+_OPERATIONAL_ACTORS = frozenset({
+    "я", "мы", "оператор", "оператора", "специалист", "специалиста", "специалистка", "специалистке",
+    "человек", "человека", "вам", "вас", "вы", "тобой", "тебе", "с", "вами",
+})
+_OPERATIONAL_ACTIONS = frozenset({
+    "передали", "передал", "передала", "передаю", "отправили", "отправил", "отправила", "отправлю",
+    "оформили", "оформил", "оформила", "оформим", "записали", "записал", "записала",
+    "позвонит", "свяжутся", "свяжемся", "вызвали", "вызвал", "вызвала", "подключен", "подключена",
+    "подключили", "связались", "зарегистрировали", "зарегистрировал", "зарегистрировала",
+})
 
 
 def resolve_turn(context: PolicyContext) -> ResolvedTurn:
@@ -301,7 +300,7 @@ def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
 
 def _claims_external_action(draft: str) -> bool:
     tokens = _draft_tokens(draft)
-    return any(_contains_token_phrase(tokens, phrase) for phrase in _EXTERNAL_COMPLETION_PHRASES) or any(
+    return _contains_operational_claim(tokens) or any(
         _contains_completed_family(tokens, referents, completions)
         for referents, completions in _EXTERNAL_COMPLETION_FAMILIES
     )
@@ -322,12 +321,26 @@ def _draft_tokens(draft: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def _contains_token_phrase(tokens: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
-    width = len(phrase)
-    for index in range(len(tokens) - width + 1):
-        if tokens[index : index + width] != phrase:
+def _contains_operational_claim(tokens: tuple[str, ...]) -> bool:
+    """Detect bounded actor/action/referent claims across reviewed inflections.
+
+    This deliberately excludes infinitives: conditional or possibility language
+    (``может оформить``) remains conversational rather than a claim that work
+    has been performed or will definitely be performed.
+    """
+    for action_index, action in enumerate(tokens):
+        if action not in _OPERATIONAL_ACTIONS:
             continue
-        if not _has_noncompletion_context(tokens, index, index + width):
+        start = max(0, action_index - _MAX_COMPLETION_TOKEN_GAP)
+        end = min(len(tokens), action_index + _MAX_COMPLETION_TOKEN_GAP + 1)
+        nearby = tokens[start:end]
+        has_actor = bool(_OPERATIONAL_ACTORS.intersection(nearby))
+        has_referent = any(
+            referent in nearby
+            for referents, _ in _EXTERNAL_COMPLETION_FAMILIES
+            for referent in referents
+        )
+        if (has_actor or has_referent) and not _has_noncompletion_context(tokens, start, end):
             return True
     return False
 

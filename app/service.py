@@ -69,7 +69,7 @@ class ConversationService:
 
     async def start(self, incoming: IncomingMessage) -> AgentTurn:
         async with self._lock_for(incoming):
-            return await self._start(incoming)
+            return await self._bind_turn_to_current_record(incoming, await self._start(incoming))
 
     async def _start(self, incoming: IncomingMessage) -> AgentTurn:
         try:
@@ -78,22 +78,51 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - a failed inbound write must not pretend to have succeeded
             return self._persistence_unavailable_turn()
         if lease_token is None:
+            outcome = await self._replay_text_outcome(record, incoming.message_id)
+            if outcome is not None:
+                return outcome
             return self._turn(WELCOME, CONTINUE_CHOICES).model_copy(
-                update={"audit": {"skip_outbound_persistence": True}}
+                update={"audit": {"skip_outbound_persistence": True, "suppress_delivery": True}}
             )
         try:
+            outcome = await self._replay_text_outcome(record, incoming.message_id, lease_token)
+            if outcome is not None:
+                return outcome
             await self.store.append_message(record, "user", "/start", {"telegram_message_id": incoming.message_id})
-            await self.store.record_action(record, "started", "completed")
+            start_key = self._text_request_key(record, incoming.message_id, PolicyEffect.NONE)
+            await self.store.record_action(
+                record,
+                "started",
+                "completed",
+                effect_key=self._effect_key(start_key, "started"),
+            )
+            turn = self._turn(WELCOME, CONTINUE_CHOICES)
+            await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
             await self.store.complete_text(record, incoming.message_id, lease_token)
         except Exception:  # noqa: BLE001 - an uncommitted inbound update must be retryable
             await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
+            outcome = await self._replay_text_outcome(record, incoming.message_id)
+            if outcome is not None:
+                return outcome
             return self._persistence_unavailable_turn()
-        return self._turn(WELCOME, CONTINUE_CHOICES)
+        return turn
 
     async def record_outbound(self, incoming: IncomingMessage, turn: AgentTurn) -> None:
         async with self._lock_for(incoming):
-            record = await self.store.ensure(incoming)
+            # An outbound audit is never an identity-creating operation.  In
+            # particular, a delayed pre-delete turn must not recreate a record.
+            record = await self.store.get(incoming)
+            if record is None:
+                return
+            expected_id = turn.audit.get("conversation_id")
+            expected_generation = turn.audit.get("conversation_generation")
+            if (
+                (isinstance(expected_id, int) and record.id != expected_id)
+                or (isinstance(expected_generation, int) and record.generation != expected_generation)
+            ):
+                return
             await self.store.append_message(record, "assistant", turn.text, {"ui": {"choices": [choice.id for choice in turn.choices]}})
+            await self.store.acknowledge_text_outcome(record, incoming.message_id)
 
     async def claim_inbound(self, incoming: IncomingMessage) -> bool:
         """Claim a stateless command/media update so a Telegram retry has no side effect."""
@@ -126,7 +155,7 @@ class ConversationService:
 
     async def handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         async with self._lock_for(incoming):
-            return await self._handle_callback(incoming, callback_id)
+            return await self._bind_turn_to_current_record(incoming, await self._handle_callback(incoming, callback_id))
 
     async def _handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         record = await self.store.ensure(incoming)
@@ -186,6 +215,7 @@ class ConversationService:
                     choice_set=ChoiceSet.CONTACT_METHODS,
                     effect=PolicyEffect.START_PSYCHOLOGIST_REQUEST,
                 ),
+                request_key=request_key,
             )
         if callback_id == "location:skip":
             if record.state != ConversationState.COLLECTING_LOCATION.value:
@@ -269,7 +299,7 @@ class ConversationService:
 
     async def handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         async with self._lock_for(incoming):
-            return await self._handle_text(incoming)
+            return await self._bind_turn_to_current_record(incoming, await self._handle_text(incoming))
 
     async def _handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         try:
@@ -294,8 +324,16 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - truthful retry is safer than a partial turn
             return self._persistence_unavailable_turn()
         if lease_token is None:
-            return await self._state_turn(record)
+            outcome = await self._replay_text_outcome(record, incoming.message_id)
+            if outcome is not None:
+                return outcome
+            return (await self._state_turn(record)).model_copy(
+                update={"audit": {"skip_outbound_persistence": True, "suppress_delivery": True}}
+            )
         try:
+            outcome = await self._replay_text_outcome(record, incoming.message_id, lease_token)
+            if outcome is not None:
+                return outcome
             try:
                 pending_offer = SupportOffer(record.pending_offer) if record.pending_offer else None
                 signals = extract_signals(incoming.text, pending_offer=pending_offer)
@@ -316,23 +354,7 @@ class ConversationService:
                 audit["content_type"] = "contact_value"
             await self.store.append_message(record, "user", incoming.text, audit)
 
-            # Local critical signals are authoritative and run before any fallible PII,
-            # knowledge, or provider preparation.  This also prevents orphan diagnostics.
-            evaluation = _diagnostics_unavailable()
-            try:
-                history = await self.store.model_history(record)
-                knowledge_query = " ".join(content for role, content in history if role == "user")
-                verified_articles = find_verified_articles(knowledge_query)
-                evaluation = await self.gateway.evaluate(
-                    AgentContext(
-                        history=history,
-                        state=record.state,
-                        catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
-                        knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
-                    )
-                )
-            except Exception:  # noqa: BLE001 - diagnostics never alter the local safe route
-                evaluation = _diagnostics_unavailable()
+            evaluation = await self._evaluate_diagnostics(record)
             await self.store.record_agent_run(record, "safety", evaluation.safety_audit)
             await self.store.record_agent_run(record, "support", evaluation.support_audit)
             await self.store.record_risk(record, local_risk)
@@ -351,7 +373,13 @@ class ConversationService:
                     need=record.need,
                 )
             )
-            turn = await self._execute_resolved_turn(record, decision, local_risk)
+            request_key = self._text_request_key(record, incoming.message_id, decision.effect)
+            turn = await self._execute_resolved_turn(
+                record,
+                decision,
+                local_risk,
+                request_key=request_key,
+            )
             await self._record_policy_decision(
                 record,
                 state_before,
@@ -360,11 +388,16 @@ class ConversationService:
                 evaluation,
                 decision,
                 turn,
+                effect_key=self._effect_key(request_key, "policy_decision"),
             )
+            await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
             await self.store.complete_text(record, incoming.message_id, lease_token)
             return turn
         except Exception:  # noqa: BLE001 - retain a recoverable inbound claim on any partial turn
             await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
+            outcome = await self._replay_text_outcome(record, incoming.message_id)
+            if outcome is not None:
+                return outcome
             return self._persistence_unavailable_turn()
 
     async def _handle_persisted_critical(
@@ -379,17 +412,29 @@ class ConversationService:
         try:
             lease_token = await self.store.claim_text(record, incoming.message_id)
             if lease_token is None:
-                return self._render_resolved_turn(decision)
+                return await self._replay_text_outcome(record, incoming.message_id) or self._render_resolved_turn(decision)
+            outcome = await self._replay_text_outcome(record, incoming.message_id, lease_token)
+            if outcome is not None:
+                return outcome
             audit: dict[str, Any] = {"telegram_message_id": incoming.message_id}
             if record.state == ConversationState.COLLECTING_CONTACT_VALUE.value:
                 audit["content_type"] = "contact_value"
             await self.store.append_message(record, "user", incoming.text, audit)
-            evaluation = _diagnostics_unavailable()
+            # A successfully prepared critical turn still runs exactly the two
+            # diagnostic calls.  Their outputs are observed only; the canonical
+            # local crisis decision below remains authoritative.
+            evaluation = await self._evaluate_diagnostics(record)
             await self.store.record_agent_run(record, "safety", evaluation.safety_audit)
             await self.store.record_agent_run(record, "support", evaluation.support_audit)
             await self.store.record_risk(record, assessment)
             state_before = record.state
-            turn = await self._execute_resolved_turn(record, decision, assessment)
+            request_key = self._text_request_key(record, incoming.message_id, decision.effect)
+            turn = await self._execute_resolved_turn(
+                record,
+                decision,
+                assessment,
+                request_key=request_key,
+            )
             await self._record_policy_decision(
                 record,
                 state_before,
@@ -398,13 +443,36 @@ class ConversationService:
                 evaluation,
                 decision,
                 turn,
+                effect_key=self._effect_key(request_key, "policy_decision"),
             )
+            await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
             await self.store.complete_text(record, incoming.message_id, lease_token)
             return turn
         except Exception:  # noqa: BLE001 - never let PII/storage preparation suppress crisis copy
             if "lease_token" in locals() and lease_token is not None:
                 await self._fail_text_claim_safely(record, incoming.message_id, lease_token)
             return self._render_resolved_turn(decision)
+
+    async def _evaluate_diagnostics(self, record: ConversationRecord) -> AgentEvaluation:
+        """Return exactly one diagnostic pair, or an explicit unavailable pair.
+
+        Store/PII/knowledge preparation is deliberately complete before the
+        gateway is invoked, so a preparation failure creates zero provider work.
+        """
+        try:
+            history = await self.store.model_history(record)
+            knowledge_query = " ".join(content for role, content in history if role == "user")
+            verified_articles = find_verified_articles(knowledge_query)
+            return await self.gateway.evaluate(
+                AgentContext(
+                    history=history,
+                    state=record.state,
+                    catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
+                    knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
+                )
+            )
+        except Exception:  # noqa: BLE001 - diagnostics never alter the deterministic route
+            return _diagnostics_unavailable()
 
     async def _fail_text_claim_safely(
         self,
@@ -416,6 +484,25 @@ class ConversationService:
             await self.store.fail_text(record, message_id, lease_token)
         except Exception:  # noqa: BLE001 - original failure remains the truthful retry condition
             return
+
+    async def _replay_text_outcome(
+        self,
+        record: ConversationRecord,
+        message_id: int | None,
+        lease_token: str | None = None,
+    ) -> AgentTurn | None:
+        """Reuse a committed turn; acknowledge its claim if a failed lease was reclaimed."""
+        outcome = await self.store.load_text_outcome(record, message_id)
+        if outcome is None:
+            return None
+        turn, delivered = outcome
+        if lease_token is not None:
+            await self.store.complete_text(record, message_id, lease_token)
+        if delivered:
+            return turn.model_copy(
+                update={"audit": {**turn.audit, "skip_outbound_persistence": True, "suppress_delivery": True}}
+            )
+        return turn
 
     @staticmethod
     def _persistence_unavailable_turn() -> AgentTurn:
@@ -509,7 +596,12 @@ class ConversationService:
             pending_city=None,
             pending_district=None,
         )
-        await self.store.record_action(record, "create_aid_request", "completed")
+        await self.store.record_action(
+            record,
+            "create_aid_request",
+            "completed",
+            effect_key=self._effect_key(request_key, "create_aid_request"),
+        )
         if decision is not None:
             return self._render_resolved_turn(decision)
         return self._turn("Хорошо, запрос сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
@@ -520,31 +612,53 @@ class ConversationService:
         decision: ResolvedTurn,
         assessment: RiskAssessment | None = None,
         handoff_request: EscalationRequest | None = None,
+        request_key: str | None = None,
     ) -> AgentTurn:
         """Perform the side effects permitted by a policy-resolved turn."""
         for side_effect in decision.side_effects:
             if side_effect is PolicySideEffect.RECORD_SAFETY and assessment is not None:
-                await self.store.create_escalation(record, self._safety_escalation(assessment))
+                await self.store.create_escalation(record, self._safety_escalation(assessment, request_key))
             if side_effect is PolicySideEffect.COMPLETE_FOLLOWUP:
                 await self.store.cancel_pending_reminder(record)
                 await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
 
         if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
             await self._clear_abandoned_workflow(record)
-            await self.store.record_action(record, "critical_escalation", "completed")
+            await self.store.record_action(
+                record,
+                "critical_escalation",
+                "completed",
+                effect_key=self._effect_key(request_key, "critical_escalation"),
+            )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.HUMAN_HANDOFF:
+            escalation = handoff_request or EscalationRequest(
+                cause=EscalationCause.HUMAN_REQUEST,
+                reason="verified_signal",
+                request_key=request_key,
+            )
+            if escalation.request_key is None and request_key is not None:
+                escalation = escalation.model_copy(update={"request_key": request_key})
             await self.store.create_escalation(
                 record,
-                handoff_request
-                or EscalationRequest(cause=EscalationCause.HUMAN_REQUEST, reason="verified_signal"),
+                escalation,
             )
             await self._clear_abandoned_workflow(record)
-            await self.store.record_action(record, "human_handoff", "simulated")
+            await self.store.record_action(
+                record,
+                "human_handoff",
+                "simulated",
+                effect_key=self._effect_key(escalation.request_key or request_key, "human_handoff"),
+            )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.CANCEL_WORKFLOW:
             await self._clear_abandoned_workflow(record)
-            await self.store.record_action(record, "workflow_cancelled", "completed")
+            await self.store.record_action(
+                record,
+                "workflow_cancelled",
+                "completed",
+                effect_key=self._effect_key(request_key, "workflow_cancelled"),
+            )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.OFFER_AID and decision.need is not None:
             await self.store.update(
@@ -577,7 +691,12 @@ class ConversationService:
             )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.COMPLETE_CONTACT:
-            return await self._complete_pending_request(record, decision.workflow_value, decision=decision)
+            return await self._complete_pending_request(
+                record,
+                decision.workflow_value,
+                decision=decision,
+                request_key=request_key,
+            )
         if decision.effect is PolicyEffect.REPLAY_WORKFLOW:
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.CLOSE:
@@ -616,6 +735,7 @@ class ConversationService:
         evaluation: Any,
         decision: ResolvedTurn,
         turn: AgentTurn,
+        effect_key: str | None = None,
     ) -> None:
         await self.store.record_action(
             record,
@@ -642,6 +762,7 @@ class ConversationService:
                 "side_effects": [side_effect.value for side_effect in decision.side_effects],
                 "fallback_reason": decision.fallback_reason,
             },
+            effect_key=effect_key,
         )
 
     async def _human_turn(
@@ -693,13 +814,20 @@ class ConversationService:
         return await self._state_turn(record)
 
     @staticmethod
-    def _safety_escalation(assessment: RiskAssessment) -> EscalationRequest:
+    def _safety_escalation(assessment: RiskAssessment, request_key: str | None = None) -> EscalationRequest:
         return EscalationRequest(
             cause=EscalationCause.SAFETY,
             level=assessment.level,
             categories=assessment.categories,
             reason=assessment.rationale,
+            request_key=request_key,
         )
+
+    @staticmethod
+    def _text_request_key(record: ConversationRecord, message_id: int | None, effect: PolicyEffect) -> str:
+        source_message_id = str(message_id) if message_id is not None else "missing"
+        origin = f"{record.id}:{source_message_id}:{effect.value}".encode()
+        return f"text:{hashlib.sha256(origin).hexdigest()}"
 
     @staticmethod
     def _callback_request_key(record: ConversationRecord, callback_id: str, message_id: int | None) -> str:
@@ -707,10 +835,39 @@ class ConversationService:
         origin = f"{record.id}:{callback_id}:{source_message_id}".encode()
         return f"callback:{hashlib.sha256(origin).hexdigest()}"
 
+    @staticmethod
+    def _effect_key(request_key: str | None, kind: str) -> str | None:
+        """Bind an audit effect to the same immutable update key as its work."""
+        return f"{request_key}:{kind}" if request_key is not None else None
+
     def _lock_for(self, incoming: IncomingMessage) -> asyncio.Lock:
         return self._conversation_locks.setdefault(
             (incoming.channel, incoming.platform_user_id),
             asyncio.Lock(),
+        )
+
+    async def _bind_turn_to_current_record(self, incoming: IncomingMessage, turn: AgentTurn) -> AgentTurn:
+        """Bind a delivery audit to the original durable conversation identity.
+
+        A delete followed by a new inbound update can create a new identity for
+        the same platform user.  Old turns may never attach their audit to it.
+        """
+        if turn.audit.get("skip_outbound_persistence"):
+            return turn
+        try:
+            record = await self.store.get(incoming)
+        except Exception:  # noqa: BLE001 - delivery remains independently attempted
+            return turn
+        if record is None:
+            return turn.model_copy(update={"audit": {**turn.audit, "skip_outbound_persistence": True}})
+        return turn.model_copy(
+            update={
+                "audit": {
+                    **turn.audit,
+                    "conversation_id": record.id,
+                    "conversation_generation": record.generation,
+                }
+            }
         )
 
     @staticmethod

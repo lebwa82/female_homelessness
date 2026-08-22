@@ -36,13 +36,14 @@ async def test_fixture_replay_has_no_hard_failures_and_retains_all_cases() -> No
 
     assert report.hard_failures == ()
     assert report.diagnostic_deltas == ()
-    assert len(report.cases) == 57
+    assert len(report.cases) == 60
     assert {
         "suicide-direct-want-die",
         "suicide-direct-kill-self",
         "suicide-direct-self-harm-now",
         "suicide-direct-not-want-live-help",
     } <= {case.case_id for case in report.cases}
+    assert not report.soft_failures
 
 
 @pytest.mark.asyncio

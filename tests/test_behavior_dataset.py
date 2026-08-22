@@ -61,7 +61,7 @@ def test_dataset_has_required_coverage() -> None:
         "multi_turn",
     } <= {case.group for case in cases}
     assert all(case.version == 2 for case in cases)
-    assert {case.id for case in cases if case.initial.pending_offer is not None} == {
+    assert {
         "psychologist-considering-01",
         "psychologist-request-01",
         "psychologist-02",
@@ -73,7 +73,9 @@ def test_dataset_has_required_coverage() -> None:
         "psychologist-08",
         "psychologist-09",
         "multi-psychologist-request-01",
-    }
+        "soft-offer-consume",
+        "soft-offer-expire",
+    } <= {case.id for case in cases if case.initial.pending_offer is not None}
 
 
 def test_dataset_ids_are_unique() -> None:

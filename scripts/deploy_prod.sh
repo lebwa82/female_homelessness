@@ -34,6 +34,11 @@ staging_dir="${release_root}/.${REVISION}.staging.$$"
 release_dir="${release_root}/${REVISION}"
 next_link="${TARGET_DIR}.next"
 previous_target=""
+legacy_dir=""
+legacy_moved=0
+target_replaced=0
+activation_started=0
+database_url=""
 
 cleanup() {
   sudo rm -f "$ARCHIVE_PATH"
@@ -42,29 +47,68 @@ cleanup() {
 trap cleanup EXIT
 
 run_staged() {
-  # The root-only EnvironmentFile is sourced only inside this root shell.  Its
-  # values are never echoed, exported by the deploy client, or written to logs.
-  sudo bash -c '
-    set -euo pipefail
-    set -a
-    . "$1"
-    set +a
-    cd "$2"
-    shift 2
+  # A service EnvironmentFile is data, never shell input.  The isolated staged
+  # process receives only the required database value and a non-secret command
+  # path; no other root-only service values are inherited or printed.
+  sudo env -i \
+    PATH="$PATH" \
+    DATABASE_URL="$database_url" \
+    bash -c '
+    cd "$1"
+    shift
     exec "$@"
-  ' -- "$ENV_FILE" "$staging_dir" "$@"
+  ' -- "$staging_dir" "$@"
 }
 
 rollback() {
-  if [[ -n "$previous_target" ]]; then
+  trap - ERR
+  set +e
+  if [[ "$legacy_moved" -eq 1 && -n "$legacy_dir" ]]; then
+    # The first activation converted a real project directory.  Restore that
+    # exact directory rather than leaving a symlink to its emergency location.
+    sudo rm -f "$TARGET_DIR"
+    sudo mv -Tf "$legacy_dir" "$TARGET_DIR"
+  elif [[ "$target_replaced" -eq 1 && -n "$previous_target" ]]; then
     sudo ln -sfn "$previous_target" "$next_link"
     sudo mv -Tf "$next_link" "$TARGET_DIR"
-    sudo systemctl restart women-help-bot || true
   fi
+  sudo systemctl restart women-help-bot || true
+}
+
+activation_error() {
+  local status="$?"
+  if [[ "$activation_started" -eq 1 ]]; then
+    echo "Activation failed; restoring the previous release." >&2
+    rollback
+  fi
+  exit "$status"
+}
+trap activation_error ERR
+
+read_database_url() {
+  # The strict grammar intentionally permits one unquoted, non-empty URL only.
+  # It is a reversible operational ruling: production EnvironmentFile values
+  # needing shell quotes must be percent-encoded before deployment.
+  sudo awk '
+    BEGIN { found = 0 }
+    /^[[:space:]]*DATABASE_URL=/ {
+      found += 1
+      if (found != 1) exit 2
+      value = $0
+      sub(/^[[:space:]]*DATABASE_URL=/, "", value)
+      if (value == "" || value ~ /[[:space:]"\\]/ || index(value, "$") || index(value, "`") || index(value, sprintf("%c", 39))) exit 2
+      print value
+    }
+    END { if (found != 1) exit 2 }
+  ' "$ENV_FILE"
 }
 
 if ! sudo test -r "$ENV_FILE"; then
   echo "Refusing activation: root-only service EnvironmentFile is unavailable." >&2
+  exit 3
+fi
+if ! database_url="$(read_database_url)"; then
+  echo "Refusing activation: service EnvironmentFile has no safe database value." >&2
   exit 3
 fi
 
@@ -95,21 +139,23 @@ sudo mv "$staging_dir" "$release_dir"
 
 # Convert the original project directory to a release symlink once; later
 # activation is an atomic symlink replacement and can be rolled back.
+activation_started=1
 if [[ -e "$TARGET_DIR" && ! -L "$TARGET_DIR" ]]; then
   legacy_dir="${release_root}/legacy-before-${REVISION}"
-  sudo mv "$TARGET_DIR" "$legacy_dir"
   previous_target="$legacy_dir"
+  sudo mv "$TARGET_DIR" "$legacy_dir"
+  legacy_moved=1
 elif [[ -L "$TARGET_DIR" ]]; then
   previous_target="$(sudo readlink -f "$TARGET_DIR")"
 fi
 
 sudo ln -sfn "$release_dir" "$next_link"
 sudo mv -Tf "$next_link" "$TARGET_DIR"
-if ! sudo systemctl restart women-help-bot || ! sudo systemctl is-active --quiet women-help-bot; then
-  echo "Activation failed; restoring the previous release." >&2
-  rollback
-  exit 6
-fi
+target_replaced=1
+sudo systemctl restart women-help-bot
+sudo systemctl is-active --quiet women-help-bot
+activation_started=0
+trap - ERR
 
 echo "Deployment ${REVISION} activated after staged checks and PostgreSQL assurance."
 REMOTE_SCRIPT

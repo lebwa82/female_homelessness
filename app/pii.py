@@ -11,23 +11,20 @@ from typing import Any
 import tldextract
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
-from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
 
 NLP_CONFIGURATION = {
     "nlp_engine_name": "spacy",
     "models": [{"lang_code": "ru", "model_name": "ru_core_news_sm"}],
 }
 
-OPERATORS = {
-    "PERSON": OperatorConfig("replace", {"new_value": "[ЧЕЛОВЕК]"}),
-    "LOCATION": OperatorConfig("replace", {"new_value": "[ЛОКАЦИЯ]"}),
-    "PHONE_NUMBER": OperatorConfig("replace", {"new_value": "[ТЕЛЕФОН]"}),
-    "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "[EMAIL]"}),
-    "CREDIT_CARD": OperatorConfig("replace", {"new_value": "[КАРТА]"}),
-    "IP_ADDRESS": OperatorConfig("replace", {"new_value": "[IP]"}),
-    "URL": OperatorConfig("replace", {"new_value": "[ССЫЛКА]"}),
-    "DEFAULT": OperatorConfig("replace", {"new_value": "[ПЕРСОНАЛЬНЫЕ_ДАННЫЕ]"}),
+_ENTITY_REPLACEMENTS = {
+    "PERSON": "[ЧЕЛОВЕК]",
+    "LOCATION": "[ЛОКАЦИЯ]",
+    "PHONE_NUMBER": "[ТЕЛЕФОН]",
+    "EMAIL_ADDRESS": "[EMAIL]",
+    "CREDIT_CARD": "[КАРТА]",
+    "IP_ADDRESS": "[IP]",
+    "URL": "[ССЫЛКА]",
 }
 
 # Never let the PII path fetch or refresh the public suffix list.  The extractor is
@@ -36,8 +33,8 @@ OPERATORS = {
 tld_extractor = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
 
 # Telegram handles are contacts even when a generic PII recognizer does not know
-# about Telegram.  Do this before Presidio so the exact replacement is stable in
-# both current and historical model views.
+# about Telegram.  They are collected as spans on the original text and merged
+# with Presidio spans in one pass, so placeholders cannot be redetected as PII.
 _TELEGRAM_HANDLE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{5,32}\b")
 _URL_CANDIDATE = re.compile(r"(?i)\b(?:https?://)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[^\s<>()]*)?")
 
@@ -54,30 +51,39 @@ def analyzer() -> AnalyzerEngine:
     return AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["ru"])
 
 
-@lru_cache(maxsize=1)
-def anonymizer() -> AnonymizerEngine:
-    return AnonymizerEngine()
-
-
 def redact_with_audit(text: str) -> RedactionResult:
-    """Mask PII locally and return only non-sensitive audit data."""
-    masked_text, telegram_handles = _mask_telegram_handles(text)
-    masked_text, urls = _mask_urls_with_offline_psl(masked_text)
-    results = analyzer().analyze(text=masked_text, language="ru")
-    anonymized = anonymizer().anonymize(text=masked_text, analyzer_results=results, operators=OPERATORS)
-    entity_counts = Counter(result.entity_type for result in results)
-    if telegram_handles:
-        entity_counts["TELEGRAM_HANDLE"] += telegram_handles
-    if urls:
-        entity_counts["URL"] += urls
+    """Mask original-text spans once and return only non-sensitive audit data."""
+    custom_spans = [
+        *_telegram_spans(text),
+        *_url_spans(text),
+    ]
+    presidio_spans = [
+        _RedactionSpan(
+            result.start,
+            result.end,
+            result.entity_type,
+            _ENTITY_REPLACEMENTS.get(result.entity_type, "[ПЕРСОНАЛЬНЫЕ_ДАННЫЕ]"),
+        )
+        for result in analyzer().analyze(text=text, language="ru")
+    ]
+    # Custom contact/URL detection wins overlaps because it has a reviewed,
+    # stable replacement.  Presidio fills only the remaining original ranges.
+    selected = _non_overlapping((*custom_spans, *presidio_spans), custom_count=len(custom_spans))
+    pieces: list[str] = []
+    position = 0
+    for span in selected:
+        pieces.extend((text[position : span.start], span.replacement))
+        position = span.end
+    pieces.append(text[position:])
+    entity_counts = Counter(span.entity_type for span in selected)
     return RedactionResult(
-        text=anonymized.text,
+        text="".join(pieces),
         audit={
             "engine": "presidio",
             "language": "ru",
-            "detected": bool(results) or bool(telegram_handles),
+            "detected": bool(selected),
             "entity_counts": dict(sorted(entity_counts.items())),
-            "entities_total": len(results) + telegram_handles,
+            "entities_total": len(selected),
         },
     )
 
@@ -86,20 +92,42 @@ def redact_for_model(text: str) -> str:
     return redact_with_audit(text).text
 
 
-def _mask_telegram_handles(text: str) -> tuple[str, int]:
-    masked_text, replacements = _TELEGRAM_HANDLE.subn("[CONTACT]", text)
-    return masked_text, replacements
+@dataclass(frozen=True)
+class _RedactionSpan:
+    start: int
+    end: int
+    entity_type: str
+    replacement: str
 
 
-def _mask_urls_with_offline_psl(text: str) -> tuple[str, int]:
-    """Mask URL candidates using the same non-refreshing PSL extractor used at runtime."""
-    replacements = 0
+def _telegram_spans(text: str) -> tuple[_RedactionSpan, ...]:
+    return tuple(
+        _RedactionSpan(match.start(), match.end(), "TELEGRAM_HANDLE", "[CONTACT]")
+        for match in _TELEGRAM_HANDLE.finditer(text)
+    )
 
-    def mask(match: re.Match[str]) -> str:
-        nonlocal replacements
-        if tld_extractor(match.group()).suffix:
-            replacements += 1
-            return "[ССЫЛКА]"
-        return match.group()
 
-    return _URL_CANDIDATE.sub(mask, text), replacements
+def _url_spans(text: str) -> tuple[_RedactionSpan, ...]:
+    """Find URL spans using the same non-refreshing PSL extractor used at runtime."""
+    return tuple(
+        _RedactionSpan(match.start(), match.end(), "URL", "[ССЫЛКА]")
+        for match in _URL_CANDIDATE.finditer(text)
+        if tld_extractor(match.group()).suffix
+    )
+
+
+def _non_overlapping(
+    spans: tuple[_RedactionSpan, ...], *, custom_count: int
+) -> tuple[_RedactionSpan, ...]:
+    """Prefer custom spans, then retain only disjoint original-text Presidio spans."""
+    custom = sorted(spans[:custom_count], key=lambda span: (span.start, span.end))
+    selected: list[_RedactionSpan] = []
+    for span in custom:
+        if not any(span.start < item.end and item.start < span.end for item in selected):
+            selected.append(span)
+    for span in sorted(spans[custom_count:], key=lambda span: (span.start, span.end)):
+        if span.end <= span.start:
+            continue
+        if not any(span.start < item.end and item.start < span.end for item in selected):
+            selected.append(span)
+    return tuple(sorted(selected, key=lambda span: (span.start, span.end)))

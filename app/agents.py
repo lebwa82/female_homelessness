@@ -206,17 +206,31 @@ class YandexAgentGateway:
         self._provider_settings = provider_settings
 
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
-        transcript, pii_audit = format_redacted_transcript(context.history)
-        current_user_text = _current_user_text(context.history)
-        current_redacted = redact_with_audit(current_user_text).text
+        # Build *both* inputs before scheduling either provider coroutine.  A
+        # local preparation failure is a pair of unavailable diagnostics, never
+        # one orphan provider request.
+        try:
+            transcript, pii_audit = format_redacted_transcript(context.history)
+            current_user_text = _current_user_text(context.history)
+            current_redacted = redact_with_audit(current_user_text).text
+            safety_input = format_safety_context(context, current_redacted)
+            support_instructions = f"{SUPPORT_INSTRUCTIONS}\n\n{load_support_skills()}"
+            support_input = format_agent_context(context, transcript)
+        except Exception:  # noqa: BLE001 - no provider task is safe after local preparation fails
+            return AgentEvaluation(
+                safety_status=DiagnosticStatus.UNAVAILABLE,
+                support_status=DiagnosticStatus.UNAVAILABLE,
+                safety_audit={"status": "unavailable", "reason": "preparation_failed"},
+                support_audit={"status": "unavailable", "reason": "preparation_failed"},
+            )
         safety_task = asyncio.create_task(
-            self._run("risk", RISK_INSTRUCTIONS, format_safety_context(context, current_redacted), pii_audit)
+            self._run("risk", RISK_INSTRUCTIONS, safety_input, pii_audit)
         )
         support_task = asyncio.create_task(
             self._run(
                 "support",
-                f"{SUPPORT_INSTRUCTIONS}\n\n{load_support_skills()}",
-                format_agent_context(context, transcript),
+                support_instructions,
+                support_input,
                 pii_audit,
             )
         )

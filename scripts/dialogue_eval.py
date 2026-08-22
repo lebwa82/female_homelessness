@@ -132,6 +132,7 @@ class DialogueCase:
     initial: InitialRuntimeContext
     behavior: dict[str, Any]
     diagnostics: dict[str, tuple[str, ...]]
+    soft: dict[str, tuple[str | None, ...]]
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ class CaseReport:
     hard_hash: str
     rule_ids: tuple[str, ...]
     hard_failures: tuple[str, ...]
+    soft_failures: tuple[str, ...]
     diagnostic_deltas: tuple[str, ...]
     provider_failures: tuple[str, ...]
     provider_failure_metadata: tuple[ProviderFailureMetadata, ...]
@@ -199,6 +201,10 @@ class EvalReport:
     @property
     def diagnostic_deltas(self) -> tuple[str, ...]:
         return tuple(f"{case.case_id}:{item}" for case in self.cases for item in case.diagnostic_deltas)
+
+    @property
+    def soft_failures(self) -> tuple[str, ...]:
+        return tuple(f"{case.case_id}:{item}" for case in self.cases for item in case.soft_failures)
 
     @property
     def provider_failures(self) -> tuple[str, ...]:
@@ -354,14 +360,11 @@ async def evaluate_case(
         "rule_ids": rule_ids,
     }
     soft_projection = {"pending_offer": record.pending_offer}
+    soft_failures = _soft_failures(case.soft, case.initial, soft_projection)
     diagnostics = _diagnostic_projection(store, audit)
     history_matches = await store.history(record) == case.history
     hard_failures = _behavior_failures(case.behavior, projection, audit, history_matches)
-    deltas = _diagnostic_deltas(
-        case.diagnostics,
-        diagnostics,
-        local_critical=projection["local_risk"] == RiskLevel.CRITICAL.value,
-    )
+    deltas = _diagnostic_deltas(case.diagnostics, diagnostics)
     provider_failures = _provider_failures(diagnostics) if require_provider_health else ()
     provider_failure_metadata = (
         _provider_failure_metadata(store, diagnostics) if require_provider_health else ()
@@ -374,6 +377,7 @@ async def evaluate_case(
         _hard_hash(projection),
         rule_ids,
         tuple(hard_failures),
+        tuple(soft_failures),
         deltas,
         provider_failures,
         provider_failure_metadata,
@@ -444,17 +448,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "hard_hash": case.hard_hash,
             "rule_ids": case.rule_ids,
             "hard_failures": case.hard_failures,
+            "soft_failures": case.soft_failures,
             "provider_failures": case.provider_failures,
             "provider_failure_metadata": [failure.as_dict() for failure in case.provider_failure_metadata],
         }, ensure_ascii=True, sort_keys=True))
     print(json.dumps({"summary": {
         "cases": len(report.cases),
         "hard_failures": len(report.hard_failures),
+        "soft_failures": len(report.soft_failures),
         "diagnostic_deltas": len(report.diagnostic_deltas),
         "provider_failures": len(report.provider_failures),
         "provider_failure_summary": report.provider_failure_summary,
     }}, ensure_ascii=True, sort_keys=True))
-    return 2 if report.provider_failures else 1 if report.hard_failures else 0
+    return 2 if report.provider_failures else 1 if report.hard_failures or report.soft_failures else 0
 
 
 def _fixture_evaluation(output: FixtureOutput, variant: DiagnosticVariant) -> AgentEvaluation:
@@ -563,10 +569,12 @@ def _initial(value: Any, prefix: str) -> InitialRuntimeContext:
     return InitialRuntimeContext(state, pending, **fields)
 
 
-def _expected(value: Any, prefix: str) -> tuple[dict[str, Any], dict[str, tuple[str, ...]]]:
+def _expected(
+    value: Any, prefix: str
+) -> tuple[dict[str, Any], dict[str, tuple[str, ...]], dict[str, tuple[str | None, ...]]]:
     if not isinstance(value, dict):
         raise DatasetError(f"{prefix}: expected must be an object")
-    _exact_keys(value, {"behavior", "diagnostics"}, f"{prefix}: expected")
+    _keys(value, {"behavior", "diagnostics"}, {"behavior", "diagnostics", "soft"}, f"{prefix}: expected")
     behavior, diagnostics = value["behavior"], value["diagnostics"]
     if not isinstance(behavior, dict) or not isinstance(diagnostics, dict):
         raise DatasetError(f"{prefix}: expected sections must be objects")
@@ -621,7 +629,20 @@ def _expected(value: Any, prefix: str) -> tuple[dict[str, Any], dict[str, tuple[
         for item in items:
             _enum(item, enum_type, f"{prefix}: expected.diagnostics.{key}")
         parsed[key] = tuple(items)
-    return dict(behavior), parsed
+    soft_value = value.get("soft", {})
+    if not isinstance(soft_value, dict):
+        raise DatasetError(f"{prefix}: expected.soft must be an object")
+    _exact_keys(soft_value, {"pending_offer_lifecycle"}, f"{prefix}: expected.soft") if soft_value else None
+    soft: dict[str, tuple[str | None, ...]] = {}
+    if soft_value:
+        lifecycle = soft_value["pending_offer_lifecycle"]
+        if not isinstance(lifecycle, list) or len(lifecycle) != 2:
+            raise DatasetError(f"{prefix}: expected.soft.pending_offer_lifecycle must have two values")
+        for item in lifecycle:
+            if item is not None:
+                _enum(item, SupportOffer, f"{prefix}: expected.soft.pending_offer_lifecycle")
+        soft["pending_offer_lifecycle"] = tuple(lifecycle)
+    return dict(behavior), parsed, soft
 
 
 def _incoming_for(case: DialogueCase, text: str) -> IncomingMessage:
@@ -665,34 +686,43 @@ def _behavior_failures(expected: Mapping[str, Any], actual: Mapping[str, Any], a
     return failures
 
 
+def _soft_failures(
+    expected: Mapping[str, tuple[str | None, ...]],
+    initial: InitialRuntimeContext,
+    actual: Mapping[str, Any],
+) -> list[str]:
+    """Assert observed, non-authoritative state transitions separately from behavior."""
+    lifecycle = expected.get("pending_offer_lifecycle")
+    if lifecycle is None:
+        return []
+    observed = (initial.pending_offer.value if initial.pending_offer else None, actual.get("pending_offer"))
+    return [] if observed == lifecycle else ["pending_offer_lifecycle"]
+
+
 def _diagnostic_deltas(
     expected: Mapping[str, tuple[str, ...]],
     actual: Mapping[str, object],
-    *,
-    local_critical: bool = False,
 ) -> tuple[str, ...]:
     deltas: list[str] = []
-    if not local_critical:
-        if actual["safety_status"] != DiagnosticStatus.COMPLETED.value:
-            deltas.append(f"safety_status:{actual['safety_status']}")
-        elif actual["safety_level"] not in expected["safety_levels"]:
-            deltas.append(f"safety_level:{actual['safety_level']}")
+    if actual["safety_status"] != DiagnosticStatus.COMPLETED.value:
+        deltas.append(f"safety_status:{actual['safety_status']}")
+    elif actual["safety_level"] not in expected["safety_levels"]:
+        deltas.append(f"safety_level:{actual['safety_level']}")
     deltas.extend(
         f"safety_normalization:{category}"
         for category in _normalization_categories_from_projection(actual, "safety_normalizations")
     )
-    if not local_critical:
-        if actual["support_status"] != DiagnosticStatus.COMPLETED.value:
-            deltas.append(f"support_status:{actual['support_status']}")
-        elif actual["support_intent"] is None:
-            intent_delta = (
-                "support_intent:normalized_unknown"
-                if "support_unknown_intent_cleared" in _normalization_categories_from_projection(actual, "support_normalizations")
-                else "support_intent:missing"
-            )
-            deltas.append(intent_delta)
-        elif actual["support_intent"] not in expected["support_intents"]:
-            deltas.append(f"support_intent:{actual['support_intent']}")
+    if actual["support_status"] != DiagnosticStatus.COMPLETED.value:
+        deltas.append(f"support_status:{actual['support_status']}")
+    elif actual["support_intent"] is None:
+        intent_delta = (
+            "support_intent:normalized_unknown"
+            if "support_unknown_intent_cleared" in _normalization_categories_from_projection(actual, "support_normalizations")
+            else "support_intent:missing"
+        )
+        deltas.append(intent_delta)
+    elif actual["support_intent"] not in expected["support_intents"]:
+        deltas.append(f"support_intent:{actual['support_intent']}")
     deltas.extend(
         f"support_normalization:{category}"
         for category in _normalization_categories_from_projection(actual, "support_normalizations")

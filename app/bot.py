@@ -52,9 +52,14 @@ def render_keyboard(turn: AgentTurn) -> InlineKeyboardMarkup | None:
 
 
 async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn) -> None:
-    if not turn.audit.get("skip_outbound_persistence"):
-        await conversation_service.record_outbound(incoming, turn)
+    if turn.audit.get("suppress_delivery"):
+        return
     await message.answer(turn.text, reply_markup=render_keyboard(turn))
+    if not turn.audit.get("skip_outbound_persistence"):
+        try:
+            await conversation_service.record_outbound(incoming, turn)
+        except Exception as error:  # noqa: BLE001 - audit degradation cannot suppress user-facing safety copy
+            logger.warning("Outbound audit unavailable: %s", type(error).__name__)
 
 
 async def claim_stateless_update(incoming: IncomingMessage) -> bool:

@@ -47,7 +47,15 @@ async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level
                 )
             if "pg_indexes" in sql:
                 order.append("indexes")
-                return Result(tuple(SimpleNamespace(indexname=name) for name in _REQUIRED_INDEXES))
+                return Result(
+                    tuple(
+                        SimpleNamespace(
+                            indexname=name,
+                            indexdef=("CREATE UNIQUE INDEX" if name.startswith("uq_") else "CREATE INDEX"),
+                        )
+                        for name in _REQUIRED_INDEXES
+                    )
+                )
             if "INSERT INTO conversations" in sql:
                 order.append("conversation_insert")
                 return Result(scalar=41)
@@ -57,6 +65,30 @@ async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level
             if "SELECT level FROM escalations" in sql:
                 order.append("historical_level_select")
                 return Result(scalar="human_requested")
+            if "INSERT INTO inbound_text_executions" in sql:
+                order.append("claim_insert")
+                return Result()
+            if "SELECT status FROM inbound_text_executions" in sql:
+                order.append("claim_select")
+                return Result(scalar="processing")
+            if "INSERT INTO conversation_messages" in sql:
+                order.append("expired_message_insert")
+                return Result()
+            if "SELECT count(*) FROM conversation_messages" in sql:
+                order.append("expired_message_select")
+                return Result(scalar=1)
+            if "DELETE FROM conversation_messages" in sql:
+                order.append("message_delete")
+                return Result()
+            if "DELETE FROM inbound_text_executions" in sql:
+                order.append("claim_delete")
+                return Result()
+            if "DELETE FROM escalations" in sql:
+                order.append("escalation_delete")
+                return Result()
+            if "DELETE FROM conversations" in sql:
+                order.append("conversation_delete")
+                return Result()
             raise AssertionError("unexpected_statement")
 
     class Connect:
@@ -87,5 +119,13 @@ async def test_assurance_inserts_reads_and_rolls_back_temporary_historical_level
         "conversation_insert",
         "escalation_insert",
         "historical_level_select",
+        "claim_insert",
+        "claim_select",
+        "expired_message_insert",
+        "expired_message_select",
+        "message_delete",
+        "claim_delete",
+        "escalation_delete",
+        "conversation_delete",
         "rollback",
     ]

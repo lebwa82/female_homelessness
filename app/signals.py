@@ -139,6 +139,12 @@ def _add_open_conversation_matches(tokens: tuple[str, ...], add: _AddMatch) -> N
         ("отменить",),
         ("не", "хочу", "продолжать"),
         ("не", "нужно", "продолжать"),
+        ("не", "нужна", "заявка"),
+        ("не", "хочу", "указывать", "город"),
+        ("не", "хочу", "указывать", "место"),
+        ("не", "хочу", "оставлять", "контакт"),
+        ("не", "буду", "оставлять", "контакт"),
+        ("пропустить",),
     ):
         for start in _find_phrase(tokens, phrase):
             add(
@@ -322,9 +328,15 @@ def _marker_action_span(marker: int, start: int, end: int) -> tuple[int, int]:
 
 
 def _is_bounded_not_want_to_live(tokens: tuple[str, ...], start: int, width: int) -> bool:
-    """Keep direct suicidal language, but not residence or relationship grammar."""
+    """Keep direct suicidal language, but not residence or relationship grammar.
+
+    A completed ``не хочу жить`` clause is itself a high-severity signal.  Only
+    the two bounded continuations which change ``жить`` into a residence or a
+    relationship predicate are excluded.  Ordinary distress after the clause
+    must not weaken its local crisis route.
+    """
     tail = tokens[start + width :]
-    return tail in ((), ("помогите",), ("пожалуйста",), ("помогите", "пожалуйста"), ("пожалуйста", "помогите"))
+    return not tail or tail[0] not in {"в", "с"}
 
 
 def _is_predicate_negated(tokens: tuple[str, ...], predicate_start: int) -> bool:
