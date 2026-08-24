@@ -2,7 +2,7 @@
 
 ## Deployment host
 
-- The production VM for this project is `ssh -l lebwa82 51.250.96.114`.
+- The production VM for this project is `ssh -l lebwa82 84.252.136.204`.
 - Do not use another VM for deployment or operational checks unless the user explicitly changes this host.
 
 - Do not spawn, resume, inspect, interrupt, or otherwise call sub-agents for this repository.

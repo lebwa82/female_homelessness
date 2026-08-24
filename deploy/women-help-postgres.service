@@ -8,8 +8,8 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/women-help-bot
 EnvironmentFile=/etc/women-help-bot.env
-ExecStart=/usr/bin/podman-compose up -d postgres
-ExecStop=/usr/bin/podman-compose stop postgres
+ExecStart=/usr/bin/podman-compose -p women-help-bot up -d postgres
+ExecStop=/usr/bin/podman-compose -p women-help-bot stop postgres
 
 [Install]
 WantedBy=multi-user.target
