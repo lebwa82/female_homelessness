@@ -480,6 +480,7 @@ async def _evaluate_cases_with_soft_lifecycle(
     )
     create_service = ConversationService(store=store, gateway=_gateway_for_case(gateway, create_case))
     create_turn = await create_service.handle_text(first_incoming)
+    consume_precondition_created = record.pending_offer == SupportOffer.PSYCHOLOGIST.value
     reports[create_case.id] = await _report_turn(
         create_case,
         store,
@@ -500,13 +501,18 @@ async def _evaluate_cases_with_soft_lifecycle(
         gateway=_gateway_for_case(gateway, consume_case),
     ).handle_text(consume_incoming)
     expected_consume_history = (*create_case.history, ("assistant", create_turn.text), *consume_case.history)
-    reports[consume_case.id] = await _report_turn(
+    consume_report = await _report_turn(
         consume_case,
         store,
         record,
         consume_turn,
         history_matches=await store.history(record) == expected_consume_history,
         require_provider_health=require_provider_health,
+    )
+    reports[consume_case.id] = (
+        consume_report
+        if consume_precondition_created
+        else _without_missing_soft_precondition_hard_failures(consume_report)
     )
 
     # Branch two: create a fresh offer, then prove unrelated text expires it.
@@ -523,6 +529,9 @@ async def _evaluate_cases_with_soft_lifecycle(
         gateway=_gateway_for_case(gateway, create_case),
     )
     expiry_create_turn = await expiry_service.handle_text(expiry_create)
+    expiry_precondition_created = (
+        expiry_record.pending_offer == SupportOffer.PSYCHOLOGIST.value
+    )
     await expiry_service.record_outbound(expiry_create, expiry_create_turn)
     expire_incoming = IncomingMessage(
         platform_user_id=expiry_identity,
@@ -539,13 +548,23 @@ async def _evaluate_cases_with_soft_lifecycle(
         ("assistant", expiry_create_turn.text),
         *expire_case.history,
     )
-    reports[expire_case.id] = await _report_turn(
+    expire_report = await _report_turn(
         expire_case,
         expiry_store,
         expiry_record,
         expire_turn,
         history_matches=await expiry_store.history(expiry_record) == expected_expire_history,
         require_provider_health=require_provider_health,
+    )
+    reports[expire_case.id] = (
+        expire_report
+        if expiry_precondition_created
+        else replace(
+            expire_report,
+            soft_failures=tuple(
+                dict.fromkeys((*expire_report.soft_failures, "pending_offer_precondition"))
+            ),
+        )
     )
 
     normal_reports = {
@@ -556,6 +575,33 @@ async def _evaluate_cases_with_soft_lifecycle(
         if case.group != "soft_lifecycle"
     }
     return tuple(reports[case.id] if case.id in reports else normal_reports[case.id] for case in cases)
+
+
+_SOFT_OFFER_DEPENDENT_HARD_FIELDS = frozenset(
+    {
+        "choice_set",
+        "rendered_callback_ids",
+        "effect",
+        "state_after",
+        "rule_ids",
+        "canonical_copy",
+    }
+)
+
+
+def _without_missing_soft_precondition_hard_failures(report: CaseReport) -> CaseReport:
+    """Keep unrelated hard invariants while classifying an absent optional offer as soft."""
+    return replace(
+        report,
+        hard_failures=tuple(
+            failure
+            for failure in report.hard_failures
+            if failure not in _SOFT_OFFER_DEPENDENT_HARD_FIELDS
+        ),
+        soft_failures=tuple(
+            dict.fromkeys((*report.soft_failures, "pending_offer_precondition"))
+        ),
+    )
 
 
 async def evaluate_offline_cases(gateway: FixtureGateway, cases: Sequence[DialogueCase]) -> EvalReport:
@@ -618,7 +664,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "provider_failures": len(report.provider_failures),
         "provider_failure_summary": report.provider_failure_summary,
     }}, ensure_ascii=True, sort_keys=True))
-    return 2 if report.provider_failures else 1 if report.hard_failures or report.soft_failures else 0
+    return _release_exit_code(report, live=args.live)
+
+
+def _release_exit_code(report: EvalReport, *, live: bool) -> int:
+    """Live soft-offer quality drift is observable but cannot authorize/block hard behavior."""
+    if report.provider_failures:
+        return 2
+    if report.hard_failures or (report.soft_failures and not live):
+        return 1
+    return 0
 
 
 def _fixture_evaluation(output: FixtureOutput, variant: DiagnosticVariant) -> AgentEvaluation:

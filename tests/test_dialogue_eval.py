@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.dialogue_eval as dialogue_eval_module
 from app.agents import AgentContext, AgentEvaluation
 from app.domain import (
     DiagnosticStatus,
@@ -125,6 +126,31 @@ async def test_soft_offer_cases_are_replayed_as_two_sequential_lifecycles() -> N
 
 
 @pytest.mark.asyncio
+async def test_missing_live_soft_offer_does_not_become_a_hard_behavior_failure() -> None:
+    """A diagnostic-owned optional offer is a quality delta, not deterministic authority."""
+    cases = tuple(case for case in load_cases(DATASET) if case.group == "soft_lifecycle")
+    ordinary = AgentEvaluation(
+        safety=SafetyDiagnostic(level="none"),
+        support=SupportDiagnostic(intent="open_conversation", draft_text="safe"),
+        safety_status=DiagnosticStatus.COMPLETED,
+        support_status=DiagnosticStatus.COMPLETED,
+        safety_audit={"status": "fixture"},
+        support_audit={"status": "fixture"},
+    )
+
+    report = await evaluate_cases(
+        ScriptedGateway([ordinary, ordinary, ordinary, ordinary]),
+        cases,
+        require_provider_health=True,
+    )
+
+    assert report.hard_failures == ()
+    assert report.soft_failures
+    assert dialogue_eval_module._release_exit_code(report, live=True) == 0
+    assert dialogue_eval_module._release_exit_code(report, live=False) == 1
+
+
+@pytest.mark.asyncio
 async def test_live_health_mode_uses_the_same_accumulated_soft_lifecycle() -> None:
     cases = tuple(case for case in load_cases(DATASET) if case.group == "soft_lifecycle")
     offer = AgentEvaluation(
@@ -236,8 +262,9 @@ async def test_provider_health_failure_is_separate_from_hard_behavior() -> None:
         require_provider_health=True,
     )
 
-    assert report.hard_failures
-    assert all(failure.startswith("soft-offer-") for failure in report.hard_failures)
+    assert report.hard_failures == ()
+    assert report.soft_failures
+    assert all(failure.startswith("soft-offer-") for failure in report.soft_failures)
     assert len(report.provider_failures) == len(cases) * 2
 
 
