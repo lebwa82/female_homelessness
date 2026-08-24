@@ -40,10 +40,14 @@ categories, confidence, rationale и evidence_claims. Просьба погов�
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
 Верни единственный JSON-объект без Markdown и без пояснений. Обязательны intent и draft_text;
-допустимы только intent, need_hint, evidence_claims, draft_text и suggested_support=psychologist.
+допустимы только intent, need_hints, evidence_claims, draft_text и suggested_support=psychologist.
 intent должен быть ровно одним из: open_conversation, concrete_need, aid_interest,
 psychologist_considering, psychologist_request, verified_information, explicit_human_request,
 close.
+need_hints — список из нуля или нескольких значений housing, food_money, legal, support,
+children, other. Указывай в нём только конкретные виды помощи, которые действительно уместно
+показать сейчас отдельными кнопками. Можно вернуть несколько значений; пустой список, если
+человеку сейчас важнее просто разговор.
 draft_text — честная разговорная реплика, без обещаний, что человек уже позван, заявка сохранена,
 помощь организована или контакт передан. Не возвращай action, next_action, choice_set,
 catalog_item_ids, callback IDs, workflow state, effect, переход или описание выполненного внешнего
@@ -79,7 +83,7 @@ _SAFETY_RATIONALE_MAX_LENGTH = 240
 _NORMALIZATION_CATEGORIES = frozenset({
     "safety_rationale_truncated",
     "support_unknown_intent_cleared",
-    "support_unknown_need_hint_cleared",
+    "support_unknown_need_hints_cleared",
 })
 
 
@@ -426,14 +430,17 @@ def _normalize_safety_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], 
 
 def _normalize_support_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], frozenset[str]]:
     categories: set[str] = set()
-    for field, enum_type, category in (
-        ("intent", SupportIntent, "support_unknown_intent_cleared"),
-        ("need_hint", NeedKind, "support_unknown_need_hint_cleared"),
-    ):
-        value = payload.get(field)
-        if isinstance(value, str) and value not in {item.value for item in enum_type}:
-            payload[field] = None
-            categories.add(category)
+    intent = payload.get("intent")
+    if isinstance(intent, str) and intent not in {item.value for item in SupportIntent}:
+        payload["intent"] = None
+        categories.add("support_unknown_intent_cleared")
+    need_hints = payload.get("need_hints")
+    if isinstance(need_hints, list):
+        allowed = {item.value for item in NeedKind}
+        normalized = [need for need in need_hints if isinstance(need, str) and need in allowed]
+        if normalized != need_hints:
+            categories.add("support_unknown_need_hints_cleared")
+        payload["need_hints"] = normalized
     return payload, frozenset(categories)
 
 

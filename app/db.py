@@ -73,7 +73,7 @@ _VALIDATION_FIELDS = frozenset({
     "rationale_alias_used",
     "evidence_claims",
     "intent",
-    "need_hint",
+    "need_hints",
     "draft_text",
     "suggested_support",
 })
@@ -413,7 +413,7 @@ def sanitize_agent_audit(audit: dict[str, Any]) -> dict[str, Any]:
                 "categories": sorted(
                     category
                     for category in categories
-                    if category in {"safety_rationale_truncated", "support_unknown_intent_cleared", "support_unknown_need_hint_cleared"}
+                    if category in {"safety_rationale_truncated", "support_unknown_intent_cleared", "support_unknown_need_hints_cleared"}
                 )
             }
         elif field == "rationale_alias_used" and isinstance(value, bool):

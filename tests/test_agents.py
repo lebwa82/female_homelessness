@@ -51,6 +51,7 @@ def test_yandex_client_uses_fixed_timeout_and_disables_sdk_retries(
 
 def test_support_text_json_instructions_enumerate_the_only_valid_intents() -> None:
     assert all(intent.value in SUPPORT_INSTRUCTIONS for intent in SupportIntent)
+    assert "need_hints" in SUPPORT_INSTRUCTIONS
 
 
 @pytest.mark.parametrize(
@@ -179,7 +180,7 @@ def test_support_clears_only_unknown_string_enum_labels() -> None:
         AgentCallResult(
             payload={
                 "intent": "unrecognized_intent",
-                "need_hint": "unrecognized_need",
+                "need_hints": ["legal", "unrecognized_need"],
                 "draft_text": "safe draft",
             },
             audit={"status": "completed"},
@@ -190,9 +191,9 @@ def test_support_clears_only_unknown_string_enum_labels() -> None:
     assert status is DiagnosticStatus.COMPLETED
     assert diagnostic is not None
     assert diagnostic.intent is None
-    assert diagnostic.need_hint is None
+    assert diagnostic.need_hints == ("legal",)
     assert audit["normalization"] == {
-        "categories": ["support_unknown_intent_cleared", "support_unknown_need_hint_cleared"]
+        "categories": ["support_unknown_intent_cleared", "support_unknown_need_hints_cleared"]
     }
     assert "unrecognized" not in repr(audit)
 
@@ -237,7 +238,7 @@ def test_partial_normalization_rejects_missing_or_non_string_safety_level(
     ("payload", "categories"),
     (
         ({"intent": 7, "draft_text": "safe draft"}, []),
-        ({"intent": "open_conversation", "need_hint": 7, "draft_text": "safe draft"}, []),
+        ({"intent": "open_conversation", "need_hints": 7, "draft_text": "safe draft"}, []),
         ({"intent": "unknown", "draft_text": ""}, ["support_unknown_intent_cleared"]),
         ({"intent": "unknown", "draft_text": 7}, ["support_unknown_intent_cleared"]),
         ({"intent": "unknown"}, ["support_unknown_intent_cleared"]),

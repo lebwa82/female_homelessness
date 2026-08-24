@@ -33,17 +33,22 @@ def incoming(text: str, message_id: int = 1101) -> IncomingMessage:
     )
 
 
-def gateway(calls: list[str] | None = None) -> YandexAgentGateway:
+def gateway(
+    calls: list[str] | None = None,
+    *,
+    risk_payload: dict[str, object] | None = None,
+    support_payload: dict[str, object] | None = None,
+) -> YandexAgentGateway:
     async def call(name: str, _: str, __: str) -> AgentCallResult:
         if calls is not None:
             calls.append(name)
         if name == "risk":
             return AgentCallResult(
-                payload={"level": "none", "rationale": "synthetic"},
+                payload=risk_payload or {"level": "none", "rationale": "synthetic"},
                 audit={"status": "completed"},
             )
         return AgentCallResult(
-            payload={"intent": "open_conversation", "draft_text": "synthetic"},
+            payload=support_payload or {"intent": "open_conversation", "draft_text": "synthetic"},
             audit={"status": "completed"},
         )
 
@@ -177,7 +182,12 @@ async def test_callback_effect_and_outcome_commit_together_and_replay_verbatim()
 @pytest.mark.asyncio
 async def test_callback_outcome_identity_does_not_collide_with_text_message_identity() -> None:
     store = InMemoryConversationStore()
-    service = ConversationService(store=store, gateway=gateway())
+    service = ConversationService(
+        store=store,
+        gateway=gateway(
+            support_payload={"intent": "psychologist_request", "draft_text": "synthetic"}
+        ),
+    )
     update = incoming("хочу поговорить с психологом", 1109)
 
     contact = await service.handle_text(update)
@@ -264,7 +274,16 @@ async def test_initial_and_replayed_canonical_critical_turns_fail_open_on_auth_o
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryConversationStore()
-    service = ConversationService(store=store, gateway=gateway())
+    service = ConversationService(
+        store=store,
+        gateway=gateway(
+            risk_payload={
+                "level": "critical",
+                "categories": ["suicide"],
+                "rationale": "synthetic",
+            }
+        ),
+    )
     update = incoming("не хочу жить", 1110)
     initial = await service.handle_text(update)
     replay = await service.handle_text(update)
@@ -291,7 +310,16 @@ async def test_confirmed_delete_denies_initial_and_replayed_canonical_critical_t
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryConversationStore()
-    service = ConversationService(store=store, gateway=gateway())
+    service = ConversationService(
+        store=store,
+        gateway=gateway(
+            risk_payload={
+                "level": "critical",
+                "categories": ["suicide"],
+                "rationale": "synthetic",
+            }
+        ),
+    )
     update = incoming("не хочу жить", 1111)
     initial = await service.handle_text(update)
     replay = await service.handle_text(update)

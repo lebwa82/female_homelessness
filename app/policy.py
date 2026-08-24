@@ -1,4 +1,10 @@
-"""Deterministic owner of text-turn effects, workflows, and contextual choices."""
+"""Backend-owned workflow projection over structured Qwen diagnostics.
+
+Qwen classifies risk, conversational intent, and relevant kinds of help.  This
+module owns only durable state transitions, catalogue callbacks, and the safe
+copy for an already-classified crisis.  It intentionally contains no lexical
+or regular-expression interpretation of a user's text.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,6 @@ from app.domain import (
     ChoiceSet,
     ConversationState,
     DiagnosticStatus,
-    HardSignalKind,
     NeedKind,
     PolicyContext,
     PolicyEffect,
@@ -15,13 +20,13 @@ from app.domain import (
     ResolvedTurn,
     RiskAssessment,
     RiskLevel,
+    SupportIntent,
     SupportOffer,
 )
-from app.signals import ClauseBoundaryKind, scan_signal_input
 
-POLICY_VERSION = "deterministic-policy-v2"
+POLICY_VERSION = "model-routing-v1"
 _SAFE_FALLBACK = "Я рядом и готова продолжить. Можно написать, что сейчас важно."
-_LOCAL_UNAVAILABLE_PROMPT = "Я здесь. Можно продолжить разговор или позвать человека."
+_MODEL_UNAVAILABLE_PROMPT = "Я здесь. Можно продолжить разговор или позвать человека."
 HUMAN_HANDOFF_PROMPT = (
     "Слышу вас. Зову человека, который работает с этим ресурсом. Здесь можно продолжать писать."
 )
@@ -40,229 +45,43 @@ _FINITE_WORKFLOW_STATES = frozenset(
         ConversationState.FOLLOWUP_ANSWERED.value,
     }
 )
-_WORKFLOW_ESCAPE_STATES = _FINITE_WORKFLOW_STATES | {ConversationState.DISCOVERING_NEED.value}
-_EXTERNAL_COMPLETION_FAMILIES = (
-    (
-        frozenset(
-            {"заявка", "заявку", "заявки", "заявке", "запрос", "запроса", "запросу", "запросом"}
-        ),
-        frozenset(
-            {
-                "сохранена",
-                "сохранен",
-                "сохранены",
-                "сохранил",
-                "сохранила",
-                "сохранили",
-                "принята",
-                "принят",
-                "приняты",
-                "принял",
-                "приняла",
-                "приняли",
-                "зарегистрирована",
-                "зарегистрирован",
-                "зарегистрированы",
-                "зарегистрировал",
-                "зарегистрировала",
-                "зарегистрировали",
-                "оформлена",
-                "оформлен",
-                "оформлены",
-                "оформил",
-                "оформила",
-                "оформили",
-                "отправлена",
-                "отправлен",
-                "отправлены",
-                "отправил",
-                "отправила",
-                "отправили",
-            }
-        ),
-    ),
-    (
-        frozenset(
-            {
-                "данные",
-                "данных",
-                "данными",
-                "информация",
-                "информацию",
-                "информации",
-                "контакт",
-                "контакта",
-                "контакты",
-                "контактов",
-            }
-        ),
-        frozenset(
-            {
-                "отправлен",
-                "отправлена",
-                "отправлены",
-                "отправил",
-                "отправила",
-                "отправили",
-                "передан",
-                "передана",
-                "переданы",
-                "передал",
-                "передала",
-                "передали",
-                "получен",
-                "получена",
-                "получены",
-                "получил",
-                "получила",
-                "получили",
-            }
-        ),
-    ),
-    (
-        frozenset({"помощь", "помощи"}),
-        frozenset(
-            {
-                "организована",
-                "организован",
-                "организованы",
-                "организовал",
-                "организовала",
-                "организовали",
-            }
-        ),
-    ),
-    (
-        frozenset(
-            {
-                "оператор",
-                "оператора",
-                "оператором",
-                "человек",
-                "человека",
-                "человеком",
-                "специалист",
-                "специалиста",
-                "специалистом",
-                "специалисткой",
-            }
-        ),
-        frozenset(
-            {
-                "подключен",
-                "подключена",
-                "подключены",
-                "подключил",
-                "подключила",
-                "подключили",
-                "позвал",
-                "позвала",
-                "позвали",
-                "связались",
-            }
-        ),
-    ),
-)
-_MAX_COMPLETION_TOKEN_GAP = 6
-_MODAL_TOKENS = frozenset(
-    {
-        "мог",
-        "могла",
-        "могли",
-        "могу",
-        "могут",
-        "можем",
-        "может",
-        "можете",
-        "можешь",
-        "смог",
-        "смогла",
-        "смогли",
-        "смогу",
-        "смогут",
-        "сможем",
-        "сможет",
-        "сможете",
-        "сможешь",
-        "можно",
-    }
-)
-_FUTURE_AUXILIARIES = frozenset({"буду", "будем", "будет", "будете", "будешь", "будут"})
-_CONDITIONAL_LEADS = frozenset({"если"})
-_CONDITIONAL_PREFIXES = frozenset({"а", "и", "но"})
-_OPERATIONAL_ACTORS = frozenset(
-    {
-        "я",
-        "мы",
-        "оператор",
-        "оператора",
-        "специалист",
-        "специалиста",
-        "специалистка",
-        "специалистке",
-        "человек",
-        "человека",
-        "вам",
-        "вас",
-        "вы",
-        "тобой",
-        "тебе",
-        "с",
-        "вами",
-    }
-)
-_OPERATIONAL_ACTION_STEMS = (
-    "вызв",
-    "зарегистр",
-    "записа",
-    "записыва",
-    "запиш",
-    "оформ",
-    "отправ",
-    "переда",
-    "перезвон",
-    "подключ",
-    "позвон",
-    "связа",
-    "связыва",
-    "свяж",
-)
-_FINITE_ACTION_SUFFIXES = (
-    "у",
-    "ю",
-    "ем",
-    "им",
-    "ешь",
-    "ишь",
-    "ет",
-    "ит",
-    "ете",
-    "ите",
-    "ут",
-    "ют",
-    "ат",
-    "ят",
-    "л",
-    "ла",
-    "ли",
-    "лся",
-    "лась",
-    "лись",
-    "емся",
-    "имся",
-    "тся",
-)
+
+
+def model_risk_assessment(context: PolicyContext) -> RiskAssessment:
+    """Project only a completed structured safety response into audit data."""
+    if context.safety_status is DiagnosticStatus.COMPLETED and context.safety is not None:
+        return RiskAssessment(
+            level=context.safety.level,
+            categories=context.safety.categories,
+            confidence=context.safety.confidence,
+            rationale=context.safety.rationale,
+            detector="qwen-risk",
+        )
+    return RiskAssessment(
+        level=RiskLevel.UNKNOWN,
+        rationale="risk diagnostic unavailable",
+        detector="qwen-risk",
+    )
 
 
 def resolve_turn(context: PolicyContext) -> ResolvedTurn:
-    """Resolve the one permitted deterministic projection for a text turn.
+    """Resolve a message from model diagnostics and backend-owned workflow state."""
+    assessment = model_risk_assessment(context)
+    if assessment.level is RiskLevel.CRITICAL:
+        return _finalize_turn(context, critical_resolved_turn(assessment))
 
-    Agent labels are deliberately absent from authorization conditions. A completed support
-    diagnostic can contribute only guarded conversational wording and a soft pending offer.
-    """
-    if context.local_risk.level is RiskLevel.CRITICAL:
-        return _finalize_turn(context, critical_resolved_turn(context.local_risk))
-    if _has_signal(context, HardSignalKind.EXPLICIT_HUMAN_REQUEST):
+    if context.support_status is not DiagnosticStatus.COMPLETED or context.support is None:
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text=_MODEL_UNAVAILABLE_PROMPT,
+                choice_set=ChoiceSet.SAFE_CONTINUE,
+                fallback_reason="support_diagnostic_unavailable",
+            ),
+        )
+
+    support = context.support
+    if support.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST:
         return _finalize_turn(
             context,
             ResolvedTurn(
@@ -271,28 +90,9 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 effect=PolicyEffect.HUMAN_HANDOFF,
             ),
         )
-    if context.signals is None or context.local_risk.level is RiskLevel.UNKNOWN:
-        return _finalize_turn(
-            context,
-            ResolvedTurn(
-                text=_LOCAL_UNAVAILABLE_PROMPT,
-                choice_set=ChoiceSet.SAFE_CONTINUE,
-                fallback_reason="local_input_unavailable",
-            ),
-        )
-    if context.state in _WORKFLOW_ESCAPE_STATES and _has_signal(
-        context, HardSignalKind.OPEN_CONVERSATION_REQUEST
-    ):
-        return _finalize_turn(
-            context,
-            ResolvedTurn(
-                text=_SAFE_FALLBACK,
-                effect=PolicyEffect.CANCEL_WORKFLOW,
-            ),
-        )
     if context.state in _FINITE_WORKFLOW_STATES:
         return resolve_workflow_turn(context)
-    if _has_signal(context, HardSignalKind.PSYCHOLOGIST_REQUEST):
+    if support.intent is SupportIntent.PSYCHOLOGIST_REQUEST:
         return _finalize_turn(
             context,
             ResolvedTurn(
@@ -301,7 +101,7 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 effect=PolicyEffect.START_PSYCHOLOGIST_REQUEST,
             ),
         )
-    if _has_signal(context, HardSignalKind.GENERIC_AID_INTEREST):
+    if support.intent is SupportIntent.AID_INTEREST:
         return _finalize_turn(
             context,
             ResolvedTurn(
@@ -310,8 +110,9 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 effect=PolicyEffect.START_NEED_DISCOVERY,
             ),
         )
-    if context.pending_offer is SupportOffer.PSYCHOLOGIST and _has_signal(
-        context, HardSignalKind.PSYCHOLOGIST_CONSIDERING
+    if (
+        context.pending_offer is SupportOffer.PSYCHOLOGIST
+        and support.intent is SupportIntent.PSYCHOLOGIST_CONSIDERING
     ):
         return _finalize_turn(
             context,
@@ -324,7 +125,7 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
 
 
 def resolve_workflow_turn(context: PolicyContext) -> ResolvedTurn:
-    """Replay the active finite workflow without reinterpreting the input as a new flow."""
+    """Continue a workflow created by a callback without reclassifying its payload."""
     if context.state == ConversationState.COLLECTING_LOCATION.value:
         decision = ResolvedTurn(
             text=CONTACT_PROMPT,
@@ -364,8 +165,6 @@ def resolve_workflow_turn(context: PolicyContext) -> ResolvedTurn:
             effect=PolicyEffect.REPLAY_WORKFLOW,
         )
     elif context.state == ConversationState.FOLLOWUP_SENT.value:
-        # A text reply completes the reminder before returning to the ordinary conversation.
-        # The finalizer attaches COMPLETE_FOLLOWUP; no model label can alter this route.
         decision = ResolvedTurn(text=_SAFE_FALLBACK)
     else:
         decision = ResolvedTurn(
@@ -398,176 +197,13 @@ def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
 
 
 def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
-    contextual_needs = _concrete_needs(context)
-    choice_set = ChoiceSet.CONTEXTUAL_NEEDS if contextual_needs else ChoiceSet.NONE
-    if context.support_status is not DiagnosticStatus.COMPLETED or context.support is None:
-        return ResolvedTurn(
-            text=_SAFE_FALLBACK,
-            choice_set=choice_set,
-            contextual_needs=contextual_needs,
-            fallback_reason="support_diagnostic_unavailable",
-        )
-    draft = context.support.draft_text.strip()
-    if not draft or _claims_external_action(draft):
-        return ResolvedTurn(
-            text=_SAFE_FALLBACK,
-            choice_set=choice_set,
-            contextual_needs=contextual_needs,
-            fallback_reason="support_draft_guard",
-        )
+    assert context.support is not None
     return ResolvedTurn(
-        text=draft,
-        choice_set=choice_set,
-        contextual_needs=contextual_needs,
+        text=context.support.draft_text.strip() or _SAFE_FALLBACK,
+        choice_set=ChoiceSet.CONTEXTUAL_NEEDS if context.support.need_hints else ChoiceSet.NONE,
+        contextual_needs=tuple(dict.fromkeys(context.support.need_hints)),
         offered_support=context.support.suggested_support,
     )
-
-
-def _claims_external_action(draft: str) -> bool:
-    signal_input = scan_signal_input(draft)
-    previous_was_leading_condition = False
-    for clause in signal_input.clauses:
-        tokens = signal_input.values[clause.token_start : clause.token_end]
-        leading_condition = _has_leading_condition(tokens)
-        inherited_condition = previous_was_leading_condition
-        if _contains_operational_claim(
-            tokens,
-            conditional=leading_condition or inherited_condition,
-        ) or any(
-            _contains_completed_family(
-                tokens,
-                referents,
-                completions,
-                leading_condition=leading_condition,
-                inherited_condition=inherited_condition,
-            )
-            for referents, completions in _EXTERNAL_COMPLETION_FAMILIES
-        ):
-            return True
-        previous_was_leading_condition = bool(
-            leading_condition
-            and clause.boundary_after is not None
-            and clause.boundary_after.kind in {ClauseBoundaryKind.COMMA, ClauseBoundaryKind.DASH}
-        )
-    return False
-
-
-def _has_leading_condition(tokens: tuple[str, ...]) -> bool:
-    if not tokens:
-        return False
-    if tokens[0] in _CONDITIONAL_LEADS:
-        return True
-    return (
-        len(tokens) > 1 and tokens[0] in _CONDITIONAL_PREFIXES and tokens[1] in _CONDITIONAL_LEADS
-    )
-
-
-def _contains_operational_claim(
-    tokens: tuple[str, ...],
-    *,
-    conditional: bool,
-) -> bool:
-    """Detect bounded actor/action/referent claims across reviewed inflections.
-
-    Predicate-local negation and modality suppress only the predicate they
-    govern.  A leading conditional clause scopes the immediately following
-    comma/dash-delimited clause, rather than making every later token optional.
-    """
-    for action_index, action in enumerate(tokens):
-        if not _is_operational_predicate(action):
-            continue
-        start = max(0, action_index - _MAX_COMPLETION_TOKEN_GAP)
-        end = min(len(tokens), action_index + _MAX_COMPLETION_TOKEN_GAP + 1)
-        nearby = tokens[start:end]
-        has_actor = bool(_OPERATIONAL_ACTORS.intersection(nearby))
-        has_referent = any(
-            referent in nearby
-            for referents, _ in _EXTERNAL_COMPLETION_FAMILIES
-            for referent in referents
-        )
-        if not (has_actor or has_referent):
-            continue
-        if _predicate_is_negated(tokens, action_index) or _predicate_is_modal(
-            tokens,
-            action_index,
-        ):
-            continue
-        if conditional:
-            continue
-        if _is_action_infinitive(action) and not _has_future_auxiliary(tokens, action_index):
-            continue
-        if not _is_action_infinitive(action) or _has_future_auxiliary(tokens, action_index):
-            return True
-    return False
-
-
-def _is_operational_predicate(token: str) -> bool:
-    if not token.startswith(_OPERATIONAL_ACTION_STEMS):
-        return False
-    return _is_action_infinitive(token) or token.endswith(_FINITE_ACTION_SUFFIXES)
-
-
-def _is_action_infinitive(token: str) -> bool:
-    return token.endswith(("ть", "ться", "ти"))
-
-
-def _predicate_is_negated(tokens: tuple[str, ...], predicate_index: int) -> bool:
-    return predicate_index > 0 and tokens[predicate_index - 1] == "не"
-
-
-def _predicate_is_modal(tokens: tuple[str, ...], predicate_index: int) -> bool:
-    start = max(0, predicate_index - 3)
-    return any(token in _MODAL_TOKENS for token in tokens[start:predicate_index])
-
-
-def _has_future_auxiliary(tokens: tuple[str, ...], predicate_index: int) -> bool:
-    start = max(0, predicate_index - 3)
-    return any(token in _FUTURE_AUXILIARIES for token in tokens[start:predicate_index])
-
-
-def _contains_completed_family(
-    tokens: tuple[str, ...],
-    referents: frozenset[str],
-    completions: frozenset[str],
-    *,
-    leading_condition: bool,
-    inherited_condition: bool,
-) -> bool:
-    for referent_index, token in enumerate(tokens):
-        if token not in referents:
-            continue
-        start = max(0, referent_index - _MAX_COMPLETION_TOKEN_GAP)
-        end = min(len(tokens), referent_index + _MAX_COMPLETION_TOKEN_GAP + 1)
-        for completion_index in range(start, end):
-            if tokens[completion_index] not in completions:
-                continue
-            if _predicate_is_negated(tokens, completion_index) or _predicate_is_modal(
-                tokens,
-                completion_index,
-            ):
-                continue
-            if leading_condition:
-                continue
-            if inherited_condition and _has_future_auxiliary(tokens, completion_index):
-                continue
-            return True
-    return False
-
-
-def _has_signal(context: PolicyContext, kind: HardSignalKind) -> bool:
-    return context.signals is not None and any(
-        match.kind is kind for match in context.signals.matches
-    )
-
-
-def _concrete_needs(context: PolicyContext) -> tuple[NeedKind, ...]:
-    if context.signals is None:
-        return ()
-    needs: list[NeedKind] = []
-    for match in context.signals.matches:
-        if match.kind is HardSignalKind.CONCRETE_AID and match.need is not None and match.need not in needs:
-            needs.append(match.need)
-    return tuple(needs)
 
 
 def _catalog_item_ids(need: NeedKind | None) -> tuple[str, ...]:
@@ -586,9 +222,10 @@ def _aid_offer_text(item_ids: tuple[str, ...]) -> str:
 
 
 def _finalize_turn(context: PolicyContext, decision: ResolvedTurn) -> ResolvedTurn:
+    assessment = model_risk_assessment(context)
     side_effects = decision.side_effects
     if (
-        context.local_risk.level in {RiskLevel.CONCERN, RiskLevel.URGENT}
+        assessment.level in {RiskLevel.CONCERN, RiskLevel.URGENT}
         and PolicySideEffect.RECORD_SAFETY not in side_effects
     ):
         side_effects = (*side_effects, PolicySideEffect.RECORD_SAFETY)

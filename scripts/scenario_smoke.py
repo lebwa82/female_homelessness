@@ -49,6 +49,24 @@ class PsychologistSmokeGateway:
         )
 
 
+@dataclass
+class CriticalSmokeGateway:
+    async def evaluate(self, context: AgentContext) -> AgentEvaluation:
+        return AgentEvaluation(
+            safety=SafetyDiagnostic(
+                level=RiskLevel.CRITICAL,
+                categories=("suicide",),
+                confidence=1.0,
+                rationale="smoke",
+            ),
+            support=SupportDiagnostic(intent="open_conversation", draft_text="Я рядом."),
+            safety_status=DiagnosticStatus.COMPLETED,
+            support_status=DiagnosticStatus.COMPLETED,
+            safety_audit={"status": "completed"},
+            support_audit={"status": "completed"},
+        )
+
+
 def incoming(text: str = "", message_id: int = 1) -> IncomingMessage:
     return IncomingMessage(
         platform_user_id=900_001,
@@ -79,9 +97,11 @@ async def run_scenarios() -> None:
     assert len(store.aid_requests) == 1
     assert len(store.followup_jobs) == 1
 
-    critical = await service.handle_text(incoming("не хочу жить"))
+    critical_store = InMemoryConversationStore()
+    critical_service = ConversationService(store=critical_store, gateway=CriticalSmokeGateway())
+    critical = await critical_service.handle_text(incoming("не хочу жить"))
     assert "8-800-2000-122" in critical.text
-    assert store.escalations[-1].level is RiskLevel.CRITICAL
+    assert critical_store.escalations[-1].level is RiskLevel.CRITICAL
 
     psychologist_store = InMemoryConversationStore()
     psychologist_service = ConversationService(store=psychologist_store, gateway=PsychologistSmokeGateway())

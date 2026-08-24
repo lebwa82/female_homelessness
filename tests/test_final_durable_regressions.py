@@ -242,16 +242,18 @@ def test_deploy_gate_plan_requires_offline_checks_and_postgres_assurance_before_
 
 
 class _SupportOfferGateway:
-    def __init__(self) -> None:
+    def __init__(self, support_intents: tuple[str, ...] = ("open_conversation",)) -> None:
         self.calls = 0
+        self.support_intents = support_intents
 
     async def evaluate(self, context: AgentContext) -> AgentEvaluation:
         del context
         self.calls += 1
+        intent = self.support_intents[min(self.calls - 1, len(self.support_intents) - 1)]
         return AgentEvaluation(
             safety=SafetyDiagnostic(level="none"),
             support=SupportDiagnostic(
-                intent="open_conversation",
+                intent=intent,
                 draft_text="Можно попробовать психологическую поддержку.",
                 suggested_support=SupportOffer.PSYCHOLOGIST if self.calls == 1 else None,
             ),
@@ -269,7 +271,10 @@ def _incoming(text: str, message_id: int) -> IncomingMessage:
 @pytest.mark.asyncio
 async def test_two_turn_psychologist_offer_can_create_a_request_and_expires_after_an_unrelated_turn() -> None:
     create_store = InMemoryConversationStore()
-    create_service = ConversationService(store=create_store, gateway=_SupportOfferGateway())
+    create_service = ConversationService(
+        store=create_store,
+        gateway=_SupportOfferGateway(("open_conversation", "psychologist_request")),
+    )
 
     await create_service.handle_text(_incoming("мне тяжело", 801))
     assert create_store.conversations[101].pending_offer == "psychologist"
@@ -279,7 +284,10 @@ async def test_two_turn_psychologist_offer_can_create_a_request_and_expires_afte
     assert create_store.conversations[101].pending_offer is None
 
     expire_store = InMemoryConversationStore()
-    expire_service = ConversationService(store=expire_store, gateway=_SupportOfferGateway())
+    expire_service = ConversationService(
+        store=expire_store,
+        gateway=_SupportOfferGateway(("open_conversation", "open_conversation")),
+    )
     await expire_service.handle_text(_incoming("мне тяжело", 811))
     await expire_service.handle_text(_incoming("о погоде", 812))
 

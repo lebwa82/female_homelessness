@@ -112,47 +112,6 @@ class InboundExecutionKey:
         return cls(kind, message_id)
 
 
-class HardSignalKind(str, Enum):
-    EXPLICIT_HUMAN_REQUEST = "explicit_human_request"
-    OPEN_CONVERSATION_REQUEST = "open_conversation_request"
-    CONCRETE_AID = "concrete_aid"
-    GENERIC_AID_INTEREST = "generic_aid_interest"
-    PSYCHOLOGIST_CONSIDERING = "psychologist_considering"
-    PSYCHOLOGIST_REQUEST = "psychologist_request"
-    SUICIDE_OR_SELF_HARM = "suicide_or_self_harm"
-    VIOLENCE_OR_THREAT_NOW = "violence_or_threat_now"
-    URGENT_SHELTER = "urgent_shelter"
-    SAFETY_CONCERN = "safety_concern"
-
-
-class SignalMatch(BaseModel):
-    """Audit-safe deterministic match without retaining any user text."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: HardSignalKind
-    rule_id: str = Field(min_length=1, max_length=96)
-    token_start: int = Field(ge=0)
-    token_end: int = Field(ge=0)
-    need: NeedKind | None = None
-
-    @model_validator(mode="after")
-    def require_nonempty_token_span(self) -> SignalMatch:
-        if self.token_end <= self.token_start:
-            raise ValueError("token_end must be greater than token_start")
-        return self
-
-
-class DeterministicSignals(BaseModel):
-    """Versioned, hash-addressed output of the backend signal extractor."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    matcher_version: str = Field(min_length=1, max_length=64)
-    input_hash: str = Field(min_length=64, max_length=64)
-    matches: tuple[SignalMatch, ...] = ()
-
-
 class Choice(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -187,7 +146,7 @@ class SupportOffer(str, Enum):
 
 
 class SafetyDiagnostic(BaseModel):
-    """Model observation only; the policy never treats it as an authorization."""
+    """Authoritative structured risk diagnostic returned by the risk model."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -214,12 +173,12 @@ class SafetyDiagnostic(BaseModel):
 
 
 class SupportDiagnostic(BaseModel):
-    """Conversational model observation without any product-control fields."""
+    """Structured conversational diagnostic returned by the support model."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     intent: SupportIntent | None = None
-    need_hint: NeedKind | None = None
+    need_hints: tuple[NeedKind, ...] = Field(default=(), max_length=len(NeedKind))
     evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
     draft_text: str = Field(min_length=1, max_length=1200)
     suggested_support: SupportOffer | None = None
@@ -286,13 +245,11 @@ class RiskAssessment(BaseModel):
 
 
 class PolicyContext(BaseModel):
-    """Complete backend-owned input for resolving one text turn."""
+    """Backend state plus the two authoritative model diagnostics for one text turn."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     state: str
-    signals: DeterministicSignals | None
-    local_risk: RiskAssessment
     safety_status: DiagnosticStatus = DiagnosticStatus.UNAVAILABLE
     support_status: DiagnosticStatus = DiagnosticStatus.UNAVAILABLE
     safety: SafetyDiagnostic | None = None

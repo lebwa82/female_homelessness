@@ -79,9 +79,9 @@ async def test_evaluator_replays_pending_offer_and_active_workflow_through_servi
     assert {key: by_id["multi-aid-completion-open-01"].hard_projection[key] for key in (
         "effect", "rendered_callback_ids", "state_after"
     )} == {
-        "effect": "cancel_workflow",
-        "rendered_callback_ids": ("human",),
-        "state_after": "open_conversation",
+        "effect": "replay_workflow",
+        "rendered_callback_ids": ("more_help", "finish", "human"),
+        "state_after": "aid_requested",
     }
 
 
@@ -114,7 +114,15 @@ async def test_soft_offer_cases_are_replayed_as_two_sequential_lifecycles() -> N
         safety_audit={"status": "fixture"},
         support_audit={"status": "fixture"},
     )
-    gateway = ScriptedGateway([offer, ordinary, offer, ordinary])
+    psychologist_request = AgentEvaluation(
+        safety=SafetyDiagnostic(level="none"),
+        support=SupportDiagnostic(intent="psychologist_request", draft_text="safe"),
+        safety_status=DiagnosticStatus.COMPLETED,
+        support_status=DiagnosticStatus.COMPLETED,
+        safety_audit={"status": "fixture"},
+        support_audit={"status": "fixture"},
+    )
+    gateway = ScriptedGateway([offer, psychologist_request, offer, ordinary])
 
     report = await evaluate_cases(gateway, cases)
 
@@ -126,8 +134,8 @@ async def test_soft_offer_cases_are_replayed_as_two_sequential_lifecycles() -> N
 
 
 @pytest.mark.asyncio
-async def test_missing_live_soft_offer_does_not_become_a_hard_behavior_failure() -> None:
-    """A diagnostic-owned optional offer is a quality delta, not deterministic authority."""
+async def test_missing_model_offer_is_a_hard_behavior_failure() -> None:
+    """A model-owned offer must be present for its dependent workflow to be available."""
     cases = tuple(case for case in load_cases(DATASET) if case.group == "soft_lifecycle")
     ordinary = AgentEvaluation(
         safety=SafetyDiagnostic(level="none"),
@@ -144,9 +152,8 @@ async def test_missing_live_soft_offer_does_not_become_a_hard_behavior_failure()
         require_provider_health=True,
     )
 
-    assert report.hard_failures == ()
-    assert report.soft_failures
-    assert dialogue_eval_module._release_exit_code(report, live=True) == 0
+    assert report.hard_failures
+    assert dialogue_eval_module._release_exit_code(report, live=True) == 1
     assert dialogue_eval_module._release_exit_code(report, live=False) == 1
 
 
@@ -173,7 +180,15 @@ async def test_live_health_mode_uses_the_same_accumulated_soft_lifecycle() -> No
         safety_audit={"status": "fixture"},
         support_audit={"status": "fixture"},
     )
-    gateway = ScriptedGateway([offer, ordinary, offer, ordinary])
+    psychologist_request = AgentEvaluation(
+        safety=SafetyDiagnostic(level="none"),
+        support=SupportDiagnostic(intent="psychologist_request", draft_text="safe"),
+        safety_status=DiagnosticStatus.COMPLETED,
+        support_status=DiagnosticStatus.COMPLETED,
+        safety_audit={"status": "fixture"},
+        support_audit={"status": "fixture"},
+    )
+    gateway = ScriptedGateway([offer, psychologist_request, offer, ordinary])
 
     report = await evaluate_cases(gateway, cases, require_provider_health=True)
 
@@ -208,14 +223,14 @@ async def test_fixture_gateway_consumes_separate_agent_payload_not_expected_inva
 
 
 @pytest.mark.asyncio
-async def test_rule_ids_are_a_deploy_blocking_hard_expectation() -> None:
+async def test_model_risk_is_a_deploy_blocking_hard_expectation() -> None:
     case = load_cases(DATASET)[0]
     payloads = load_fixture_outputs(FIXTURE_OUTPUTS)
-    mismatched = replace(case, behavior={**case.behavior, "rule_ids": ("unexpected.rule",)})
+    mismatched = replace(case, behavior={**case.behavior, "model_risk": "critical"})
 
     report = await evaluate_case(FixtureGateway.from_case(mismatched, payloads), mismatched)
 
-    assert "rule_ids" in report.hard_failures
+    assert "model_risk" in report.hard_failures
 
 
 @pytest.mark.asyncio
@@ -262,18 +277,16 @@ async def test_provider_health_failure_is_separate_from_hard_behavior() -> None:
         require_provider_health=True,
     )
 
-    assert report.hard_failures == ()
-    assert report.soft_failures
-    assert all(failure.startswith("soft-offer-") for failure in report.soft_failures)
+    assert report.hard_failures
     assert len(report.provider_failures) == len(cases) * 2
 
 
 @pytest.mark.asyncio
-async def test_normalized_support_fields_remain_non_authoritative_and_observable() -> None:
+async def test_normalized_support_fields_remain_observable() -> None:
     case = load_cases(DATASET)[0]
     evaluation = AgentEvaluation(
         safety=SafetyDiagnostic(level=RiskLevel.NONE),
-        support=SupportDiagnostic(intent=None, need_hint=None, draft_text="safe draft"),
+        support=SupportDiagnostic(intent=None, need_hints=(), draft_text="safe draft"),
         safety_status=DiagnosticStatus.COMPLETED,
         support_status=DiagnosticStatus.COMPLETED,
         safety_audit={"diagnostic_status": "completed", "normalization": {"categories": []}},
@@ -282,7 +295,7 @@ async def test_normalized_support_fields_remain_non_authoritative_and_observable
             "normalization": {
                 "categories": [
                     "support_unknown_intent_cleared",
-                    "support_unknown_need_hint_cleared",
+                    "support_unknown_need_hints_cleared",
                 ]
             },
         },
@@ -296,11 +309,11 @@ async def test_normalized_support_fields_remain_non_authoritative_and_observable
     assert report.provider_failures == ()
     assert report.cases[0].diagnostics["support_normalizations"] == (
         "support_unknown_intent_cleared",
-        "support_unknown_need_hint_cleared",
+        "support_unknown_need_hints_cleared",
     )
     assert report.cases[0].diagnostic_deltas == (
         "support_intent:normalized_unknown",
-        "support_normalization:support_unknown_need_hint_cleared",
+        "support_normalization:support_unknown_need_hints_cleared",
     )
 
 

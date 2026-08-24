@@ -12,14 +12,14 @@ DATASET = Path(__file__).parent / "fixtures" / "dialogue_scenarios.jsonl"
 
 def _valid_row(case_id: str) -> dict[str, object]:
     return {
-        "version": 3,
+        "version": 4,
         "id": case_id,
         "group": "open_conversation",
         "history": [["user", "анонимный текст"]],
         "initial": {"state": "open_conversation", "pending_offer": None},
         "expected": {
             "behavior": {
-                "local_risk": "none",
+                "model_risk": "none",
                 "choice_set": "none",
                 "rendered_callback_ids": ["human"],
                 "effect": "none",
@@ -30,7 +30,6 @@ def _valid_row(case_id: str) -> dict[str, object]:
                 "escalation_count": 0,
                 "request_count": 0,
                 "copy_contains": None,
-                "rule_ids": [],
             },
             "diagnostics": {
                 "safety_levels": ["none"],
@@ -60,7 +59,7 @@ def test_dataset_has_required_coverage() -> None:
         "crisis",
         "multi_turn",
     } <= {case.group for case in cases}
-    assert all(case.version == 3 for case in cases)
+    assert all(case.version == 4 for case in cases)
     assert {
         "psychologist-considering-01",
         "psychologist-request-01",
@@ -91,16 +90,9 @@ def test_dataset_ids_are_unique() -> None:
         load_cases_from_text(duplicate)
 
 
-def test_behavior_requires_explicit_rule_ids_and_canonical_copy_for_backend_routes() -> None:
-    missing_rule_ids = _valid_row("missing-rule-ids")
-    missing_rule_ids["expected"]["behavior"].pop("rule_ids")  # type: ignore[index]
-
-    with pytest.raises(DatasetError, match="missing required keys: rule_ids"):
-        load_cases_from_text(json.dumps(missing_rule_ids))
-
+def test_behavior_requires_canonical_copy_for_backend_routes() -> None:
     missing_copy = _valid_row("missing-canonical-copy")
     behavior = missing_copy["expected"]["behavior"]  # type: ignore[index]
-    behavior["rule_ids"] = []
     behavior["choice_set"] = "aid_catalog"
     behavior["effect"] = "offer_aid"
 
@@ -115,7 +107,6 @@ def test_contextual_need_choices_do_not_require_canonical_copy() -> None:
         {
             "choice_set": "contextual_needs",
             "rendered_callback_ids": ["need:food_money", "human"],
-            "rule_ids": ["aid.food.products"],
         }
     )
 
@@ -139,7 +130,7 @@ def test_malformed_dataset_rows_fail_with_clear_errors(row: dict[str, object], m
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("local_risk", "invented-risk"),
+        ("model_risk", "invented-risk"),
         ("choice_set", "invented-choice-set"),
         ("effect", "invented-effect"),
     ],

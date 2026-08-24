@@ -23,15 +23,8 @@ from app.domain import (
     ConversationState,
     DiagnosticStatus,
     IncomingMessage,
-    PolicyContext,
-    PolicyEffect,
-    RiskLevel,
-    SupportDiagnostic,
 )
-from app.policy import resolve_turn
-from app.safety import assess_local_risk_from_signals
 from app.service import ConversationService
-from app.signals import extract_signals
 from app.store import InMemoryConversationStore
 from app.worker import DueJob
 from scripts.dialogue_eval import load_cases
@@ -63,54 +56,6 @@ async def test_outbound_audit_failure_cannot_suppress_canonical_crisis_delivery(
     assert "8-800-2000-122" in answer.await_args.args[0]
 
 
-@pytest.mark.parametrize("text", ("не хочу жить, мне страшно", "не хочу жить, я устала"))
-def test_completed_suicidal_clause_with_ordinary_distress_is_critical(text: str) -> None:
-    signals = extract_signals(text)
-
-    assert assess_local_risk_from_signals(signals).level is RiskLevel.CRITICAL
-    decision = resolve_turn(
-        PolicyContext(
-            state=ConversationState.OPEN_CONVERSATION.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            support_status=DiagnosticStatus.UNAVAILABLE,
-        )
-    )
-    assert decision.effect is PolicyEffect.CRITICAL_ESCALATION
-
-
-@pytest.mark.parametrize("text", ("не хочу жить в этом городе", "не хочу жить с ним"))
-def test_completed_suicidal_clause_keeps_location_and_relationship_near_misses_open(text: str) -> None:
-    assert assess_local_risk_from_signals(extract_signals(text)).level is RiskLevel.NONE
-
-
-@pytest.mark.asyncio
-async def test_successfully_prepared_critical_turn_makes_exactly_two_diagnostics_and_ignores_them() -> None:
-    started: list[str] = []
-    release = asyncio.Event()
-
-    async def call(name: str, _: str, __: str) -> AgentCallResult:
-        started.append(name)
-        await release.wait()
-        if name == "risk":
-            return AgentCallResult(payload={"level": "none", "rationale": "synthetic"}, audit={"status": "completed"})
-        return AgentCallResult(payload={"intent": "open_conversation", "draft_text": "synthetic"}, audit={"status": "completed"})
-
-    service = ConversationService(
-        store=InMemoryConversationStore(), gateway=YandexAgentGateway(call=call)
-    )
-    task = asyncio.create_task(service.handle_text(incoming("не хочу жить, мне страшно", 903)))
-    for _ in range(10):
-        if len(started) == 2:
-            break
-        await asyncio.sleep(0)
-    release.set()
-    turn = await task
-
-    assert sorted(started) == ["risk", "support"]
-    assert "8-800-2000-122" in turn.text
-
-
 @pytest.mark.asyncio
 async def test_diagnostic_preparation_failure_starts_no_provider_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
@@ -127,51 +72,6 @@ async def test_diagnostic_preparation_failure_starts_no_provider_tasks(monkeypat
     assert calls == []
     assert result.safety_status is DiagnosticStatus.UNAVAILABLE
     assert result.support_status is DiagnosticStatus.UNAVAILABLE
-
-
-@pytest.mark.parametrize(
-    "draft",
-    (
-        "Вам уже сегодня передали заявку специалистке.",
-        "Заявку специалистке уже передали вам.",
-        "Специалистка вам завтра позвонит.",
-        "Мы уже оформим вашу заявку.",
-    ),
-)
-def test_draft_guard_rejects_operational_claim_grammar_beyond_literal_phrases(draft: str) -> None:
-    signals = extract_signals("мне тяжело")
-    decision = resolve_turn(
-        PolicyContext(
-            state=ConversationState.OPEN_CONVERSATION.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            support_status=DiagnosticStatus.COMPLETED,
-            support=SupportDiagnostic(intent="open_conversation", draft_text=draft),
-        )
-    )
-
-    assert decision.fallback_reason == "support_draft_guard"
-
-
-@pytest.mark.parametrize(
-    "draft",
-    (
-        "Если захотите, заявку может оформить специалистка.",
-        "Специалистка может, если вы захотите, оформить заявку.",
-    ),
-)
-def test_draft_guard_allows_conditional_operational_possibility(draft: str) -> None:
-    signals = extract_signals("мне тяжело")
-    decision = resolve_turn(
-        PolicyContext(
-            state=ConversationState.OPEN_CONVERSATION.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            support_status=DiagnosticStatus.COMPLETED,
-            support=SupportDiagnostic(intent="open_conversation", draft_text=draft),
-        )
-    )
-    assert decision.text == draft
 
 
 @pytest.mark.asyncio
@@ -288,7 +188,16 @@ async def test_retry_after_post_effect_failure_uses_one_stable_text_escalation_k
             await super().complete_text(record, message_id, lease_token)
 
     store = FailingCompletionStore()
-    service = ConversationService(store=store, gateway=_gateway())
+    service = ConversationService(
+        store=store,
+        gateway=_gateway(
+            risk_payload={
+                "level": "critical",
+                "categories": ["suicide"],
+                "rationale": "synthetic",
+            }
+        ),
+    )
     update = incoming("не хочу жить, мне страшно", 912)
 
     await service.handle_text(update)
@@ -347,11 +256,21 @@ async def test_stale_bound_outbound_cannot_attach_to_a_new_identity_after_delete
     assert store.messages == []
 
 
-def _gateway() -> YandexAgentGateway:
+def _gateway(
+    *,
+    risk_payload: dict[str, object] | None = None,
+    support_payload: dict[str, object] | None = None,
+) -> YandexAgentGateway:
     async def call(name: str, _: str, __: str) -> AgentCallResult:
         if name == "risk":
-            return AgentCallResult(payload={"level": "none", "rationale": "synthetic"}, audit={"status": "completed"})
-        return AgentCallResult(payload={"intent": "open_conversation", "draft_text": "synthetic"}, audit={"status": "completed"})
+            return AgentCallResult(
+                payload=risk_payload or {"level": "none", "rationale": "synthetic"},
+                audit={"status": "completed"},
+            )
+        return AgentCallResult(
+            payload=support_payload or {"intent": "open_conversation", "draft_text": "synthetic"},
+            audit={"status": "completed"},
+        )
 
     return YandexAgentGateway(call=call)
 
@@ -368,38 +287,6 @@ async def test_human_exit_cancels_already_claimed_reminder() -> None:
     await service.handle_callback(incoming("human", 914), "human")
 
     assert store.followup_jobs == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("state", "text"),
-    (
-        (ConversationState.CHOOSING_AID, "не нужна заявка"),
-        (ConversationState.COLLECTING_LOCATION, "не хочу указывать город"),
-        (ConversationState.COLLECTING_CONTACT_METHOD, "не хочу оставлять контакт"),
-        (ConversationState.COLLECTING_CONTACT_VALUE, "не буду оставлять контакт"),
-    ),
-)
-async def test_state_specific_refusal_exits_before_any_workflow_capture(
-    state: ConversationState, text: str
-) -> None:
-    store = InMemoryConversationStore()
-    service = ConversationService(store=store, gateway=_gateway())
-    record = await store.ensure(incoming("", 917))
-    await store.update(
-        record,
-        state=state.value,
-        need="legal",
-        pending_aid_id="legal_consultation",
-        pending_contact_method="phone",
-        pending_city="synthetic-city",
-    )
-
-    turn = await service.handle_text(incoming(text, 918 + list(ConversationState).index(state)))
-
-    assert turn.audit.get("suppress_delivery") is not True
-    assert record.state == ConversationState.OPEN_CONVERSATION.value
-    assert record.pending_aid_id is None and record.pending_contact_method is None
 
 
 @pytest.mark.asyncio
@@ -567,17 +454,16 @@ def test_deploy_script_err_trap_restores_moved_legacy_target_on_restart_failure(
 
 def test_evaluator_requires_explicit_soft_lifecycle_expectations(tmp_path: Any) -> None:
     row = {
-        "version": 3,
+        "version": 4,
         "id": "soft-lifecycle",
         "group": "test",
         "history": [["user", "мне тяжело"]],
         "initial": {"state": "open_conversation", "pending_offer": None},
         "expected": {
             "behavior": {
-                "local_risk": "none", "choice_set": "none", "rendered_callback_ids": ["human"],
+                "model_risk": "none", "choice_set": "none", "rendered_callback_ids": ["human"],
                 "effect": "none", "side_effects": [], "state_after": "open_conversation", "escalation": False,
                 "escalation_cause": None, "escalation_count": 0, "request_count": 0, "copy_contains": None,
-                "rule_ids": [],
             },
             "diagnostics": {"safety_levels": ["none"], "support_intents": ["open_conversation"]},
             "soft": {"pending_offer_lifecycle": [None, "psychologist"]},

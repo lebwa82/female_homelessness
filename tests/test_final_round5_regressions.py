@@ -19,20 +19,10 @@ from app import bot, domain, worker
 from app.agents import AgentCallResult, YandexAgentGateway
 from app.domain import (
     AgentTurn,
-    ConversationState,
     DeliveryAuthorization,
-    DiagnosticStatus,
-    HardSignalKind,
     IncomingMessage,
-    PolicyContext,
-    PolicyEffect,
-    ResolvedTurn,
-    SupportDiagnostic,
 )
-from app.policy import resolve_turn
-from app.safety import assess_local_risk_from_signals
 from app.service import ConversationService
-from app.signals import extract_signals
 from app.store import InMemoryConversationStore
 
 
@@ -46,13 +36,17 @@ def incoming(text: str, message_id: int = 1201) -> IncomingMessage:
     )
 
 
-def gateway(calls: list[str] | None = None) -> YandexAgentGateway:
+def gateway(
+    calls: list[str] | None = None,
+    *,
+    risk_payload: dict[str, object] | None = None,
+) -> YandexAgentGateway:
     async def call(name: str, _: str, __: str) -> AgentCallResult:
         if calls is not None:
             calls.append(name)
         if name == "risk":
             return AgentCallResult(
-                payload={"level": "none", "rationale": "synthetic"},
+                payload=risk_payload or {"level": "none", "rationale": "synthetic"},
                 audit={"status": "completed"},
             )
         return AgentCallResult(
@@ -85,7 +79,16 @@ async def test_unpersisted_critical_keeps_identity_evidence_and_confirmed_delete
 ) -> None:
     """Removing the authorization branch would visibly send after deletion."""
     store = FailingCriticalOutcomeStore()
-    service = ConversationService(store=store, gateway=gateway())
+    service = ConversationService(
+        store=store,
+        gateway=gateway(
+            risk_payload={
+                "level": "critical",
+                "categories": ["suicide"],
+                "rationale": "synthetic",
+            }
+        ),
+    )
     update = incoming("не хочу жить")
     original = await store.ensure(update)
 
@@ -299,154 +302,6 @@ def test_runtime_and_product_docs_adopt_bounded_at_least_once_delivery() -> None
     ).lower()
     assert "bounded at-least-once" in documentation
     assert "post-send/pre-ack" in documentation
-
-
-@pytest.mark.parametrize(
-    ("state", "text"),
-    (
-        (ConversationState.COLLECTING_LOCATION, "не хочу давать город"),
-        (ConversationState.COLLECTING_LOCATION, "город давать не хочу"),
-        (ConversationState.COLLECTING_CONTACT_VALUE, "не надо записывать мой телефон"),
-        (ConversationState.COLLECTING_CONTACT_VALUE, "мой телефон записывать не надо"),
-    ),
-)
-def test_clause_bound_state_refusal_predicate_families_cancel_workflow(
-    state: ConversationState,
-    text: str,
-) -> None:
-    """Deleting either verb family or state selection must fail this table."""
-    signals = extract_signals(text, state=state)
-    decision = resolve_turn(
-        PolicyContext(
-            state=state.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            workflow_value=text,
-        )
-    )
-
-    assert any(match.kind is HardSignalKind.OPEN_CONVERSATION_REQUEST for match in signals.matches)
-    assert decision.effect is PolicyEffect.CANCEL_WORKFLOW
-
-
-@pytest.mark.parametrize(
-    ("state", "text"),
-    (
-        (ConversationState.COLLECTING_CONTACT_VALUE, "не хочу давать город"),
-        (ConversationState.COLLECTING_LOCATION, "не надо записывать мой телефон"),
-        (ConversationState.COLLECTING_LOCATION, "хочу давать город"),
-        (
-            ConversationState.COLLECTING_CONTACT_VALUE,
-            "не хочу обсуждать погоду, мой телефон записывайте",
-        ),
-    ),
-)
-def test_refusal_predicates_do_not_cross_state_clause_or_polarity(
-    state: ConversationState,
-    text: str,
-) -> None:
-    signals = extract_signals(text, state=state)
-
-    assert not any(
-        match.kind is HardSignalKind.OPEN_CONVERSATION_REQUEST for match in signals.matches
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("state", "text"),
-    (
-        (ConversationState.COLLECTING_LOCATION, "не хочу давать город"),
-        (ConversationState.COLLECTING_CONTACT_VALUE, "не надо записывать мой телефон"),
-    ),
-)
-async def test_service_refusal_clears_every_pending_value_and_never_captures_phrase(
-    state: ConversationState,
-    text: str,
-) -> None:
-    store = InMemoryConversationStore()
-    service = ConversationService(store=store, gateway=gateway())
-    update = incoming(text, 1220 if state is ConversationState.COLLECTING_LOCATION else 1221)
-    record = await store.ensure(update)
-    await store.update(
-        record,
-        state=state.value,
-        need="legal",
-        pending_aid_id="legal_consultation",
-        pending_contact_method="phone",
-        pending_city="old-city",
-        pending_district="old-district",
-        pending_offer="psychologist",
-    )
-    store.followup_jobs.append(
-        SimpleNamespace(
-            conversation_id=record.id,
-            aid_request_id=1,
-            status="processing",
-        )
-    )
-
-    await service.handle_text(update)
-
-    assert record.state == ConversationState.OPEN_CONVERSATION.value
-    assert record.need is None
-    assert record.pending_aid_id is None
-    assert record.pending_contact_method is None
-    assert record.pending_city is None
-    assert record.pending_district is None
-    assert record.pending_offer is None
-    assert store.followup_jobs == []
-    assert store.aid_requests == []
-    assert all(
-        text not in repr(value)
-        for value in (
-            record.pending_city,
-            record.pending_district,
-            record.pending_contact_method,
-            store.aid_requests,
-        )
-    )
-
-
-def _resolve_draft(draft: str) -> ResolvedTurn:
-    signals = extract_signals("мне тяжело")
-    return resolve_turn(
-        PolicyContext(
-            state=ConversationState.OPEN_CONVERSATION.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            support_status=DiagnosticStatus.COMPLETED,
-            support=SupportDiagnostic(intent="open_conversation", draft_text=draft),
-        )
-    )
-
-
-def test_draft_guard_binds_negation_to_operational_predicate() -> None:
-    decision = _resolve_draft("Не волнуйтесь я вам позвоню завтра.")
-
-    assert decision.fallback_reason == "support_draft_guard"
-
-
-def test_draft_guard_carries_leading_conditional_scope_across_comma() -> None:
-    draft = "Если захотите, мы позвоним вам завтра."
-    decision = _resolve_draft(draft)
-
-    assert decision.text == draft
-    assert decision.fallback_reason is None
-
-
-@pytest.mark.parametrize(
-    "draft",
-    (
-        "Связь с вами плохая.",
-        "Запись для вас доступна.",
-    ),
-)
-def test_draft_guard_does_not_treat_operational_stem_nouns_as_predicates(draft: str) -> None:
-    decision = _resolve_draft(draft)
-
-    assert decision.text == draft
-    assert decision.fallback_reason is None
 
 
 def _write_deploy_stub(directory: Path, name: str, body: str) -> Path:

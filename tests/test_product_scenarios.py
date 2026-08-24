@@ -9,6 +9,8 @@ from app.domain import (
     DiagnosticStatus,
     EscalationCause,
     IncomingMessage,
+    NeedKind,
+    RiskLevel,
     SafetyDiagnostic,
     SupportDiagnostic,
     SupportOffer,
@@ -127,12 +129,16 @@ def diagnostic_evaluation(
     *,
     draft_text: str = "Я рядом.",
     intent: str = "open_conversation",
+    need_hints: tuple[NeedKind, ...] = (),
     suggested_support: SupportOffer | None = None,
+    safety_level: RiskLevel = RiskLevel.NONE,
+    safety_categories: tuple[str, ...] = (),
     status: DiagnosticStatus = DiagnosticStatus.COMPLETED,
 ) -> AgentEvaluation:
     support = (
         SupportDiagnostic(
             intent=intent,
+            need_hints=need_hints,
             draft_text=draft_text,
             suggested_support=suggested_support,
         )
@@ -140,7 +146,12 @@ def diagnostic_evaluation(
         else None
     )
     return AgentEvaluation(
-        safety=SafetyDiagnostic(level="none", confidence=1.0, rationale="diagnostic"),
+        safety=SafetyDiagnostic(
+            level=safety_level,
+            categories=safety_categories,
+            confidence=1.0,
+            rationale="diagnostic",
+        ),
         support=support,
         safety_status=DiagnosticStatus.COMPLETED,
         support_status=status,
@@ -167,34 +178,35 @@ async def test_exact_listen_regression_uses_conversational_draft_and_only_global
 
 
 @pytest.mark.asyncio
-async def test_model_action_claim_cannot_create_aid_or_menu_without_a_local_signal() -> None:
+async def test_model_need_hint_creates_a_button_but_never_an_aid_request() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(
         store=store,
         gateway=FixedGateway(
             diagnostic_evaluation(
                 intent="concrete_need",
-                draft_text="Я оформила жильё и передала контакт.",
+                need_hints=(NeedKind.HOUSING,),
+                draft_text="Могу показать вариант помощи с жильём.",
             )
         ),
     )
 
     turn = await service.handle_text(identity("мне хочется выговориться"))
 
-    assert [choice.id for choice in turn.choices] == ["human"]
-    assert turn.text != "Я оформила жильё и передала контакт."
+    assert [choice.id for choice in turn.choices] == ["need:housing", "human"]
+    assert turn.text == "Могу показать вариант помощи с жильём."
     assert store.aid_requests == []
     assert store.escalations == []
 
 
 @pytest.mark.asyncio
-async def test_explicit_human_request_wins_during_a_workflow_and_invalid_diagnostics() -> None:
+async def test_model_human_request_wins_during_a_workflow() -> None:
     store = InMemoryConversationStore()
     record = await store.ensure(identity())
     record.state = "collecting_contact_value"
     service = ConversationService(
         store=store,
-        gateway=FixedGateway(diagnostic_evaluation(status=DiagnosticStatus.INVALID)),
+        gateway=FixedGateway(diagnostic_evaluation(intent="explicit_human_request")),
     )
 
     turn = await service.handle_text(identity("Позовите человека", message_id=304))
@@ -210,7 +222,11 @@ async def test_concrete_need_keeps_conversation_open_until_contextual_button_is_
     service = ConversationService(
         store=store,
         gateway=FixedGateway(
-            diagnostic_evaluation(draft_text="Слышу вас. Давайте разберёмся, чем можно помочь.")
+            diagnostic_evaluation(
+                draft_text="Слышу вас. Давайте разберёмся, чем можно помочь.",
+                intent="concrete_need",
+                need_hints=(NeedKind.FOOD_MONEY,),
+            )
         ),
     )
 
@@ -233,7 +249,18 @@ async def test_all_detected_needs_render_without_a_button_limit() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(
         store=store,
-        gateway=FixedGateway(diagnostic_evaluation(draft_text="Я рядом. Можно идти по шагам.")),
+        gateway=FixedGateway(
+            diagnostic_evaluation(
+                draft_text="Я рядом. Можно идти по шагам.",
+                intent="concrete_need",
+                need_hints=(
+                    NeedKind.FOOD_MONEY,
+                    NeedKind.HOUSING,
+                    NeedKind.LEGAL,
+                    NeedKind.CHILDREN,
+                ),
+            )
+        ),
     )
 
     turn = await service.handle_text(
@@ -277,7 +304,10 @@ async def test_pending_psychologist_offer_needs_a_later_verified_signal_before_b
                     draft_text="Я рядом. Могу рассказать о психологе.",
                     suggested_support=SupportOffer.PSYCHOLOGIST,
                 ),
-                diagnostic_evaluation(draft_text="Расскажу, как устроена поддержка."),
+                diagnostic_evaluation(
+                    intent="psychologist_considering",
+                    draft_text="Расскажу, как устроена поддержка.",
+                ),
             ]
         ),
     )
@@ -322,6 +352,18 @@ async def test_pending_psychologist_offer_expires_after_an_unrelated_reply() -> 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ("human_text", "human_button", "critical"))
 async def test_handoff_and_critical_routes_clear_a_soft_psychologist_offer(route: str) -> None:
+    route_evaluation = (
+        diagnostic_evaluation(
+            draft_text="Я рядом.",
+            safety_level=RiskLevel.CRITICAL,
+            safety_categories=("suicide",),
+        )
+        if route == "critical"
+        else diagnostic_evaluation(
+            intent="explicit_human_request" if route == "human_text" else "open_conversation",
+            draft_text="Я рядом.",
+        )
+    )
     store = InMemoryConversationStore()
     service = ConversationService(
         store=store,
@@ -331,7 +373,7 @@ async def test_handoff_and_critical_routes_clear_a_soft_psychologist_offer(route
                     draft_text="Я рядом. Могу рассказать о психологе.",
                     suggested_support=SupportOffer.PSYCHOLOGIST,
                 ),
-                diagnostic_evaluation(draft_text="Я рядом."),
+                route_evaluation,
                 diagnostic_evaluation(draft_text="Я рядом."),
             ]
         ),
@@ -356,15 +398,24 @@ async def test_handoff_and_critical_routes_clear_a_soft_psychologist_offer(route
 
 
 @pytest.mark.asyncio
-async def test_concern_and_critical_local_signals_record_only_their_deterministic_escalations() -> None:
+async def test_model_concern_and_critical_diagnostics_record_escalations() -> None:
     concern_store = InMemoryConversationStore()
-    concern = ConversationService(store=concern_store, gateway=FixedGateway(diagnostic_evaluation()))
+    concern = ConversationService(
+        store=concern_store,
+        gateway=FixedGateway(diagnostic_evaluation(safety_level=RiskLevel.CONCERN)),
+    )
     concern_turn = await concern.handle_text(identity("я боюсь возвращаться домой", message_id=310))
 
     critical_store = InMemoryConversationStore()
     critical = ConversationService(
         store=critical_store,
-        gateway=FixedGateway(diagnostic_evaluation(draft_text="Я оформила заявку.")),
+        gateway=FixedGateway(
+            diagnostic_evaluation(
+                draft_text="Я рядом.",
+                safety_level=RiskLevel.CRITICAL,
+                safety_categories=("suicide",),
+            )
+        ),
     )
     critical_turn = await critical.handle_text(identity("не хочу жить", message_id=311))
 
@@ -375,7 +426,7 @@ async def test_concern_and_critical_local_signals_record_only_their_deterministi
 
 
 @pytest.mark.asyncio
-async def test_policy_audit_has_v2_allow_list_and_never_raw_turn_data() -> None:
+async def test_policy_audit_has_model_routing_allow_list_and_never_raw_turn_data() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=FixedGateway(diagnostic_evaluation()))
 
@@ -385,15 +436,14 @@ async def test_policy_audit_has_v2_allow_list_and_never_raw_turn_data() -> None:
     assert kind == "policy_decision"
     assert set(audit) == {
         "policy_version",
-        "matcher_version",
         "state_before",
         "state_after",
-        "local_risk",
+        "model_risk",
         "safety_label",
         "safety_status",
         "support_intent",
         "support_status",
-        "rule_ids",
+        "support_need_hints",
         "choice_set",
         "rendered_callback_ids",
         "effect",

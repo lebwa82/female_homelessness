@@ -9,7 +9,7 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
@@ -34,7 +34,7 @@ from app.domain import (
 from app.service import ConversationService
 from app.store import InMemoryConversationStore
 
-DATASET_VERSION = 3
+DATASET_VERSION = 4
 MAX_CASE_CONCURRENCY = 4
 _VALIDATION_FIELD_CATEGORIES = frozenset({
     "level",
@@ -44,7 +44,7 @@ _VALIDATION_FIELD_CATEGORIES = frozenset({
     "rationale_alias_used",
     "evidence_claims",
     "intent",
-    "need_hint",
+    "need_hints",
     "draft_text",
     "suggested_support",
 })
@@ -86,7 +86,7 @@ _TRANSPORT_ERROR_CATEGORIES = {
 _DIAGNOSTIC_NORMALIZATION_CATEGORIES = frozenset({
     "safety_rationale_truncated",
     "support_unknown_intent_cleared",
-    "support_unknown_need_hint_cleared",
+    "support_unknown_need_hints_cleared",
 })
 
 
@@ -178,7 +178,6 @@ class CaseReport:
     hard_projection: dict[str, Any]
     soft_projection: dict[str, Any]
     hard_hash: str
-    rule_ids: tuple[str, ...]
     hard_failures: tuple[str, ...]
     soft_failures: tuple[str, ...]
     diagnostic_deltas: tuple[str, ...]
@@ -362,10 +361,9 @@ async def _report_turn(
     require_provider_health: bool,
 ) -> CaseReport:
     audit = _policy_audit(store)
-    rule_ids = tuple(audit.get("rule_ids", ()))
     copy_contains = case.behavior["copy_contains"]
     projection = {
-        "local_risk": audit.get("local_risk"),
+        "model_risk": audit.get("model_risk"),
         "choice_set": audit.get("choice_set"),
         "rendered_callback_ids": tuple(choice.id for choice in turn.choices),
         "effect": audit.get("effect"),
@@ -376,7 +374,6 @@ async def _report_turn(
         "escalation_count": len(store.escalations),
         "request_count": len(store.aid_requests),
         "canonical_copy_ok": copy_contains is None or copy_contains in turn.text,
-        "rule_ids": rule_ids,
     }
     soft_projection = {"pending_offer": record.pending_offer, "authoritative": False}
     soft_failures = _soft_failures(case.soft, case.initial, soft_projection)
@@ -393,7 +390,6 @@ async def _report_turn(
         projection,
         soft_projection,
         _hard_hash(projection),
-        rule_ids,
         tuple(hard_failures),
         tuple(soft_failures),
         deltas,
@@ -480,7 +476,6 @@ async def _evaluate_cases_with_soft_lifecycle(
     )
     create_service = ConversationService(store=store, gateway=_gateway_for_case(gateway, create_case))
     create_turn = await create_service.handle_text(first_incoming)
-    consume_precondition_created = record.pending_offer == SupportOffer.PSYCHOLOGIST.value
     reports[create_case.id] = await _report_turn(
         create_case,
         store,
@@ -509,11 +504,7 @@ async def _evaluate_cases_with_soft_lifecycle(
         history_matches=await store.history(record) == expected_consume_history,
         require_provider_health=require_provider_health,
     )
-    reports[consume_case.id] = (
-        consume_report
-        if consume_precondition_created
-        else _without_missing_soft_precondition_hard_failures(consume_report)
-    )
+    reports[consume_case.id] = consume_report
 
     # Branch two: create a fresh offer, then prove unrelated text expires it.
     expiry_identity = int(hashlib.sha256(b"soft-offer-expire-lifecycle").hexdigest()[:12], 16)
@@ -529,9 +520,6 @@ async def _evaluate_cases_with_soft_lifecycle(
         gateway=_gateway_for_case(gateway, create_case),
     )
     expiry_create_turn = await expiry_service.handle_text(expiry_create)
-    expiry_precondition_created = (
-        expiry_record.pending_offer == SupportOffer.PSYCHOLOGIST.value
-    )
     await expiry_service.record_outbound(expiry_create, expiry_create_turn)
     expire_incoming = IncomingMessage(
         platform_user_id=expiry_identity,
@@ -556,16 +544,7 @@ async def _evaluate_cases_with_soft_lifecycle(
         history_matches=await expiry_store.history(expiry_record) == expected_expire_history,
         require_provider_health=require_provider_health,
     )
-    reports[expire_case.id] = (
-        expire_report
-        if expiry_precondition_created
-        else replace(
-            expire_report,
-            soft_failures=tuple(
-                dict.fromkeys((*expire_report.soft_failures, "pending_offer_precondition"))
-            ),
-        )
-    )
+    reports[expire_case.id] = expire_report
 
     normal_reports = {
         case.id: await evaluate_case(
@@ -577,52 +556,9 @@ async def _evaluate_cases_with_soft_lifecycle(
     return tuple(reports[case.id] if case.id in reports else normal_reports[case.id] for case in cases)
 
 
-_SOFT_OFFER_DEPENDENT_HARD_FIELDS = frozenset(
-    {
-        "choice_set",
-        "rendered_callback_ids",
-        "effect",
-        "state_after",
-        "rule_ids",
-        "canonical_copy",
-    }
-)
-
-
-def _without_missing_soft_precondition_hard_failures(report: CaseReport) -> CaseReport:
-    """Keep unrelated hard invariants while classifying an absent optional offer as soft."""
-    return replace(
-        report,
-        hard_failures=tuple(
-            failure
-            for failure in report.hard_failures
-            if failure not in _SOFT_OFFER_DEPENDENT_HARD_FIELDS
-        ),
-        soft_failures=tuple(
-            dict.fromkeys((*report.soft_failures, "pending_offer_precondition"))
-        ),
-    )
-
-
 async def evaluate_offline_cases(gateway: FixtureGateway, cases: Sequence[DialogueCase]) -> EvalReport:
-    base = await evaluate_cases(gateway.with_variant(DiagnosticVariant.EXPECTED), cases)
-    variants = {
-        variant: await evaluate_cases(gateway.with_variant(variant), cases)
-        for variant in (DiagnosticVariant.WRONG_VALID, DiagnosticVariant.UNAVAILABLE, DiagnosticVariant.INVALID)
-    }
-    reports: list[CaseReport] = []
-    for index, report in enumerate(base.cases):
-        failures = list(report.hard_failures)
-        # Soft lifecycle cases intentionally observe a diagnostic-owned offer
-        # as a non-authoritative projection.  They are checked by their own
-        # sequential lifecycle contract, rather than pretending a mutated
-        # offer was the same stored conversation state.
-        if cases[index].group != "soft_lifecycle":
-            for variant, mutation in variants.items():
-                if mutation.cases[index].hard_hash != report.hard_hash:
-                    failures.append(f"mutation_{variant.value}_hard_projection")
-        reports.append(replace(report, hard_failures=tuple(failures)))
-    return EvalReport(cases=tuple(reports))
+    """Replay the exact versioned Qwen diagnostics that define each test case."""
+    return await evaluate_cases(gateway.with_variant(DiagnosticVariant.EXPECTED), cases)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -650,7 +586,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "hard_projection": case.hard_projection,
             "soft_projection": case.soft_projection,
             "hard_hash": case.hard_hash,
-            "rule_ids": case.rule_ids,
             "hard_failures": case.hard_failures,
             "soft_failures": case.soft_failures,
             "provider_failures": case.provider_failures,
@@ -694,7 +629,7 @@ def _fixture_evaluation(output: FixtureOutput, variant: DiagnosticVariant) -> Ag
                                                "categories": (), "confidence": 1.0, "rationale": "fixture mutation"})
         if support:
             support = support.model_copy(update={"intent": SupportIntent.EXPLICIT_HUMAN_REQUEST if support.intent is not SupportIntent.EXPLICIT_HUMAN_REQUEST else SupportIntent.OPEN_CONVERSATION,
-                                                  "need_hint": None, "suggested_support": None})
+                                                  "need_hints": (), "suggested_support": None})
     return AgentEvaluation(safety=safety, support=support, safety_status=output.safety_status,
                            support_status=output.support_status, safety_audit={"status": "fixture"}, support_audit={"status": "fixture"})
 
@@ -792,7 +727,7 @@ def _expected(
     if not isinstance(behavior, dict) or not isinstance(diagnostics, dict):
         raise DatasetError(f"{prefix}: expected sections must be objects")
     behavior_keys = {
-        "local_risk",
+        "model_risk",
         "choice_set",
         "rendered_callback_ids",
         "effect",
@@ -803,10 +738,9 @@ def _expected(
         "escalation_count",
         "request_count",
         "copy_contains",
-        "rule_ids",
     }
     _exact_keys(behavior, behavior_keys, f"{prefix}: expected.behavior")
-    for key, enum_type in (("local_risk", RiskLevel), ("choice_set", ChoiceSet), ("effect", PolicyEffect), ("state_after", ConversationState)):
+    for key, enum_type in (("model_risk", RiskLevel), ("choice_set", ChoiceSet), ("effect", PolicyEffect), ("state_after", ConversationState)):
         _enum(behavior[key], enum_type, f"{prefix}: expected.behavior.{key}")
     if not isinstance(behavior["rendered_callback_ids"], list) or not all(isinstance(item, str) and item for item in behavior["rendered_callback_ids"]):
         raise DatasetError(f"{prefix}: expected.behavior.rendered_callback_ids must be a string array")
@@ -829,10 +763,6 @@ def _expected(
         _string(behavior["copy_contains"], f"{prefix}: expected.behavior.copy_contains")
     if _requires_canonical_copy(behavior) and behavior["copy_contains"] is None:
         raise DatasetError(f"{prefix}: expected.behavior canonical copy is required")
-    if not isinstance(behavior["rule_ids"], list) or not all(
-        isinstance(item, str) and item for item in behavior["rule_ids"]
-    ):
-        raise DatasetError(f"{prefix}: expected.behavior.rule_ids must be a string array")
     _exact_keys(diagnostics, {"safety_levels", "support_intents"}, f"{prefix}: expected.diagnostics")
     parsed: dict[str, tuple[str, ...]] = {}
     for key, enum_type in (("safety_levels", RiskLevel), ("support_intents", SupportIntent)):
@@ -881,12 +811,12 @@ def _diagnostic_projection(store: InMemoryConversationStore, audit: Mapping[str,
 
 
 def _behavior_failures(expected: Mapping[str, Any], actual: Mapping[str, Any], audit: Mapping[str, Any], history_matches: bool) -> list[str]:
-    fields = ("local_risk", "choice_set", "rendered_callback_ids", "effect", "side_effects", "state_after", "escalation", "escalation_cause", "escalation_count", "request_count", "rule_ids")
+    fields = ("model_risk", "choice_set", "rendered_callback_ids", "effect", "side_effects", "state_after", "escalation", "escalation_cause", "escalation_count", "request_count")
     failures = [
         field
         for field in fields
         if actual[field]
-        != (tuple(expected[field]) if field in {"rendered_callback_ids", "side_effects", "rule_ids"} else expected[field])
+        != (tuple(expected[field]) if field in {"rendered_callback_ids", "side_effects"} else expected[field])
     ]
     if expected["copy_contains"] is not None and not actual["canonical_copy_ok"]:
         failures.append("canonical_copy")

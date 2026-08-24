@@ -18,89 +18,16 @@ from app.agents import AgentCallResult, YandexAgentGateway
 from app.domain import (
     AgentTurn,
     ConversationState,
-    DiagnosticStatus,
     IncomingMessage,
-    PolicyContext,
     PolicyEffect,
-    RiskLevel,
-    SupportDiagnostic,
 )
-from app.policy import resolve_turn
-from app.safety import assess_local_risk_from_signals
 from app.service import ConversationService
-from app.signals import extract_signals
 from app.store import ConversationRecord, InMemoryConversationStore
 from app.worker import DueJob, run_due_jobs
 
 
 def incoming(text: str, message_id: int = 1001) -> IncomingMessage:
     return IncomingMessage(platform_user_id=501, chat_id=502, text=text, message_id=message_id)
-
-
-@pytest.mark.parametrize(
-    "text",
-    (
-        "не хочу жить, в последнее время мне страшно",
-        "не хочу жить — с каждым днем всё хуже",
-        "не хочу жить. В отчаянии уже давно",
-    ),
-)
-def test_punctuation_bounded_completed_suicide_clauses_remain_critical(text: str) -> None:
-    signals = extract_signals(text)
-
-    assert assess_local_risk_from_signals(signals).level is RiskLevel.CRITICAL
-    assert resolve_turn(
-        PolicyContext(
-            state=ConversationState.OPEN_CONVERSATION.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-        )
-    ).effect is PolicyEffect.CRITICAL_ESCALATION
-
-
-@pytest.mark.asyncio
-async def test_punctuation_bounded_suicide_clause_uses_canonical_service_route() -> None:
-    calls: list[str] = []
-
-    async def call(name: str, _: str, __: str) -> AgentCallResult:
-        calls.append(name)
-        if name == "risk":
-            return AgentCallResult(payload={"level": "none", "rationale": "synthetic"}, audit={"status": "completed"})
-        return AgentCallResult(payload={"intent": "open_conversation", "draft_text": "synthetic"}, audit={"status": "completed"})
-
-    turn = await ConversationService(
-        store=InMemoryConversationStore(), gateway=YandexAgentGateway(call=call)
-    ).handle_text(incoming("не хочу жить, в последнее время мне страшно", 1002))
-
-    assert "8-800-2000-122" in turn.text
-    assert sorted(calls) == ["risk", "support"]
-
-
-@pytest.mark.parametrize(
-    ("state", "text"),
-    (
-        (ConversationState.COLLECTING_LOCATION, "город указывать не хочу"),
-        (ConversationState.COLLECTING_LOCATION, "место не укажу"),
-        (ConversationState.COLLECTING_CONTACT_VALUE, "контакт оставлять не буду"),
-        (ConversationState.COLLECTING_CONTACT_VALUE, "не дам номер"),
-        (ConversationState.CHOOSING_AID, "заявку не надо"),
-        (ConversationState.COLLECTING_CONTACT_METHOD, "давайте пропустим"),
-    ),
-)
-def test_state_specific_refusal_morphology_escapes_before_capture(
-    state: ConversationState, text: str
-) -> None:
-    signals = extract_signals(text)
-    decision = resolve_turn(
-        PolicyContext(
-            state=state.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            workflow_value=text,
-        )
-    )
-
-    assert decision.effect is PolicyEffect.CANCEL_WORKFLOW
 
 
 @pytest.mark.asyncio
@@ -124,29 +51,6 @@ async def test_finish_uses_common_cleanup_and_cancels_processing_reminder() -> N
     assert record.state == ConversationState.CLOSED.value
     assert record.pending_aid_id is None
     assert store.followup_jobs == []
-
-
-@pytest.mark.parametrize(
-    "draft",
-    (
-        "Вам завтра позвонят.",
-        "Ваша заявка будет отправлена специалистке.",
-        "Мы обязательно вам перезвоним завтра.",
-    ),
-)
-def test_draft_guard_blocks_definite_passive_and_future_operational_promises(draft: str) -> None:
-    signals = extract_signals("мне тяжело")
-    decision = resolve_turn(
-        PolicyContext(
-            state=ConversationState.OPEN_CONVERSATION.value,
-            signals=signals,
-            local_risk=assess_local_risk_from_signals(signals),
-            support_status=DiagnosticStatus.COMPLETED,
-            support=SupportDiagnostic(intent="open_conversation", draft_text=draft),
-        )
-    )
-
-    assert decision.fallback_reason == "support_draft_guard"
 
 
 def test_one_update_identity_is_independent_from_derived_effect() -> None:
