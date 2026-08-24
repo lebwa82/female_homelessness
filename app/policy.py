@@ -301,20 +301,6 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 effect=PolicyEffect.START_PSYCHOLOGIST_REQUEST,
             ),
         )
-    if _has_signal(context, HardSignalKind.CONCRETE_AID):
-        need = _concrete_need(context)
-        item_ids = _catalog_item_ids(need)
-        if need is not None and item_ids:
-            return _finalize_turn(
-                context,
-                ResolvedTurn(
-                    text=_aid_offer_text(item_ids),
-                    choice_set=ChoiceSet.AID_CATALOG,
-                    effect=PolicyEffect.OFFER_AID,
-                    need=need,
-                    catalog_item_ids=item_ids,
-                ),
-            )
     if _has_signal(context, HardSignalKind.GENERIC_AID_INTEREST):
         return _finalize_turn(
             context,
@@ -412,13 +398,27 @@ def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
 
 
 def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
+    contextual_needs = _concrete_needs(context)
+    choice_set = ChoiceSet.CONTEXTUAL_NEEDS if contextual_needs else ChoiceSet.NONE
     if context.support_status is not DiagnosticStatus.COMPLETED or context.support is None:
-        return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_diagnostic_unavailable")
+        return ResolvedTurn(
+            text=_SAFE_FALLBACK,
+            choice_set=choice_set,
+            contextual_needs=contextual_needs,
+            fallback_reason="support_diagnostic_unavailable",
+        )
     draft = context.support.draft_text.strip()
     if not draft or _claims_external_action(draft):
-        return ResolvedTurn(text=_SAFE_FALLBACK, fallback_reason="support_draft_guard")
+        return ResolvedTurn(
+            text=_SAFE_FALLBACK,
+            choice_set=choice_set,
+            contextual_needs=contextual_needs,
+            fallback_reason="support_draft_guard",
+        )
     return ResolvedTurn(
         text=draft,
+        choice_set=choice_set,
+        contextual_needs=contextual_needs,
         offered_support=context.support.suggested_support,
     )
 
@@ -560,17 +560,14 @@ def _has_signal(context: PolicyContext, kind: HardSignalKind) -> bool:
     )
 
 
-def _concrete_need(context: PolicyContext) -> NeedKind | None:
+def _concrete_needs(context: PolicyContext) -> tuple[NeedKind, ...]:
     if context.signals is None:
-        return None
-    return next(
-        (
-            match.need
-            for match in context.signals.matches
-            if match.kind is HardSignalKind.CONCRETE_AID
-        ),
-        None,
-    )
+        return ()
+    needs: list[NeedKind] = []
+    for match in context.signals.matches:
+        if match.kind is HardSignalKind.CONCRETE_AID and match.need is not None and match.need not in needs:
+            needs.append(match.need)
+    return tuple(needs)
 
 
 def _catalog_item_ids(need: NeedKind | None) -> tuple[str, ...]:

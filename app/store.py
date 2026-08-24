@@ -43,6 +43,7 @@ class ConversationRecord:
     pending_district: str | None = None
     pending_offer: str | None = None
     generation: int = 0
+    context_epoch: int = 0
     version: int = 0
 
 
@@ -211,7 +212,7 @@ class InMemoryConversationStore:
         async with lock:
             yield
 
-    async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
+    async def update(self, record: ConversationRecord, **values: str | int | None) -> ConversationRecord:
         for key, value in values.items():
             setattr(record, key, value)
         record.version += 1
@@ -220,7 +221,7 @@ class InMemoryConversationStore:
     async def append_message(
         self, record: ConversationRecord, role: str, content: str, audit: dict[str, Any] | None = None
     ) -> None:
-        self.messages.append((record.id, role, content, audit or {}))
+        self.messages.append((record.id, role, content, {**(audit or {}), "context_epoch": record.context_epoch}))
 
     async def history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
         return tuple((role, content) for conversation_id, role, content, _ in self.messages if conversation_id == record.id)
@@ -232,7 +233,7 @@ class InMemoryConversationStore:
                 "[CONTACT]" if audit.get("content_type") == "contact_value" else redact_for_model(content),
             )
             for conversation_id, role, content, audit in self.messages
-            if conversation_id == record.id
+            if conversation_id == record.id and audit.get("context_epoch", 0) == record.context_epoch
         )
 
     async def record_agent_run(self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]) -> None:
@@ -626,7 +627,7 @@ class PostgresConversationStore:
                 await session.execute(db.select(db.func.pg_advisory_unlock(record.id)))
                 await db.finish_repository_write(session)
 
-    async def update(self, record: ConversationRecord, **values: str | None) -> ConversationRecord:
+    async def update(self, record: ConversationRecord, **values: str | int | None) -> ConversationRecord:
         async with db.repository_session() as session:
             result = await session.execute(
                 db.select(db.Conversation)
@@ -653,13 +654,13 @@ class PostgresConversationStore:
     async def append_message(
         self, record: ConversationRecord, role: str, content: str, audit: dict[str, Any] | None = None
     ) -> None:
-        await db.append_message(record.id, role, content, audit)
+        await db.append_message(record.id, role, content, audit, context_epoch=record.context_epoch)
 
     async def history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
         return tuple(await db.load_history(record.id))
 
     async def model_history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
-        return tuple(await db.load_model_history(record.id))
+        return tuple(await db.load_model_history(record.id, record.context_epoch))
 
     async def record_agent_run(self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]) -> None:
         await db.record_agent_run(record.id, agent_name, audit)
@@ -964,5 +965,6 @@ class PostgresConversationStore:
             pending_district=row.pending_district,
             pending_offer=row.pending_offer,
             generation=row.generation,
+            context_epoch=row.context_epoch,
             version=row.version,
         )

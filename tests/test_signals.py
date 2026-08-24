@@ -105,6 +105,38 @@ def test_aid_fixture_rows_have_specific_or_generic_signals(
 
 
 @pytest.mark.parametrize(
+    ("text", "rule_id", "need"),
+    (
+        ("мне нужна еда", "aid.food.need", NeedKind.FOOD_MONEY),
+        ("мне нечего есть", "aid.food.nothing_to_eat", NeedKind.FOOD_MONEY),
+        ("у меня нет денег на еду", "aid.food.no_money_for_food", NeedKind.FOOD_MONEY),
+        ("мне некуда идти", "aid.housing.nowhere_to_go", NeedKind.HOUSING),
+        ("мне негде жить", "aid.housing.no_place_to_live", NeedKind.HOUSING),
+    ),
+)
+def test_natural_need_phrases_have_deterministic_contextual_signals(
+    text: str, rule_id: str, need: NeedKind
+) -> None:
+    assert ("concrete_aid", rule_id, need) in _matches(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "мне не нужна еда",
+        "мне есть что поесть",
+        "у меня есть деньги на еду",
+        "мне есть куда идти",
+        "мне есть где жить",
+        "еда была вкусной",
+        "жить стало легче",
+    ),
+)
+def test_negated_or_descriptive_need_phrases_do_not_offer_aid(text: str) -> None:
+    assert not any(kind == "concrete_aid" for kind, _, _ in _matches(text))
+
+
+@pytest.mark.parametrize(
     ("case_id", "kind", "rule_id"),
     (
         ("psychologist-02", "psychologist_considering", "psychologist.explain"),

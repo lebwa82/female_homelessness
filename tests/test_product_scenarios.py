@@ -5,6 +5,7 @@ import pytest
 
 from app.agents import AgentEvaluation
 from app.domain import (
+    ConversationState,
     DiagnosticStatus,
     EscalationCause,
     IncomingMessage,
@@ -54,6 +55,62 @@ class FailAfterHumanEscalationStore(InMemoryConversationStore):
             self._fail_handoff_audit = False
             raise RuntimeError("simulated post-escalation failure")
         await super().record_action(record, kind, status, audit, effect_key)
+
+
+@pytest.mark.asyncio
+async def test_clear_preserves_audit_records_and_replays_the_same_update() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store)
+    incoming = IncomingMessage(
+        platform_user_id=101,
+        chat_id=202,
+        username="helper_test",
+        text="/clear",
+        message_id=909,
+    )
+    record = await store.ensure(incoming)
+    conversation_id = record.id
+    await store.update(
+        record,
+        state=ConversationState.CHOOSING_AID.value,
+        need="food_money",
+        pending_aid_id="food_card",
+        pending_contact_method="current_telegram",
+        pending_city="city",
+        pending_district="district",
+        pending_offer=SupportOffer.PSYCHOLOGIST.value,
+    )
+    await store.append_message(record, "user", "before-reset")
+    await store.create_aid_request(record, "food_card", "current_telegram", "@helper_test")
+
+    first = await service.clear(incoming)
+
+    assert first.text == "Контекст очищен. Можно начать заново — я рядом."
+    assert [choice.id for choice in first.choices] == ["human"]
+    assert record.id == conversation_id
+    assert record.generation == 0
+    assert record.context_epoch == 1
+    assert record.state == ConversationState.OPEN_CONVERSATION.value
+    assert (
+        record.need,
+        record.pending_aid_id,
+        record.pending_contact_method,
+        record.pending_city,
+        record.pending_district,
+        record.pending_offer,
+    ) == (None, None, None, None, None, None)
+    assert len(store.aid_requests) == 1
+    assert len(store.followup_jobs) == 1
+    assert await store.history(record) == (("user", "before-reset"), ("user", "/clear"))
+    assert await store.model_history(record) == ()
+
+    replay = await service.clear(incoming)
+
+    assert replay.text == first.text
+    assert replay.choices == first.choices
+    assert record.context_epoch == 1
+    assert len(store.messages) == 2
+    assert len(store.actions) == 1
 
 
 def identity(text: str = "", message_id: int | None = 303) -> IncomingMessage:
@@ -148,19 +205,65 @@ async def test_explicit_human_request_wins_during_a_workflow_and_invalid_diagnos
 
 
 @pytest.mark.asyncio
-async def test_generic_and_concrete_aid_routes_are_backend_owned() -> None:
+async def test_concrete_need_keeps_conversation_open_until_contextual_button_is_clicked() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            diagnostic_evaluation(draft_text="Слышу вас. Давайте разберёмся, чем можно помочь.")
+        ),
+    )
+
+    suggestion = await service.handle_text(identity("мне нужна еда", message_id=305))
+
+    assert suggestion.text == "Слышу вас. Давайте разберёмся, чем можно помочь."
+    assert [choice.id for choice in suggestion.choices] == ["need:food_money", "human"]
+    assert store.conversations[101].state == "open_conversation"
+    assert store.aid_requests == []
+    assert not any(choice.id.startswith("aid:") for choice in suggestion.choices)
+
+    catalog = await service.handle_callback(identity(message_id=306), "need:food_money")
+
+    assert store.conversations[101].state == "choosing_aid"
+    assert any(choice.id == "aid:food_card" for choice in catalog.choices)
+
+
+@pytest.mark.asyncio
+async def test_all_detected_needs_render_without_a_button_limit() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(diagnostic_evaluation(draft_text="Я рядом. Можно идти по шагам.")),
+    )
+
+    turn = await service.handle_text(
+        identity(
+            "мне нечего есть, мне некуда идти, я потеряла паспорт и нужны вещи для ребенка",
+            message_id=307,
+        )
+    )
+
+    assert turn.text == "Я рядом. Можно идти по шагам."
+    assert [choice.id for choice in turn.choices] == [
+        "need:food_money",
+        "need:housing",
+        "need:legal",
+        "need:children",
+        "human",
+    ]
+    assert store.conversations[101].state == "open_conversation"
+    assert store.aid_requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ("мне плохо", "сколько будет 2+2", "хочу выговориться"))
+async def test_unrelated_conversation_never_gets_contextual_need_buttons(text: str) -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=FixedGateway(diagnostic_evaluation()))
 
-    generic = await service.handle_text(identity("какую помощь можно получить", message_id=305))
-    concrete = await service.handle_text(identity("мне нужны продукты", message_id=306))
+    turn = await service.handle_text(identity(text, message_id=308))
 
-    assert any(choice.id == "need:housing" for choice in generic.choices)
-    assert store.conversations[101].state == "choosing_aid"
-    assert any(choice.id == "aid:food_card" for choice in concrete.choices)
-    assert not any(
-        choice.id.startswith("need:") and choice.id != "need:other" for choice in concrete.choices
-    )
+    assert [choice.id for choice in turn.choices] == ["human"]
 
 
 @pytest.mark.asyncio

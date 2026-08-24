@@ -76,6 +76,55 @@ class ConversationService:
         async with self._lock_for(incoming):
             return await self._bind_turn_to_current_record(incoming, await self._start(incoming))
 
+    async def clear(self, incoming: IncomingMessage) -> AgentTurn:
+        async with self._lock_for(incoming):
+            try:
+                return await self._bind_turn_to_current_record(incoming, await self._clear(incoming))
+            except Exception:  # noqa: BLE001 - a failed reset must not pretend to have completed
+                return self._persistence_unavailable_turn()
+
+    async def _clear(self, incoming: IncomingMessage) -> AgentTurn:
+        async with self.store.unit_of_work(incoming) as record:
+            if record is None:
+                raise LookupError("conversation disappeared during clear")
+            return await self._clear_serialized(record, incoming)
+
+    async def _clear_serialized(self, record: ConversationRecord, incoming: IncomingMessage) -> AgentTurn:
+        lease_token = await self.store.claim_text(record, incoming.message_id)
+        if lease_token is None:
+            outcome = await self._replay_text_outcome(record, incoming.message_id)
+            if outcome is not None:
+                return outcome
+            return self._turn("Контекст очищен. Можно начать заново — я рядом.").model_copy(
+                update={"audit": {"skip_outbound_persistence": True, "suppress_delivery": True}}
+            )
+        outcome = await self._replay_text_outcome(record, incoming.message_id, lease_token)
+        if outcome is not None:
+            return outcome
+        await self.store.append_message(record, "user", "/clear", {"telegram_message_id": incoming.message_id})
+        clear_key = self._text_request_key(record, incoming.message_id, PolicyEffect.NONE)
+        await self.store.record_action(
+            record,
+            "context_cleared",
+            "completed",
+            {"from_context_epoch": record.context_epoch, "to_context_epoch": record.context_epoch + 1},
+            effect_key=self._effect_key(clear_key, "context_cleared"),
+        )
+        await self.store.update(
+            record,
+            state=ConversationState.OPEN_CONVERSATION.value,
+            need=None,
+            pending_aid_id=None,
+            pending_contact_method=None,
+            pending_city=None,
+            pending_district=None,
+            pending_offer=None,
+            context_epoch=record.context_epoch + 1,
+        )
+        turn = self._turn("Контекст очищен. Можно начать заново — я рядом.")
+        await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
+        return turn
+
     async def _start(self, incoming: IncomingMessage) -> AgentTurn:
         try:
             async with self.store.unit_of_work(incoming) as record:
@@ -369,15 +418,10 @@ class ConversationService:
             if record.state not in {
                 ConversationState.GREETING.value,
                 ConversationState.DISCOVERING_NEED.value,
+                ConversationState.OPEN_CONVERSATION.value,
                 ConversationState.CHOOSING_AID.value,
             }:
                 return await self._state_turn(record)
-            if callback_id == f"need:{NeedKind.SUPPORT.value}":
-                return await self._open_conversation_turn(
-                    record,
-                    "Я здесь и могу вас выслушать. Можно написать, что сейчас особенно важно.",
-                    clear_pending_offer=True,
-                )
             return await self._handle_need_choice(record, callback_id.removeprefix("need:"))
         if callback_id.startswith("aid:"):
             if record.state != ConversationState.CHOOSING_AID.value:
@@ -875,7 +919,11 @@ class ConversationService:
 
     @staticmethod
     def _render_resolved_turn(decision: ResolvedTurn) -> AgentTurn:
-        choices = choices_for(decision.choice_set, decision.catalog_item_ids)
+        choices = choices_for(
+            decision.choice_set,
+            decision.catalog_item_ids,
+            contextual_needs=decision.contextual_needs,
+        )
         if decision.choice_set is ChoiceSet.AID_CATALOG:
             choices = (*choices[:-1], Choice(id="need:other", label="Что-то другое"), choices[-1])
         turn = ConversationService._turn(decision.text, choices)

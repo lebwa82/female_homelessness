@@ -177,6 +177,13 @@ async def delete_request(message: Message) -> None:
     await send_turn(message, incoming, turn)
 
 
+@dp.message(Command("clear"))
+async def clear(message: Message) -> None:
+    incoming = incoming_from_message(message, text="/clear")
+    turn = await conversation_service.clear(incoming)
+    await send_turn(message, incoming, turn)
+
+
 @dp.message(Command("system_info"))
 async def system_info(message: Message) -> None:
     incoming = incoming_from_message(message, text="/system_info")

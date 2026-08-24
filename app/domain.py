@@ -175,6 +175,7 @@ class ChoiceSet(str, Enum):
     NONE = "none"
     SAFE_CONTINUE = "safe_continue"
     NEED_CATEGORIES = "need_categories"
+    CONTEXTUAL_NEEDS = "contextual_needs"
     AID_CATALOG = "aid_catalog"
     PSYCHOLOGIST_INTEREST = "psychologist_interest"
     CONTACT_METHODS = "contact_methods"
@@ -266,6 +267,7 @@ class ResolvedTurn(BaseModel):
     choice_set: ChoiceSet = ChoiceSet.NONE
     effect: PolicyEffect = PolicyEffect.NONE
     need: NeedKind | None = None
+    contextual_needs: tuple[NeedKind, ...] = ()
     catalog_item_ids: tuple[str, ...] = ()
     offered_support: SupportOffer | None = None
     workflow_value: str | None = Field(default=None, max_length=320)

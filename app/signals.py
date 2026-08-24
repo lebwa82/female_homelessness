@@ -488,6 +488,11 @@ def _add_aid_matches(tokens: tuple[str, ...], add: _AddMatch) -> None:
                 NeedKind.HOUSING,
             )
     for phrase, rule_id, need in (
+        (("мне", "нужна", "еда"), "aid.food.need", NeedKind.FOOD_MONEY),
+        (("мне", "нечего", "есть"), "aid.food.nothing_to_eat", NeedKind.FOOD_MONEY),
+        (("у", "меня", "нет", "денег", "на", "еду"), "aid.food.no_money_for_food", NeedKind.FOOD_MONEY),
+        (("мне", "некуда", "идти"), "aid.housing.nowhere_to_go", NeedKind.HOUSING),
+        (("мне", "негде", "жить"), "aid.housing.no_place_to_live", NeedKind.HOUSING),
         (("нужны", "продукты"), "aid.food.products", NeedKind.FOOD_MONEY),
         (("нужна", "карточка", "на", "еду"), "aid.food.card", NeedKind.FOOD_MONEY),
         (("потеряла", "паспорт"), "aid.legal.passport", NeedKind.LEGAL),

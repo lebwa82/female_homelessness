@@ -108,6 +108,20 @@ def test_behavior_requires_explicit_rule_ids_and_canonical_copy_for_backend_rout
         load_cases_from_text(json.dumps(missing_copy))
 
 
+def test_contextual_need_choices_do_not_require_canonical_copy() -> None:
+    contextual = _valid_row("contextual-needs-with-model-copy")
+    behavior = contextual["expected"]["behavior"]  # type: ignore[index]
+    behavior.update(
+        {
+            "choice_set": "contextual_needs",
+            "rendered_callback_ids": ["need:food_money", "human"],
+            "rule_ids": ["aid.food.products"],
+        }
+    )
+
+    assert load_cases_from_text(json.dumps(contextual))[0].behavior["choice_set"] == "contextual_needs"
+
+
 @pytest.mark.parametrize(
     ("row", "message"),
     [

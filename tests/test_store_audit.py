@@ -39,6 +39,19 @@ async def test_in_memory_store_keeps_policy_audit_without_message_text() -> None
 
 
 @pytest.mark.asyncio
+async def test_in_memory_model_history_keeps_only_the_current_context_epoch() -> None:
+    store = InMemoryConversationStore()
+    record = await store.ensure(identity())
+
+    await store.append_message(record, "user", "before-reset")
+    await store.update(record, context_epoch=record.context_epoch + 1)
+    await store.append_message(record, "assistant", "after-reset")
+
+    assert await store.history(record) == (("user", "before-reset"), ("assistant", "after-reset"))
+    assert await store.model_history(record) == (("assistant", "after-reset"),)
+
+
+@pytest.mark.asyncio
 async def test_postgres_store_forwards_policy_audit_to_database(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[int, str, str, dict[str, str]]] = []
 
@@ -138,6 +151,7 @@ async def test_postgres_update_mutates_the_supplied_record_in_place(monkeypatch:
         pending_district=None,
         pending_offer=None,
         generation=0,
+        context_epoch=0,
         version=0,
     )
 

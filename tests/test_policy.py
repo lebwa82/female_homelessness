@@ -61,7 +61,7 @@ def context(
         ("Позовите человека", ConversationState.COLLECTING_CONTACT_METHOD.value, PolicyEffect.HUMAN_HANDOFF, ChoiceSet.SAFE_CONTINUE),
         ("город Москва", ConversationState.COLLECTING_LOCATION.value, PolicyEffect.CAPTURE_LOCATION, ChoiceSet.CONTACT_METHODS),
         ("хочу поговорить с психологом", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.START_PSYCHOLOGIST_REQUEST, ChoiceSet.CONTACT_METHODS),
-        ("мне нужны продукты", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.OFFER_AID, ChoiceSet.AID_CATALOG),
+        ("мне нужны продукты", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.NONE, ChoiceSet.CONTEXTUAL_NEEDS),
         ("какую помощь можно получить", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.START_NEED_DISCOVERY, ChoiceSet.NEED_CATEGORIES),
         ("мне хочется выговориться", ConversationState.OPEN_CONVERSATION.value, PolicyEffect.NONE, ChoiceSet.NONE),
     ),

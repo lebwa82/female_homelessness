@@ -7,6 +7,7 @@ from app.db import (
     AidRequest,
     ContactPoint,
     Conversation,
+    ConversationMessage,
     Escalation,
     FollowupJob,
     RiskAssessmentRecord,
@@ -54,6 +55,8 @@ def test_conversation_identity_is_unique_per_channel_for_future_chatwoot_adapter
 
 def test_conversation_and_escalation_models_persist_policy_context() -> None:
     assert "pending_offer" in Conversation.__table__.c
+    assert Conversation.__table__.c.context_epoch.default.arg == 0
+    assert ConversationMessage.__table__.c.context_epoch.default.arg == 0
     assert "cause" in Escalation.__table__.c
     assert Escalation.__table__.c.cause.default.arg == "safety"
     assert Escalation.__table__.c.level.nullable is True
@@ -94,6 +97,8 @@ async def test_init_db_and_assurance_require_callback_lease_scan_indexes(
     monkeypatch.setattr(db, "engine", Engine())
 
     await db.init_db()
+
+    assert sum("ADD COLUMN IF NOT EXISTS context_epoch" in statement for statement in statements) == 2
 
     expected_indexes = {
         "ix_callback_executions_status",

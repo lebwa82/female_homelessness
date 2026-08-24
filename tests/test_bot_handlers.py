@@ -32,6 +32,20 @@ async def test_text_handler_passes_free_text_to_service(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_clear_handler_uses_persisted_service_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    turn = AgentTurn(text="Контекст очищен. Можно начать заново — я рядом.")
+    service = SimpleNamespace(clear=AsyncMock(return_value=turn))
+    send_turn = AsyncMock()
+    monkeypatch.setattr(bot, "conversation_service", service)
+    monkeypatch.setattr(bot, "send_turn", send_turn)
+
+    await bot.clear(message())
+
+    assert service.clear.await_args.args[0].text == "/clear"
+    assert send_turn.await_args.args[2] is turn
+
+
+@pytest.mark.asyncio
 async def test_callback_handler_answers_callback_and_keeps_bot_available(monkeypatch: pytest.MonkeyPatch) -> None:
     message_value = message()
     callback = SimpleNamespace(

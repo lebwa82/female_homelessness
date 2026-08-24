@@ -54,6 +54,15 @@ PSYCHOLOGIST_INTEREST_CHOICES = (
     HUMAN_CHOICE,
 )
 
+_CONTEXTUAL_NEED_LABELS = {
+    NeedKind.HOUSING: "Помощь с жильём",
+    NeedKind.FOOD_MONEY: "Помощь с едой",
+    NeedKind.LEGAL: "Помощь с документами",
+    NeedKind.SUPPORT: "Поддержка",
+    NeedKind.CHILDREN: "Помощь для детей",
+    NeedKind.OTHER: "Другая помощь",
+}
+
 _CHOICES_BY_SET = {
     ChoiceSet.NONE: (),
     ChoiceSet.SAFE_CONTINUE: (Choice(id="continue_bot", label="Продолжить здесь"),),
@@ -67,6 +76,8 @@ _CHOICES_BY_SET = {
 def contextual_choices_for(
     choice_set: ChoiceSet,
     catalog_item_ids: tuple[str, ...] = (),
+    *,
+    contextual_needs: tuple[NeedKind, ...] = (),
 ) -> tuple[Choice, ...]:
     """Render only the contextual backend-owned callbacks for a symbolic choice set."""
     if choice_set is ChoiceSet.AID_CATALOG:
@@ -75,12 +86,30 @@ def contextual_choices_for(
             for item_id in catalog_item_ids
             if (item := get_aid_item(item_id)) is not None
         )
+    if choice_set is ChoiceSet.CONTEXTUAL_NEEDS:
+        rendered: list[Choice] = []
+        seen: set[NeedKind] = set()
+        for need in contextual_needs:
+            if need in seen:
+                continue
+            seen.add(need)
+            rendered.append(Choice(id=f"need:{need.value}", label=_CONTEXTUAL_NEED_LABELS[need]))
+        return tuple(rendered)
     return _CHOICES_BY_SET[choice_set]
 
 
 def choices_for(
     choice_set: ChoiceSet,
     catalog_item_ids: tuple[str, ...] = (),
+    *,
+    contextual_needs: tuple[NeedKind, ...] = (),
 ) -> tuple[Choice, ...]:
     """Append the permanent human affordance independently of contextual policy choices."""
-    return (*contextual_choices_for(choice_set, catalog_item_ids), HUMAN_CHOICE)
+    return (
+        *contextual_choices_for(
+            choice_set,
+            catalog_item_ids,
+            contextual_needs=contextual_needs,
+        ),
+        HUMAN_CHOICE,
+    )

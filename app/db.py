@@ -135,6 +135,7 @@ class Conversation(Base):
     pending_district: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pending_offer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    context_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     human_handoff: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -176,6 +177,7 @@ class ConversationMessage(Base):
     content: Mapped[str] = mapped_column(Text)
     redacted_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     audit: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    context_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -478,6 +480,7 @@ async def init_db() -> None:
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_district VARCHAR(120)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_offer VARCHAR(64)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS context_epoch INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0",
             """
             CREATE TABLE IF NOT EXISTS conversation_tombstones (
@@ -496,6 +499,7 @@ async def init_db() -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_action_executions_effect_key ON action_executions (effect_key)",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS redacted_content TEXT",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS context_epoch INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
             (
                 "UPDATE conversation_messages SET expires_at = created_at + "
@@ -659,6 +663,7 @@ async def append_message(
     content: str,
     audit: dict[str, Any] | None = None,
     retention_days: int | None = None,
+    context_epoch: int = 0,
 ) -> ConversationMessage:
     redaction = redact_with_audit(content)
     async with repository_session() as session:
@@ -668,6 +673,7 @@ async def append_message(
             content=content,
             redacted_content=redaction.text,
             audit={"pii_redaction": redaction.audit, **(audit or {})},
+            context_epoch=context_epoch,
             expires_at=content_expiry_at(retention_days=retention_days),
         )
         session.add(message)
@@ -691,7 +697,7 @@ async def load_history(conversation_id: int) -> list[tuple[str, str]]:
         return [(item.role, item.content) for item in result.scalars()]
 
 
-async def load_model_history(conversation_id: int) -> list[tuple[str, str]]:
+async def load_model_history(conversation_id: int, context_epoch: int = 0) -> list[tuple[str, str]]:
     """Load only active pre-redacted history for provider-bound context."""
     now = datetime.now(UTC)
     async with repository_session() as session:
@@ -699,6 +705,7 @@ async def load_model_history(conversation_id: int) -> list[tuple[str, str]]:
             select(ConversationMessage)
             .where(
                 ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.context_epoch == context_epoch,
                 ConversationMessage.expires_at.is_not(None),
                 ConversationMessage.expires_at > now,
             )

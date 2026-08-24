@@ -1050,7 +1050,7 @@ def _hard_hash(projection: Mapping[str, Any]) -> str:
 def _requires_canonical_copy(behavior: Mapping[str, Any]) -> bool:
     return (
         behavior["effect"] != PolicyEffect.NONE.value
-        or behavior["choice_set"] != ChoiceSet.NONE.value
+        or behavior["choice_set"] not in {ChoiceSet.NONE.value, ChoiceSet.CONTEXTUAL_NEEDS.value}
     )
 
 
