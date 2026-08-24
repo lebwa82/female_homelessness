@@ -25,5 +25,6 @@ def test_followup_and_retention_settings_are_configurable_for_test_runs() -> Non
     assert settings.worker_poll_seconds == 2
 
 
-def test_default_database_url_matches_the_local_compose_port() -> None:
+def test_default_database_url_matches_the_local_compose_port(monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     assert Settings(_env_file=None).database_url.endswith(":5433/women_help")
