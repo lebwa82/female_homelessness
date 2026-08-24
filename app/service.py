@@ -192,9 +192,9 @@ class ConversationService:
         """Hold deletion serialization from durable authorization through send.
 
         The yielded token belongs to the replayable outbox record.  A missing
-        record is a confirmed tombstone and therefore deliberately yields no
-        authorization; callers must not turn a crisis exemption into a
-        tombstone bypass.
+        record is confirmed denial only when a newer tombstone exists;
+        otherwise storage absence is unavailable, allowing only canonical
+        critical delivery to fail open at the adapter boundary.
         """
         yielded = False
         execution_key = self._execution_key_for_turn(incoming, turn)

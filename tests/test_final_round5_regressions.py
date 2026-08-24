@@ -143,6 +143,40 @@ async def test_unpersisted_critical_enters_tristate_guard_and_fails_open_only_on
 
 
 @pytest.mark.asyncio
+async def test_pending_critical_outcome_fails_open_when_worker_authorization_is_unavailable() -> None:
+    """Worker replay must match the direct adapter's canonical crisis availability rule."""
+    update = incoming("", 1209)
+    turn = AgentTurn(
+        text="canonical critical",
+        audit={
+            "critical_delivery": True,
+            "conversation_id": 1,
+            "conversation_generation": 0,
+        },
+    )
+
+    @asynccontextmanager
+    async def unavailable(_: IncomingMessage, __: AgentTurn):
+        yield DeliveryAuthorization.UNAVAILABLE
+
+    service = SimpleNamespace(
+        store=SimpleNamespace(
+            pending_text_outcomes=AsyncMock(
+                return_value=(SimpleNamespace(incoming=update, turn=turn),)
+            )
+        ),
+        delivery_authorization=unavailable,
+        record_outbound=AsyncMock(),
+        record_delivery_ambiguity=AsyncMock(),
+    )
+    telegram = SimpleNamespace(send_message=AsyncMock())
+
+    assert await worker.run_pending_outcomes(telegram, service) == 1
+    telegram.send_message.assert_awaited_once()
+    service.record_outbound.assert_awaited_once_with(update, turn)
+
+
+@pytest.mark.asyncio
 async def test_missing_unpersisted_identity_without_tombstone_is_authorization_unavailable() -> (
     None
 ):

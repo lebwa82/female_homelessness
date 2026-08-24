@@ -324,7 +324,12 @@ async def run_pending_outcomes(bot: Bot, service: Any) -> int:
         send_succeeded = False
         try:
             async with service.delivery_authorization(pending.incoming, pending.turn) as authorization:
-                if authorization is not DeliveryAuthorization.ALLOW:
+                if authorization is DeliveryAuthorization.DENY_CONFIRMED:
+                    continue
+                if (
+                    authorization is DeliveryAuthorization.UNAVAILABLE
+                    and not pending.turn.audit.get("critical_delivery")
+                ):
                     continue
                 await bot.send_message(
                     pending.incoming.chat_id,
