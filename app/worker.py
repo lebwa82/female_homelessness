@@ -16,7 +16,7 @@ from sqlalchemy import and_, or_, select
 from app import db
 from app.config import settings
 from app.db import Conversation, FollowupJob, purge_expired_content
-from app.domain import ConversationState, DeliveryAuthorization
+from app.domain import DELIVERY_AMBIGUOUS_CATEGORY, ConversationState, DeliveryAuthorization
 
 logger = logging.getLogger(__name__)
 FOLLOWUP_PROCESSING_LEASE = timedelta(minutes=5)
@@ -321,6 +321,7 @@ async def run_pending_outcomes(bot: Bot, service: Any) -> int:
     """Deliver committed text outcomes without re-running model diagnostics."""
     sent = 0
     for pending in await service.store.pending_text_outcomes():
+        send_succeeded = False
         try:
             async with service.delivery_authorization(pending.incoming, pending.turn) as authorization:
                 if authorization is not DeliveryAuthorization.ALLOW:
@@ -339,7 +340,17 @@ async def run_pending_outcomes(bot: Bot, service: Any) -> int:
                         else None
                     ),
                 )
+                send_succeeded = True
         except Exception as error:  # noqa: BLE001 - the delivery context releases the lease
+            if send_succeeded:
+                try:
+                    await service.record_delivery_ambiguity(pending.incoming, pending.turn)
+                except Exception as audit_error:  # noqa: BLE001 - log is the fallback metric
+                    logger.warning(
+                        "Pending outcome category=%s audit unavailable: %s",
+                        DELIVERY_AMBIGUOUS_CATEGORY,
+                        type(audit_error).__name__,
+                    )
             logger.warning("Pending outcome delivery failed: %s", type(error).__name__)
             continue
         try:

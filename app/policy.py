@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unicodedata import normalize
-
 from app.catalog import available_aid_for_need, get_aid_item
 from app.domain import (
     ChoiceSet,
@@ -19,7 +17,7 @@ from app.domain import (
     RiskLevel,
     SupportOffer,
 )
-from app.signals import scan_signal_input
+from app.signals import ClauseBoundaryKind, scan_signal_input
 
 POLICY_VERSION = "deterministic-policy-v2"
 _SAFE_FALLBACK = "Я рядом и готова продолжить. Можно написать, что сейчас важно."
@@ -45,7 +43,9 @@ _FINITE_WORKFLOW_STATES = frozenset(
 _WORKFLOW_ESCAPE_STATES = _FINITE_WORKFLOW_STATES | {ConversationState.DISCOVERING_NEED.value}
 _EXTERNAL_COMPLETION_FAMILIES = (
     (
-        frozenset({"заявка", "заявку", "заявки", "заявке", "запрос", "запроса", "запросу", "запросом"}),
+        frozenset(
+            {"заявка", "заявку", "заявки", "заявке", "запрос", "запроса", "запросу", "запросом"}
+        ),
         frozenset(
             {
                 "сохранена",
@@ -82,7 +82,20 @@ _EXTERNAL_COMPLETION_FAMILIES = (
         ),
     ),
     (
-        frozenset({"данные", "данных", "данными", "информация", "информацию", "информации", "контакт", "контакта", "контакты", "контактов"}),
+        frozenset(
+            {
+                "данные",
+                "данных",
+                "данными",
+                "информация",
+                "информацию",
+                "информации",
+                "контакт",
+                "контакта",
+                "контакты",
+                "контактов",
+            }
+        ),
         frozenset(
             {
                 "отправлен",
@@ -108,31 +121,136 @@ _EXTERNAL_COMPLETION_FAMILIES = (
     ),
     (
         frozenset({"помощь", "помощи"}),
-        frozenset({"организована", "организован", "организованы", "организовал", "организовала", "организовали"}),
+        frozenset(
+            {
+                "организована",
+                "организован",
+                "организованы",
+                "организовал",
+                "организовала",
+                "организовали",
+            }
+        ),
     ),
     (
-        frozenset({"оператор", "оператора", "оператором", "человек", "человека", "человеком", "специалист", "специалиста", "специалистом", "специалисткой"}),
-        frozenset({"подключен", "подключена", "подключены", "подключил", "подключила", "подключили", "позвал", "позвала", "позвали", "связались"}),
+        frozenset(
+            {
+                "оператор",
+                "оператора",
+                "оператором",
+                "человек",
+                "человека",
+                "человеком",
+                "специалист",
+                "специалиста",
+                "специалистом",
+                "специалисткой",
+            }
+        ),
+        frozenset(
+            {
+                "подключен",
+                "подключена",
+                "подключены",
+                "подключил",
+                "подключила",
+                "подключили",
+                "позвал",
+                "позвала",
+                "позвали",
+                "связались",
+            }
+        ),
     ),
 )
-_NON_COMPLETION_TOKENS = frozenset({"не", "может", "могут", "могу", "можем", "если"})
 _MAX_COMPLETION_TOKEN_GAP = 6
-_OPERATIONAL_ACTORS = frozenset({
-    "я", "мы", "оператор", "оператора", "специалист", "специалиста", "специалистка", "специалистке",
-    "человек", "человека", "вам", "вас", "вы", "тобой", "тебе", "с", "вами",
-})
+_MODAL_TOKENS = frozenset(
+    {
+        "мог",
+        "могла",
+        "могли",
+        "могу",
+        "могут",
+        "можем",
+        "может",
+        "можете",
+        "можешь",
+        "смог",
+        "смогла",
+        "смогли",
+        "смогу",
+        "смогут",
+        "сможем",
+        "сможет",
+        "сможете",
+        "сможешь",
+        "можно",
+    }
+)
+_FUTURE_AUXILIARIES = frozenset({"буду", "будем", "будет", "будете", "будешь", "будут"})
+_CONDITIONAL_LEADS = frozenset({"если"})
+_CONDITIONAL_PREFIXES = frozenset({"а", "и", "но"})
+_OPERATIONAL_ACTORS = frozenset(
+    {
+        "я",
+        "мы",
+        "оператор",
+        "оператора",
+        "специалист",
+        "специалиста",
+        "специалистка",
+        "специалистке",
+        "человек",
+        "человека",
+        "вам",
+        "вас",
+        "вы",
+        "тобой",
+        "тебе",
+        "с",
+        "вами",
+    }
+)
 _OPERATIONAL_ACTION_STEMS = (
     "вызв",
     "зарегистр",
-    "запис",
+    "записа",
+    "записыва",
+    "запиш",
     "оформ",
     "отправ",
     "переда",
     "перезвон",
     "подключ",
     "позвон",
-    "связ",
+    "связа",
+    "связыва",
     "свяж",
+)
+_FINITE_ACTION_SUFFIXES = (
+    "у",
+    "ю",
+    "ем",
+    "им",
+    "ешь",
+    "ишь",
+    "ет",
+    "ит",
+    "ете",
+    "ите",
+    "ут",
+    "ют",
+    "ат",
+    "ят",
+    "л",
+    "ла",
+    "ли",
+    "лся",
+    "лась",
+    "лись",
+    "емся",
+    "имся",
+    "тся",
 )
 
 
@@ -206,9 +324,8 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 effect=PolicyEffect.START_NEED_DISCOVERY,
             ),
         )
-    if (
-        context.pending_offer is SupportOffer.PSYCHOLOGIST
-        and _has_signal(context, HardSignalKind.PSYCHOLOGIST_CONSIDERING)
+    if context.pending_offer is SupportOffer.PSYCHOLOGIST and _has_signal(
+        context, HardSignalKind.PSYCHOLOGIST_CONSIDERING
     ):
         return _finalize_turn(
             context,
@@ -308,40 +425,56 @@ def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
 
 def _claims_external_action(draft: str) -> bool:
     signal_input = scan_signal_input(draft)
+    previous_was_leading_condition = False
     for clause in signal_input.clauses:
         tokens = signal_input.values[clause.token_start : clause.token_end]
-        if _contains_operational_claim(tokens) or any(
-            _contains_completed_family(tokens, referents, completions)
+        leading_condition = _has_leading_condition(tokens)
+        inherited_condition = previous_was_leading_condition
+        if _contains_operational_claim(
+            tokens,
+            conditional=leading_condition or inherited_condition,
+        ) or any(
+            _contains_completed_family(
+                tokens,
+                referents,
+                completions,
+                leading_condition=leading_condition,
+                inherited_condition=inherited_condition,
+            )
             for referents, completions in _EXTERNAL_COMPLETION_FAMILIES
         ):
             return True
+        previous_was_leading_condition = bool(
+            leading_condition
+            and clause.boundary_after is not None
+            and clause.boundary_after.kind in {ClauseBoundaryKind.COMMA, ClauseBoundaryKind.DASH}
+        )
     return False
 
 
-def _draft_tokens(draft: str) -> tuple[str, ...]:
-    normalized = normalize("NFKC", draft).casefold().replace("ё", "е")
-    tokens: list[str] = []
-    current: list[str] = []
-    for char in normalized:
-        if char.isalnum():
-            current.append(char)
-        elif current:
-            tokens.append("".join(current))
-            current.clear()
-    if current:
-        tokens.append("".join(current))
-    return tuple(tokens)
+def _has_leading_condition(tokens: tuple[str, ...]) -> bool:
+    if not tokens:
+        return False
+    if tokens[0] in _CONDITIONAL_LEADS:
+        return True
+    return (
+        len(tokens) > 1 and tokens[0] in _CONDITIONAL_PREFIXES and tokens[1] in _CONDITIONAL_LEADS
+    )
 
 
-def _contains_operational_claim(tokens: tuple[str, ...]) -> bool:
+def _contains_operational_claim(
+    tokens: tuple[str, ...],
+    *,
+    conditional: bool,
+) -> bool:
     """Detect bounded actor/action/referent claims across reviewed inflections.
 
-    This deliberately excludes infinitives: conditional or possibility language
-    (``может оформить``) remains conversational rather than a claim that work
-    has been performed or will definitely be performed.
+    Predicate-local negation and modality suppress only the predicate they
+    govern.  A leading conditional clause scopes the immediately following
+    comma/dash-delimited clause, rather than making every later token optional.
     """
     for action_index, action in enumerate(tokens):
-        if not action.startswith(_OPERATIONAL_ACTION_STEMS) or _is_action_infinitive(action):
+        if not _is_operational_predicate(action):
             continue
         start = max(0, action_index - _MAX_COMPLETION_TOKEN_GAP)
         end = min(len(tokens), action_index + _MAX_COMPLETION_TOKEN_GAP + 1)
@@ -352,19 +485,53 @@ def _contains_operational_claim(tokens: tuple[str, ...]) -> bool:
             for referents, _ in _EXTERNAL_COMPLETION_FAMILIES
             for referent in referents
         )
-        if (has_actor or has_referent) and not _has_noncompletion_context(tokens, start, end):
+        if not (has_actor or has_referent):
+            continue
+        if _predicate_is_negated(tokens, action_index) or _predicate_is_modal(
+            tokens,
+            action_index,
+        ):
+            continue
+        if conditional:
+            continue
+        if _is_action_infinitive(action) and not _has_future_auxiliary(tokens, action_index):
+            continue
+        if not _is_action_infinitive(action) or _has_future_auxiliary(tokens, action_index):
             return True
     return False
+
+
+def _is_operational_predicate(token: str) -> bool:
+    if not token.startswith(_OPERATIONAL_ACTION_STEMS):
+        return False
+    return _is_action_infinitive(token) or token.endswith(_FINITE_ACTION_SUFFIXES)
 
 
 def _is_action_infinitive(token: str) -> bool:
     return token.endswith(("ть", "ться", "ти"))
 
 
+def _predicate_is_negated(tokens: tuple[str, ...], predicate_index: int) -> bool:
+    return predicate_index > 0 and tokens[predicate_index - 1] == "не"
+
+
+def _predicate_is_modal(tokens: tuple[str, ...], predicate_index: int) -> bool:
+    start = max(0, predicate_index - 3)
+    return any(token in _MODAL_TOKENS for token in tokens[start:predicate_index])
+
+
+def _has_future_auxiliary(tokens: tuple[str, ...], predicate_index: int) -> bool:
+    start = max(0, predicate_index - 3)
+    return any(token in _FUTURE_AUXILIARIES for token in tokens[start:predicate_index])
+
+
 def _contains_completed_family(
     tokens: tuple[str, ...],
     referents: frozenset[str],
     completions: frozenset[str],
+    *,
+    leading_condition: bool,
+    inherited_condition: bool,
 ) -> bool:
     for referent_index, token in enumerate(tokens):
         if token not in referents:
@@ -374,31 +541,44 @@ def _contains_completed_family(
         for completion_index in range(start, end):
             if tokens[completion_index] not in completions:
                 continue
-            phrase_start = min(referent_index, completion_index)
-            phrase_end = max(referent_index, completion_index) + 1
-            if not _has_noncompletion_context(tokens, phrase_start, phrase_end):
-                return True
+            if _predicate_is_negated(tokens, completion_index) or _predicate_is_modal(
+                tokens,
+                completion_index,
+            ):
+                continue
+            if leading_condition:
+                continue
+            if inherited_condition and _has_future_auxiliary(tokens, completion_index):
+                continue
+            return True
     return False
 
 
-def _has_noncompletion_context(tokens: tuple[str, ...], start: int, end: int) -> bool:
-    return bool(_NON_COMPLETION_TOKENS.intersection(tokens[max(0, start - 2) : end]))
-
-
 def _has_signal(context: PolicyContext, kind: HardSignalKind) -> bool:
-    return context.signals is not None and any(match.kind is kind for match in context.signals.matches)
+    return context.signals is not None and any(
+        match.kind is kind for match in context.signals.matches
+    )
 
 
 def _concrete_need(context: PolicyContext) -> NeedKind | None:
     if context.signals is None:
         return None
-    return next((match.need for match in context.signals.matches if match.kind is HardSignalKind.CONCRETE_AID), None)
+    return next(
+        (
+            match.need
+            for match in context.signals.matches
+            if match.kind is HardSignalKind.CONCRETE_AID
+        ),
+        None,
+    )
 
 
 def _catalog_item_ids(need: NeedKind | None) -> tuple[str, ...]:
     if need is None:
         return ()
-    return tuple(item.id for item in available_aid_for_need(need) if get_aid_item(item.id) is not None)
+    return tuple(
+        item.id for item in available_aid_for_need(need) if get_aid_item(item.id) is not None
+    )
 
 
 def _aid_offer_text(item_ids: tuple[str, ...]) -> str:

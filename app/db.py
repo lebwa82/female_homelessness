@@ -38,7 +38,13 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
-from app.domain import ConversationState, EscalationRequest, InboundExecutionKey, RiskAssessment
+from app.domain import (
+    DELIVERY_AMBIGUOUS_CATEGORY,
+    ConversationState,
+    EscalationRequest,
+    InboundExecutionKey,
+    RiskAssessment,
+)
 from app.pii import redact_with_audit
 
 CALLBACK_PROCESSING_LEASE = timedelta(minutes=5)
@@ -251,6 +257,8 @@ class InboundTextExecution(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivery_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    delivery_status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    delivery_ambiguity_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -509,6 +517,14 @@ async def init_db() -> None:
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ",
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivery_token VARCHAR(64)",
             "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS delivery_lease_expires_at TIMESTAMPTZ",
+            (
+                "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS "
+                "delivery_status VARCHAR(32) NOT NULL DEFAULT 'pending'"
+            ),
+            (
+                "ALTER TABLE inbound_text_executions ADD COLUMN IF NOT EXISTS "
+                "delivery_ambiguity_count INTEGER NOT NULL DEFAULT 0"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_inbound_text_executions_delivery_lease_expires_at "
                 "ON inbound_text_executions (delivery_lease_expires_at)"
@@ -1001,9 +1017,40 @@ async def acknowledge_text_execution_outcome(
                 InboundTextExecution.outcome.is_not(None),
                 InboundTextExecution.delivered_at.is_(None),
             )
-            .values(delivered_at=func.now(), delivery_token=None, delivery_lease_expires_at=None)
+            .values(
+                delivered_at=func.now(),
+                delivery_token=None,
+                delivery_lease_expires_at=None,
+                delivery_status="acknowledged",
+            )
         )
         await finish_repository_write(session)
+
+
+async def mark_text_execution_delivery_ambiguous(
+    conversation_id: int,
+    message_id: InboundExecutionKey | int | None,
+) -> bool:
+    """Persist the finite post-send/pre-ack transport observation."""
+    source_message_id = _execution_storage_key(message_id)
+    async with repository_session() as session:
+        result = await session.execute(
+            update(InboundTextExecution)
+            .where(
+                InboundTextExecution.conversation_id == conversation_id,
+                InboundTextExecution.source_message_id == source_message_id,
+                InboundTextExecution.outcome.is_not(None),
+                InboundTextExecution.delivered_at.is_(None),
+            )
+            .values(
+                delivery_status=DELIVERY_AMBIGUOUS_CATEGORY,
+                delivery_ambiguity_count=InboundTextExecution.delivery_ambiguity_count + 1,
+                delivery_token=None,
+                delivery_lease_expires_at=None,
+            )
+        )
+        await finish_repository_write(session)
+        return result.rowcount == 1
 
 
 async def claim_text_execution_delivery(

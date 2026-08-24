@@ -59,34 +59,142 @@ readonly TAR_BIN="/usr/bin/tar"
 readonly MV_BIN="/bin/mv"
 readonly LN_BIN="/bin/ln"
 readonly PRIVILEGED_PATH="/usr/local/bin:/usr/bin:/bin"
-readonly VERIFY_ROOT_TOOLS=1
 
-verify_root_tool() {
-  local tool="$1" metadata owner mode
-  [[ -e "$tool" ]] || {
-    echo "Refusing deployment: fixed production tool is missing: $tool" >&2
+normalize_absolute_path() {
+  local input="$1" remaining component normalized=""
+  [[ "$input" == /* ]] || {
+    echo "Refusing deployment: fixed production path is not absolute: $input" >&2
     exit 6
   }
-  metadata="$($STAT_BIN -c '%u:%a' -- "$tool")"
-  owner="${metadata%%:*}"
-  mode="${metadata#*:}"
-  if [[ "$owner" != "0" ]] || (( (8#$mode & 0022) != 0 )); then
-    echo "Refusing deployment: production tool is not root-owned and non-writable: $tool" >&2
-    exit 6
-  fi
+  remaining="${input#/}"
+  while [[ -n "$remaining" ]]; do
+    component="${remaining%%/*}"
+    if [[ "$remaining" == */* ]]; then
+      remaining="${remaining#*/}"
+    else
+      remaining=""
+    fi
+    case "$component" in
+      ""|.) ;;
+      ..)
+        [[ -n "$normalized" ]] || {
+          echo "Refusing deployment: fixed production path escapes root: $input" >&2
+          exit 6
+        }
+        if [[ "$normalized" == */* ]]; then
+          normalized="${normalized%/*}"
+        else
+          normalized=""
+        fi
+        ;;
+      *)
+        if [[ -n "$normalized" ]]; then
+          normalized="$normalized/$component"
+        else
+          normalized="$component"
+        fi
+        ;;
+    esac
+  done
+  printf '/%s\n' "$normalized"
 }
 
-if [[ "$VERIFY_ROOT_TOOLS" -eq 1 ]]; then
-  for tool in \
-    "$SUDO_BIN" "$ENV_BIN" "$BASH_BIN" "$UV_BIN" "$JUST_BIN" \
-    "$PODMAN_BIN" "$SYSTEMCTL_BIN" "$STAT_BIN" "$AWK_BIN" "$GREP_BIN" \
-    "$TEE_BIN" "$MKTEMP_BIN" "$TEST_BIN" "$READLINK_BIN" "$RM_BIN" \
-    "$MKDIR_BIN" "$TAR_BIN" "$MV_BIN" "$LN_BIN" \
-    / /usr /usr/local /usr/local/bin /usr/bin /bin
-  do
-    verify_root_tool "$tool"
+read_root_metadata() {
+  local path="$1" metadata remainder
+  if ! metadata="$($STAT_BIN -c '%F:%u:%a' -- "$path")"; then
+    echo "Refusing deployment: fixed production path is missing: $path" >&2
+    exit 6
+  fi
+  ROOT_METADATA_KIND="${metadata%%:*}"
+  remainder="${metadata#*:}"
+  ROOT_METADATA_OWNER="${remainder%%:*}"
+  ROOT_METADATA_MODE="${remainder#*:}"
+  [[ "$ROOT_METADATA_OWNER" =~ ^[0-9]+$ && "$ROOT_METADATA_MODE" =~ ^[0-7]{3,4}$ ]] || {
+    echo "Refusing deployment: invalid metadata for fixed production path: $path" >&2
+    exit 6
+  }
+}
+
+resolve_root_owned_path() {
+  local requested="$1" pending resolved candidate component suffix link_target combined hops=0
+  pending="$(normalize_absolute_path "$requested")"
+  while true; do
+    resolved="/"
+    read_root_metadata "$resolved"
+    if [[ "$ROOT_METADATA_OWNER" != "0" ]] || (( (8#$ROOT_METADATA_MODE & 0022) != 0 )); then
+      echo "Refusing deployment: root is not root-owned and non-writable" >&2
+      exit 6
+    fi
+    pending="${pending#/}"
+    while [[ -n "$pending" ]]; do
+      component="${pending%%/*}"
+      if [[ "$pending" == */* ]]; then
+        suffix="${pending#*/}"
+      else
+        suffix=""
+      fi
+      candidate="${resolved%/}/$component"
+      read_root_metadata "$candidate"
+      if [[ "$ROOT_METADATA_KIND" == "symbolic link" ]]; then
+        if [[ "$ROOT_METADATA_OWNER" != "0" ]]; then
+          echo "Refusing deployment: symlink is not root-owned: $candidate" >&2
+          exit 6
+        fi
+        hops=$((hops + 1))
+        if (( hops > 40 )); then
+          echo "Refusing deployment: too many fixed production symlink hops: $requested" >&2
+          exit 6
+        fi
+        if ! link_target="$($READLINK_BIN -- "$candidate")" || [[ -z "$link_target" ]]; then
+          echo "Refusing deployment: cannot read fixed production symlink: $candidate" >&2
+          exit 6
+        fi
+        if [[ "$link_target" == /* ]]; then
+          combined="$link_target"
+        else
+          combined="${resolved%/}/$link_target"
+        fi
+        if [[ -n "$suffix" ]]; then
+          combined="$combined/$suffix"
+        fi
+        pending="$(normalize_absolute_path "$combined")"
+        break
+      fi
+      if [[ "$ROOT_METADATA_OWNER" != "0" ]] || (( (8#$ROOT_METADATA_MODE & 0022) != 0 )); then
+        echo "Refusing deployment: root-owned path has a writable resolved component: $candidate" >&2
+        exit 6
+      fi
+      resolved="$candidate"
+      pending="$suffix"
+    done
+    if [[ -z "$pending" ]]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
   done
-fi
+}
+
+verify_root_tool() {
+  local tool="$1" resolved_tool
+  resolved_tool="$(resolve_root_owned_path "$tool")"
+  [[ -e "$resolved_tool" ]] || {
+    echo "Refusing deployment: resolved production tool is missing: $tool" >&2
+    exit 6
+  }
+}
+
+# STAT_BIN and READLINK_BIN are the fixed bootstrap pair used to inspect their
+# own paths; verifying them first bounds that trust before any other command.
+for tool in \
+  "$STAT_BIN" "$READLINK_BIN" \
+  "$SUDO_BIN" "$ENV_BIN" "$BASH_BIN" "$UV_BIN" "$JUST_BIN" \
+  "$PODMAN_BIN" "$SYSTEMCTL_BIN" "$AWK_BIN" "$GREP_BIN" \
+  "$TEE_BIN" "$MKTEMP_BIN" "$TEST_BIN" "$RM_BIN" "$MKDIR_BIN" \
+  "$TAR_BIN" "$MV_BIN" "$LN_BIN" \
+  / /usr /usr/local /usr/local/bin /usr/bin /bin
+do
+  verify_root_tool "$tool"
+done
 
 cleanup() {
   "$SUDO_BIN" "$RM_BIN" -f "$ARCHIVE_PATH"

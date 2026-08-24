@@ -14,6 +14,7 @@ from uuid import uuid4
 from app import db
 from app.config import settings
 from app.domain import (
+    DELIVERY_AMBIGUOUS_CATEGORY,
     AgentTurn,
     Choice,
     EscalationCause,
@@ -102,6 +103,8 @@ class StoredTurnOutcome:
     delivered: bool = False
     delivery_token: str | None = None
     delivery_lease_expires_at: datetime | None = None
+    delivery_status: str = "pending"
+    delivery_ambiguity_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,9 @@ class InMemoryConversationStore:
 
     async def get(self, incoming: IncomingMessage) -> ConversationRecord | None:
         return self.conversations.get(incoming.platform_user_id)
+
+    async def tombstone_generation(self, incoming: IncomingMessage) -> int | None:
+        return self.tombstone_generations.get((incoming.channel, incoming.platform_user_id))
 
     @asynccontextmanager
     async def unit_of_work(
@@ -432,6 +438,20 @@ class InMemoryConversationStore:
             outcome.delivered = True
             outcome.delivery_token = None
             outcome.delivery_lease_expires_at = None
+            outcome.delivery_status = "acknowledged"
+
+    async def mark_delivery_ambiguous(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> None:
+        key = (record.id, _execution_key(message_id).storage_key)
+        outcome = self.text_outcomes.get(key)
+        if outcome is not None and not outcome.delivered:
+            outcome.delivery_status = DELIVERY_AMBIGUOUS_CATEGORY
+            outcome.delivery_ambiguity_count += 1
+            outcome.delivery_token = None
+            outcome.delivery_lease_expires_at = None
 
     async def claim_outbound_delivery(
         self,
@@ -563,6 +583,21 @@ class PostgresConversationStore:
             )
             row = result.scalar_one_or_none()
             return self._record_from_row(row) if row is not None else None
+
+    async def tombstone_generation(self, incoming: IncomingMessage) -> int | None:
+        identity_hash = db.conversation_identity_hash(
+            incoming.channel,
+            incoming.platform_user_id,
+            self._identity_hash_key,
+        )
+        async with db.repository_session() as session:
+            result = await session.execute(
+                db.select(db.ConversationTombstone.generation).where(
+                    db.ConversationTombstone.channel == incoming.channel,
+                    db.ConversationTombstone.platform_user_hash == identity_hash,
+                )
+            )
+            return result.scalar_one_or_none()
 
     @asynccontextmanager
     async def unit_of_work(
@@ -841,6 +876,13 @@ class PostgresConversationStore:
         message_id: InboundExecutionKey | int | None,
     ) -> None:
         await db.acknowledge_text_execution_outcome(record.id, message_id)
+
+    async def mark_delivery_ambiguous(
+        self,
+        record: ConversationRecord,
+        message_id: InboundExecutionKey | int | None,
+    ) -> None:
+        await db.mark_text_execution_delivery_ambiguous(record.id, message_id)
 
     async def claim_outbound_delivery(
         self,

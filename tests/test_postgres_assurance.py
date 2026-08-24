@@ -109,7 +109,7 @@ async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytes
             order.append("session_close")
 
     session = Session()
-    claims = iter(("first", "second", "delivery"))
+    claims = iter(("first", "second", "delivery", "delivery-reclaim"))
     saved: dict[str, object] = {}
 
     def repository_call(name: str) -> None:
@@ -182,6 +182,11 @@ async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytes
     monkeypatch.setattr(db, "save_text_execution_outcome", save)
     monkeypatch.setattr(db, "load_text_execution_outcome", load)
     monkeypatch.setattr(db, "claim_text_execution_delivery", claim)
+    monkeypatch.setattr(
+        db,
+        "mark_text_execution_delivery_ambiguous",
+        lambda *args: truthy("delivery_ambiguous", *args),
+    )
     monkeypatch.setattr(db, "acknowledge_text_execution_outcome", lambda *args: nothing("ack", *args))
     monkeypatch.setattr(postgres_assurance, "_seed_legacy_followup_and_null_retention", seed_legacy)
     monkeypatch.setattr(postgres_assurance, "PostgresJobRepository", JobRepository)
@@ -195,6 +200,7 @@ async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytes
 
     assert init_runs == 2
     assert result["claim_reclaim_outcome"] is True
+    assert result["delivery_ambiguity"] is True
     assert result["followup_claim_reclaim"] is True
     assert result["null_retention_purge"] is True
     assert result["retention_purge_read"] is True
@@ -207,6 +213,7 @@ async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytes
         "fail",
         "save",
         "load",
+        "delivery_ambiguous",
         "ack",
         "append",
         "legacy_seed",

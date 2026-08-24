@@ -12,7 +12,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.config import settings
 from app.db import init_db
-from app.domain import AgentTurn, Choice, DeliveryAuthorization, IncomingMessage
+from app.domain import (
+    DELIVERY_AMBIGUOUS_CATEGORY,
+    AgentTurn,
+    Choice,
+    DeliveryAuthorization,
+    IncomingMessage,
+)
 from app.service import PERSISTENCE_UNAVAILABLE_PROMPT, ConversationService
 from app.worker import worker_loop
 
@@ -54,7 +60,7 @@ def render_keyboard(turn: AgentTurn) -> InlineKeyboardMarkup | None:
 async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn) -> None:
     if turn.audit.get("suppress_delivery"):
         return
-    if not turn.audit.get("skip_outbound_persistence"):
+    if not turn.audit.get("skip_outbound_persistence") or turn.audit.get("critical_delivery"):
         delivery_authorization = getattr(conversation_service, "delivery_authorization", None)
         if delivery_authorization is not None:
             manager = delivery_authorization(incoming, turn)
@@ -88,7 +94,21 @@ async def send_turn(message: Message, incoming: IncomingMessage, turn: AgentTurn
                 try:
                     await manager.__aexit__(None, None, None)
                 except Exception as error:  # noqa: BLE001 - the durable lease remains reclaimable
-                    logger.warning("Outbound acknowledgement unavailable: %s", type(error).__name__)
+                    record_ambiguity = getattr(conversation_service, "record_delivery_ambiguity", None)
+                    if record_ambiguity is not None:
+                        try:
+                            await record_ambiguity(incoming, turn)
+                        except Exception as audit_error:  # noqa: BLE001 - log is the fallback metric
+                            logger.warning(
+                                "Outbound delivery category=%s audit unavailable: %s",
+                                DELIVERY_AMBIGUOUS_CATEGORY,
+                                type(audit_error).__name__,
+                            )
+                    logger.warning(
+                        "Outbound delivery category=%s acknowledgement unavailable: %s",
+                        DELIVERY_AMBIGUOUS_CATEGORY,
+                        type(error).__name__,
+                    )
                     return
             if authorization is DeliveryAuthorization.UNAVAILABLE:
                 return

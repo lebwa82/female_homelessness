@@ -5,6 +5,9 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+DELIVERY_SEMANTICS = "bounded_at_least_once"
+DELIVERY_AMBIGUOUS_CATEGORY = "delivery_ambiguous"
+
 
 class ConversationState(str, Enum):
     OPEN_CONVERSATION = "open_conversation"

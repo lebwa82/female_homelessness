@@ -130,6 +130,17 @@ class ConversationService:
                     {"ui": {"choices": [choice.id for choice in turn.choices]}},
                 )
 
+    async def record_delivery_ambiguity(self, incoming: IncomingMessage, turn: AgentTurn) -> None:
+        """Persist the finite post-send/pre-ack transport observation."""
+        execution_key = self._execution_key_for_turn(incoming, turn)
+        async with self._lock_for(incoming), self.store.unit_of_work(
+            incoming,
+            create=False,
+        ) as record:
+            if record is None or not self._turn_matches_record(record, turn):
+                return
+            await self.store.mark_delivery_ambiguous(record, execution_key)
+
     @staticmethod
     def _turn_matches_record(record: ConversationRecord, turn: AgentTurn) -> bool:
         expected_id = turn.audit.get("conversation_id")
@@ -151,7 +162,14 @@ class ConversationService:
         try:
             async with self.store.unit_of_work(incoming, create=False) as record:
                 if record is None:
-                    return DeliveryAuthorization.DENY_CONFIRMED
+                    tombstone_generation = await self.store.tombstone_generation(incoming)
+                    expected_generation = turn.audit.get("conversation_generation")
+                    if tombstone_generation is not None and (
+                        not isinstance(expected_generation, int)
+                        or tombstone_generation > expected_generation
+                    ):
+                        return DeliveryAuthorization.DENY_CONFIRMED
+                    return DeliveryAuthorization.UNAVAILABLE
                 expected_id = turn.audit.get("conversation_id")
                 expected_generation = turn.audit.get("conversation_generation")
                 if (
@@ -186,8 +204,16 @@ class ConversationService:
                 create=False,
             ) as record:
                 if record is None:
+                    tombstone_generation = await self.store.tombstone_generation(incoming)
+                    expected_generation = turn.audit.get("conversation_generation")
                     yielded = True
-                    yield DeliveryAuthorization.DENY_CONFIRMED
+                    if tombstone_generation is not None and (
+                        not isinstance(expected_generation, int)
+                        or tombstone_generation > expected_generation
+                    ):
+                        yield DeliveryAuthorization.DENY_CONFIRMED
+                    else:
+                        yield DeliveryAuthorization.UNAVAILABLE
                     return
                 expected_id = turn.audit.get("conversation_id")
                 expected_generation = turn.audit.get("conversation_generation")
@@ -199,6 +225,10 @@ class ConversationService:
                 ):
                     yielded = True
                     yield DeliveryAuthorization.DENY_CONFIRMED
+                    return
+                if turn.audit.get("skip_outbound_persistence"):
+                    yielded = True
+                    yield DeliveryAuthorization.ALLOW
                     return
                 token = await self.store.claim_outbound_delivery(record, execution_key)
                 if token is None:
@@ -426,11 +456,16 @@ class ConversationService:
                 rationale="local inspection unavailable",
                 detector="local-signals",
             )
+        critical_identity: dict[str, int] = {}
         try:
             async with self.store.unit_of_work(incoming) as record:
                 if record is None:
                     raise LookupError("conversation disappeared during text update")
                 if preliminary_risk.level is RiskLevel.CRITICAL:
+                    critical_identity = {
+                        "conversation_id": record.id,
+                        "conversation_generation": record.generation,
+                    }
                     return await self._handle_persisted_critical(
                         record,
                         incoming,
@@ -441,7 +476,13 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - a critical local route alone may fail open
             if preliminary_risk.level is RiskLevel.CRITICAL:
                 return self._render_resolved_turn(critical_resolved_turn(preliminary_risk)).model_copy(
-                    update={"audit": {"skip_outbound_persistence": True, "critical_delivery": True}}
+                    update={
+                        "audit": {
+                            "skip_outbound_persistence": True,
+                            "critical_delivery": True,
+                            **critical_identity,
+                        }
+                    }
                 )
             return self._persistence_unavailable_turn()
 
@@ -992,16 +1033,18 @@ class ConversationService:
         A delete followed by a new inbound update can create a new identity for
         the same platform user.  Old turns may never attach their audit to it.
         """
-        if turn.audit.get("skip_outbound_persistence"):
+        if turn.audit.get("skip_outbound_persistence") and not turn.audit.get("critical_delivery"):
             return turn
         try:
             record = await self.store.get(incoming)
         except Exception:  # noqa: BLE001 - delivery remains independently attempted
             return turn
         if record is None:
-            # A successful lookup with no record is a confirmed tombstone, not
-            # transient storage loss.  It suppresses every stale turn,
-            # including canonical crisis wording.
+            # The held pre-send authorization distinguishes a tombstone from a
+            # first-turn write failure.  A row lookup alone cannot make that
+            # distinction, so retain the original identity evidence here.
+            if turn.audit.get("critical_delivery"):
+                return turn
             return turn.model_copy(
                 update={
                     "audit": {
@@ -1011,6 +1054,14 @@ class ConversationService:
                     }
                 }
             )
+        expected_id = turn.audit.get("conversation_id")
+        expected_generation = turn.audit.get("conversation_generation")
+        if (
+            isinstance(expected_id, int)
+            and isinstance(expected_generation, int)
+            and (record.id != expected_id or record.generation != expected_generation)
+        ):
+            return turn
         return turn.model_copy(
             update={
                 "audit": {

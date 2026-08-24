@@ -25,7 +25,10 @@ _REQUIRED_COLUMNS = {
     ("inbound_text_executions", "status"), ("inbound_text_executions", "lease_token"),
     ("inbound_text_executions", "lease_expires_at"), ("inbound_text_executions", "outcome"),
     ("inbound_text_executions", "delivered_at"), ("inbound_text_executions", "delivery_token"),
-    ("inbound_text_executions", "delivery_lease_expires_at"), ("action_executions", "effect_key"),
+    ("inbound_text_executions", "delivery_lease_expires_at"),
+    ("inbound_text_executions", "delivery_status"),
+    ("inbound_text_executions", "delivery_ambiguity_count"),
+    ("action_executions", "effect_key"),
     ("conversation_messages", "expires_at"), ("contact_points", "expires_at"),
     ("followup_jobs", "conversation_generation"), ("followup_jobs", "lease_token"),
     ("followup_jobs", "lease_expires_at"),
@@ -187,6 +190,10 @@ async def _exercise_production_repository() -> None:
     delivery_token = await db.claim_text_execution_delivery(conversation.id, message_id)
     if delivery_token is None:
         raise RuntimeError("outbox_delivery_claim_failed")
+    if not await db.mark_text_execution_delivery_ambiguous(conversation.id, message_id):
+        raise RuntimeError("outbox_delivery_ambiguity_unobservable")
+    if await db.claim_text_execution_delivery(conversation.id, message_id) is None:
+        raise RuntimeError("outbox_ambiguous_reclaim_failed")
     await db.acknowledge_text_execution_outcome(conversation.id, message_id)
 
     now = datetime.now(UTC)
@@ -253,7 +260,8 @@ async def assure() -> dict[str, object]:
             await transaction.rollback()
     return {
         "init_runs": 2, "required_columns": len(_REQUIRED_COLUMNS), "required_indexes": len(_REQUIRED_INDEXES),
-        "claim_reclaim_outcome": True, "followup_claim_reclaim": True,
+        "claim_reclaim_outcome": True, "delivery_ambiguity": True,
+        "followup_claim_reclaim": True,
         "null_retention_purge": True, "retention_purge_read": True,
         "comprehensive_delete": True, "delete_tombstone": True,
     }

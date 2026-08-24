@@ -27,6 +27,8 @@ def test_new_operational_tables_have_expected_identity_and_audit_columns() -> No
     assert "request_key" in AidRequest.__table__.c
     assert "request_key" in Escalation.__table__.c
     assert "due_at" in FollowupJob.__table__.c
+    assert db.InboundTextExecution.__table__.c.delivery_status.default.arg == "pending"
+    assert db.InboundTextExecution.__table__.c.delivery_ambiguity_count.default.arg == 0
 
 
 def test_conversation_identity_hash_is_stable_and_does_not_expose_platform_id() -> None:
