@@ -1,5 +1,10 @@
 # Project agent rules
 
+## Deployment host
+
+- The production VM for this project is `ssh -l lebwa82 51.250.96.114`.
+- Do not use another VM for deployment or operational checks unless the user explicitly changes this host.
+
 - Do not spawn, resume, inspect, interrupt, or otherwise call sub-agents for this repository.
 - Perform all implementation, review, and verification in the primary agent process.
 - This project contains safety-sensitive dialogue examples. Never pass inherited conversation history to delegated or background agent prompts.
