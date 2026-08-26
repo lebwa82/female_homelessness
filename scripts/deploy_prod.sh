@@ -58,7 +58,7 @@ readonly MKDIR_BIN="/bin/mkdir"
 readonly TAR_BIN="/usr/bin/tar"
 readonly MV_BIN="/bin/mv"
 readonly LN_BIN="/bin/ln"
-readonly DATE_BIN="/usr/bin/date"
+readonly DATE_BIN="/bin/date"
 readonly PRIVILEGED_PATH="/usr/local/bin:/usr/bin:/bin"
 
 normalize_absolute_path() {
