@@ -332,7 +332,7 @@ fi
 target_replaced=1
 "$SUDO_BIN" "$SYSTEMCTL_BIN" restart women-help-bot
 "$SUDO_BIN" "$SYSTEMCTL_BIN" is-active --quiet women-help-bot
-release_time_utc="$("$DATE_BIN" --utc '+%Y-%m-%dT%H:%M:%SZ')"
+release_time_utc="$("$DATE_BIN" -u '+%Y-%m-%dT%H:%M:%SZ')"
 printf '{"revision":"%s","released_at_utc":"%s"}\n' "$REVISION" "$release_time_utc" |
   "$SUDO_BIN" "$TEE_BIN" "$release_dir/.release.json" >/dev/null
 activation_started=0
