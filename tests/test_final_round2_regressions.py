@@ -205,7 +205,7 @@ async def test_retry_after_post_effect_failure_uses_one_stable_text_escalation_k
 
     assert len(store.escalations) == 1
     assert store.escalations[0].request.request_key is not None
-    assert [kind for _, kind, _, _ in store.actions].count("critical_escalation") == 1
+    assert [kind for _, kind, _, _ in store.actions].count("safety_escalation") == 1
     assert [kind for _, kind, _, _ in store.actions].count("policy_decision") == 1
 
 

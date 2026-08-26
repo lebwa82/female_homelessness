@@ -1,0 +1,114 @@
+requirements:
+  - id: S01
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_start_discards_an_abandoned_aid_workflow_before_s03]
+    fixtures: []
+  - id: S02
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_pause_from_s01_closes_the_workflow_with_s02_copy]
+    fixtures: []
+  - id: S03
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_start_discards_an_abandoned_aid_workflow_before_s03]
+    fixtures: [aid-08]
+  - id: S04
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_other_choice_from_s03_opens_s04_without_suggesting_aid]
+    fixtures: [open-01]
+  - id: S05
+    status: implemented
+    tests: [tests/test_domain.py::test_housing_offer_is_bounded_to_catalog]
+    fixtures: [crisis-05]
+  - id: S06
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_callback_food_workflow_creates_one_request_and_followup]
+    fixtures: [aid-02]
+  - id: S07
+    status: implemented
+    tests: [tests/test_domain.py::test_every_need_offer_contains_three_catalog_items]
+    fixtures: [aid-04]
+  - id: S08
+    status: implemented
+    tests: [tests/test_domain.py::test_every_need_offer_contains_three_catalog_items]
+    fixtures: [psychologist-request-01]
+  - id: S09
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_s11_continue_opens_the_classified_child_help_catalog]
+    fixtures: [s11-child-custody]
+  - id: S10
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_other_telegram_contact_value_completes_existing_workflow_once]
+    fixtures: [psychologist-request-01]
+  - id: S11
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_s11_continue_opens_the_classified_child_help_catalog]
+    fixtures: [s11-child-custody, crisis-05, crisis-07]
+  - id: S12
+    status: implemented
+    tests: [tests/test_policy.py::test_model_suicide_route_uses_s12_without_relying_on_a_category_string]
+    fixtures: [suicide-01]
+  - id: S13
+    status: implemented
+    tests: [tests/test_policy.py::test_model_human_request_starts_handoff]
+    fixtures: [human-01]
+  - id: S14
+    status: deferred
+    tests: []
+    fixtures: []
+    deferred_reason: No coordinator schedule has been configured for the Telegram-only MVP.
+  - id: S15
+    status: implemented
+    tests: [tests/test_worker.py::test_due_followup_is_sent_once_with_buttons_and_marked_complete]
+    fixtures: []
+  - id: S16
+    status: implemented
+    tests: [tests/test_final_round4_regressions.py::test_level_two_later_uses_common_cleanup_and_cancels_reminders]
+    fixtures: []
+  - id: S17
+    status: implemented
+    tests: [tests/test_final_round4_regressions.py::test_followup_same_renders_only_callbacks_valid_for_the_resulting_state]
+    fixtures: []
+  - id: S18
+    status: implemented
+    tests: [tests/test_final_round4_regressions.py::test_level_two_later_uses_common_cleanup_and_cancels_reminders]
+    fixtures: []
+  - id: S19
+    status: implemented
+    tests: [tests/test_final_round4_regressions.py::test_level_two_later_uses_common_cleanup_and_cancels_reminders]
+    fixtures: []
+  - id: R01_RED_FLAG_ROUTE
+    status: implemented
+    tests: [tests/test_policy.py::test_model_handoff_route_is_authoritative_even_when_urgency_is_only_concern]
+    fixtures: [s11-child-custody, crisis-05, crisis-07]
+  - id: R02_QWEN_ONLY_CLASSIFICATION
+    status: implemented
+    tests: [tests/test_policy.py::test_model_critical_diagnostic_is_authoritative_over_empty_local_projection]
+    fixtures: [s11-child-custody]
+  - id: R03_CONTEXTUAL_BUTTONS
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_all_detected_needs_render_without_a_button_limit]
+    fixtures: [aid-02, aid-04, aid-06]
+  - id: R04_RESET_SEMANTICS
+    status: implemented
+    tests: [tests/test_product_scenarios.py::test_clear_preserves_audit_records_and_replays_the_same_update]
+    fixtures: []
+  - id: R05_RUSSIAN_ONLY
+    status: deferred
+    tests: []
+    fixtures: []
+    deferred_reason: The current specification prohibits language switching but does not define a Russian-language fallback response.
+  - id: R06_PRIVACY_RETENTION
+    status: deferred
+    tests: []
+    fixtures: []
+    deferred_reason: The baseline specification conflicts with the later approved full local transcript retention decision.
+  - id: R07_FOLLOWUP_AFTER_DELIVERY
+    status: deferred
+    tests: []
+    fixtures: []
+    deferred_reason: The Telegram MVP currently treats a completed aid request as simulated delivery.
+  - id: R08_CHATWOOT_HANDOFF
+    status: deferred
+    tests: []
+    fixtures: []
+    deferred_reason: Chatwoot is deliberately deferred while Telegram remains the only channel.

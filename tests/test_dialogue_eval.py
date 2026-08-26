@@ -43,7 +43,8 @@ async def test_fixture_replay_has_no_hard_failures_and_retains_all_cases() -> No
 
     assert report.hard_failures == ()
     assert report.diagnostic_deltas == ()
-    assert len(report.cases) == 65
+    assert len(report.cases) == 66
+    assert "s11-child-custody" in {case.case_id for case in report.cases}
     assert {
         "suicide-direct-want-die",
         "suicide-direct-kill-self",

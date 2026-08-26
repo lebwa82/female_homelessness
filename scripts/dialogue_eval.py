@@ -38,6 +38,7 @@ DATASET_VERSION = 4
 MAX_CASE_CONCURRENCY = 4
 _VALIDATION_FIELD_CATEGORIES = frozenset({
     "level",
+    "escalation",
     "categories",
     "confidence",
     "rationale",

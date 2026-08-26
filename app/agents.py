@@ -14,10 +14,6 @@ from typing import Any
 
 from openai import AsyncOpenAI
 from pydantic import ValidationError
-from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
-from pydantic_ai.profiles.openai import OpenAIModelProfile
-from pydantic_ai.providers.openai import OpenAIProvider
 
 from app.config import settings
 from app.domain import (
@@ -31,12 +27,19 @@ from app.pii import redact_with_audit
 from app.skills import load_support_skills
 
 RISK_INSTRUCTIONS = """Ты даёшь только диагностическую оценку опасности в русскоязычном обращении.
-Верни единственный JSON-объект без Markdown и без пояснений. Обязательно поле level: critical
-для непосредственной угрозы жизни, суицида или насилия сейчас; urgent для ситуации «сегодня
-негде ночевать» или выселения прямо сейчас; concern для страха, угрозы или нестабильного жилья
-без непосредственной опасности; none если опасности не видно. Допустимы только поля level,
-categories, confidence, rationale и evidence_claims. Просьба поговорить с человеком, ботом или
-психологом не является риском. Не предлагай действий, кнопок или переходов."""
+Верни единственный JSON-объект без Markdown и без пояснений. Обязательны level и escalation.
+level — срочность: critical для непосредственной угрозы жизни, суицида или насилия сейчас;
+urgent для ситуации «сегодня негде ночевать» или выселения прямо сейчас; concern для страха,
+угрозы или нестабильного жилья без непосредственной опасности; none если опасности не видно.
+escalation — маршрут продукта, независимо от level: suicide при суицидальном смысле; handoff
+при угрозе или насилии, остром бездомье, опасности для детей или эмоциональном кризисе;
+none иначе. Возможные categories: violence_threat, acute_homelessness, child_safety,
+emotional_crisis, suicide, direct_human_request. Указывай только подтверждённые смыслом
+сообщения категории. Например, страх, что партнёр заберёт детей — child_safety и handoff даже
+при level concern; «сегодня ночую на улице» — acute_homelessness и handoff; «хочу исчезнуть» —
+suicide и suicide. Прямой запрос живого человека отмечай direct_human_request и handoff.
+Допустимы только поля level, escalation, categories, confidence, rationale и evidence_claims.
+Не предлагай действий, кнопок или переходов."""
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
 Верни единственный JSON-объект без Markdown и без пояснений. Обязательны intent и draft_text;
@@ -56,17 +59,17 @@ catalog_item_ids, callback IDs, workflow state, effect, переход или о
 
 @dataclass(frozen=True)
 class ProviderSettings:
-    temperature: float = 0.0
-    max_tokens: int = 300
+    temperature: float = 0.3
+    max_tokens: int = 150
     reasoning_effort: str = "none"
     data_logging_enabled: bool = False
 
-    def model_settings(self) -> OpenAIResponsesModelSettings:
-        return OpenAIResponsesModelSettings(
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            openai_reasoning_effort=self.reasoning_effort,
-        )
+    def model_settings(self) -> dict[str, Any]:
+        return {
+            "temperature": self.temperature,
+            "max_output_tokens": self.max_tokens,
+            "reasoning": {"effort": self.reasoning_effort},
+        }
 
     def audit_fields(self) -> dict[str, Any]:
         return {
@@ -81,6 +84,7 @@ DEFAULT_PROVIDER_SETTINGS = ProviderSettings()
 PROVIDER_TIMEOUT_SECONDS = 12.0
 _SAFETY_RATIONALE_MAX_LENGTH = 240
 _NORMALIZATION_CATEGORIES = frozenset({
+    "direct_human_request_level_normalized",
     "safety_rationale_truncated",
     "support_unknown_intent_cleared",
     "support_unknown_need_hints_cleared",
@@ -120,9 +124,7 @@ class AgentEvaluation:
 Call = Callable[[str, str, str], Awaitable[AgentCallResult]]
 
 
-def yandex_model_settings(
-    provider_settings: ProviderSettings = DEFAULT_PROVIDER_SETTINGS,
-) -> OpenAIResponsesModelSettings:
+def yandex_model_settings(provider_settings: ProviderSettings = DEFAULT_PROVIDER_SETTINGS) -> dict[str, Any]:
     return provider_settings.model_settings()
 
 
@@ -138,19 +140,60 @@ def create_yandex_client() -> AsyncOpenAI:
     )
 
 
-def yandex_output_type(agent_name: str) -> type[str]:
-    """Use a single text response and validate one JSON object at our provider boundary."""
-    del agent_name
-    return str
+def yandex_response_format(agent_name: str) -> dict[str, str]:
+    """Use the provider's compatible Responses JSON-object mode for diagnostics."""
+    if agent_name not in {"risk", "support"}:
+        raise ValueError(f"unknown_agent:{agent_name}")
+    return {"type": "json_object"}
+
+
+def response_output_text(response: Any) -> str:
+    """Read Responses API message content without retaining the full provider response."""
+    texts = [
+        content.text
+        for item in getattr(response, "output", ())
+        for content in getattr(item, "content", ())
+        if isinstance(getattr(content, "text", None), str)
+    ]
+    return "\n".join(texts)
+
+
+def provider_payload_is_valid(agent_name: str, payload: dict[str, Any]) -> bool:
+    """Check the typed diagnostic contract before deciding whether to retry its transport."""
+    try:
+        if agent_name == "risk":
+            SafetyDiagnostic.model_validate(payload)
+        elif agent_name == "support":
+            SupportDiagnostic.model_validate(payload)
+        else:
+            return False
+    except ValidationError:
+        return False
+    return True
 
 
 def parse_provider_json_object(raw_output: str) -> dict[str, Any]:
-    """Accept exactly one JSON object, optionally wrapped in a known Markdown code fence."""
+    """Parse the one provider object even if Qwen wraps it in harmless prose."""
     candidate = raw_output.strip()
     for prefix in ("```json\n", "```\n"):
         if candidate.lower().startswith(prefix) and candidate.endswith("\n```"):
             candidate = candidate[len(prefix) : -4].strip()
             break
+    parsed = _decode_json_object(candidate)
+    if parsed is not None:
+        return parsed
+
+    # Qwen occasionally puts an otherwise valid response after a short prose
+    # preface.  This only recovers one strict JSON object; schema validation
+    # below still rejects unknown or missing product fields.
+    for start in (index for index, char in enumerate(candidate) if char == "{"):
+        parsed = _decode_json_object_prefix(candidate[start:])
+        if parsed is not None:
+            return parsed
+    return {}
+
+
+def _decode_json_object(candidate: str) -> dict[str, Any] | None:
     try:
         parsed = json.loads(
             candidate,
@@ -158,8 +201,19 @@ def parse_provider_json_object(raw_output: str) -> dict[str, Any]:
             parse_constant=_reject_nonstandard_json_constant,
         )
     except (json.JSONDecodeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _decode_json_object_prefix(candidate: str) -> dict[str, Any] | None:
+    try:
+        parsed, _ = json.JSONDecoder(
+            object_pairs_hook=_json_object_without_duplicates,
+            parse_constant=_reject_nonstandard_json_constant,
+        ).raw_decode(candidate)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -190,11 +244,14 @@ def provider_output_shape(raw_output: str) -> dict[str, bool | int]:
 
 
 def usage_audit(usage: Any) -> dict[str, int]:
+    cached_tokens = getattr(usage, "cache_read_tokens", None)
+    if not isinstance(cached_tokens, int):
+        cached_tokens = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0)
     return {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
-        "cached_tokens": usage.cache_read_tokens,
+        "cached_tokens": cached_tokens if isinstance(cached_tokens, int) else 0,
     }
 
 
@@ -276,33 +333,40 @@ class YandexAgentGateway:
         client = create_yandex_client()
         started = perf_counter()
         try:
-            model = OpenAIResponsesModel(
-                f"gpt://{settings.yandex_cloud_folder_id}/{settings.yandex_ai_model}",
-                provider=OpenAIProvider(openai_client=client),
-                profile=OpenAIModelProfile(openai_supports_json_object_output=False),
-            )
-            agent = Agent(
-                model,
-                output_type=yandex_output_type(agent_name),
+            response = await client.responses.create(
+                model=f"gpt://{settings.yandex_cloud_folder_id}/{settings.yandex_ai_model}",
                 instructions=instructions,
-                model_settings=yandex_model_settings(self._provider_settings),
-                retries=0,
+                input=input_text,
+                text={"format": yandex_response_format(agent_name)},
+                **yandex_model_settings(self._provider_settings),
             )
-            result = await agent.run(input_text)
-            output = parse_provider_json_object(result.output)
-            response = result.response
+            output_text = response_output_text(response)
+            output = parse_provider_json_object(output_text)
+            format_retry_count = 0
+            if not provider_payload_is_valid(agent_name, output):
+                format_retry_count = 1
+                response = await client.responses.create(
+                    model=f"gpt://{settings.yandex_cloud_folder_id}/{settings.yandex_ai_model}",
+                    instructions=(
+                        f"{instructions}\n\nТехническое повторение: верни полный JSON-объект, "
+                        "содержащий все обязательные поля, без любого другого текста."
+                    ),
+                    input=input_text,
+                    text={"format": yandex_response_format(agent_name)},
+                    **yandex_model_settings(self._provider_settings),
+                )
+                output_text = response_output_text(response)
+                output = parse_provider_json_object(output_text)
             return AgentCallResult(
                 payload=output,
                 audit={
                     "status": "completed",
-                    "rationale_alias_used": bool(
-                        getattr(output, "rationale_alias_used", False)
-                    ),
-                    "response_id": getattr(response, "provider_response_id", None),
-                    "model": getattr(response, "model_name", None),
+                    "response_id": getattr(response, "id", None),
+                    "model": getattr(response, "model", None),
                     "latency_ms": round((perf_counter() - started) * 1000),
-                    "usage": usage_audit(result.usage),
-                    "output_shape": provider_output_shape(result.output),
+                    "usage": usage_audit(response.usage),
+                    "format_retry_count": format_retry_count,
+                    "output_shape": provider_output_shape(output_text),
                 },
             )
         except Exception as error:  # noqa: BLE001 - SDK/provider errors have no stable common base
@@ -421,6 +485,14 @@ def validation_error_shape(error: ValidationError) -> dict[str, list[str]]:
 
 def _normalize_safety_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], frozenset[str]]:
     categories: set[str] = set()
+    raw_categories = payload.get("categories")
+    if (
+        isinstance(raw_categories, list)
+        and set(raw_categories) == {"direct_human_request"}
+        and payload.get("level") != "none"
+    ):
+        payload["level"] = "none"
+        categories.add("direct_human_request_level_normalized")
     rationale = payload.get("rationale")
     if isinstance(rationale, str) and len(rationale) > _SAFETY_RATIONALE_MAX_LENGTH:
         payload["rationale"] = rationale[:_SAFETY_RATIONALE_MAX_LENGTH]

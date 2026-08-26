@@ -64,6 +64,10 @@ eval-dialogues:
 eval-dialogues-live:
     uv run python -m scripts.dialogue_eval --live tests/fixtures/dialogue_scenarios.jsonl
 
+# Run the compact red-flag and ordinary-conversation suite against configured Qwen.
+eval-safety-live:
+    uv run python -m scripts.dialogue_eval --live tests/fixtures/live_safety_scenarios.jsonl
+
 # Deploy the clean, committed Git snapshot to the MVP VM and verify it.
 # The current public IP is resolved from Yandex Cloud; override when needed:
 # just deploy-prod user@host

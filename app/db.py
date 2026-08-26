@@ -58,6 +58,7 @@ _AUDIT_FIELDS = frozenset({
     "pii_redaction",
     "latency_ms",
     "usage",
+    "format_retry_count",
     "output_shape",
     "validation_errors",
     "normalization",
@@ -396,6 +397,8 @@ def sanitize_agent_audit(audit: dict[str, Any]) -> dict[str, Any]:
                 for key in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens")
                 if isinstance(value.get(key), int)
             }
+        elif field == "format_retry_count" and isinstance(value, int):
+            result[field] = max(0, min(value, 1))
         elif field == "output_shape" and isinstance(value, dict):
             result[field] = {
                 key: value[key]
@@ -413,7 +416,12 @@ def sanitize_agent_audit(audit: dict[str, Any]) -> dict[str, Any]:
                 "categories": sorted(
                     category
                     for category in categories
-                    if category in {"safety_rationale_truncated", "support_unknown_intent_cleared", "support_unknown_need_hints_cleared"}
+                    if category in {
+                        "direct_human_request_level_normalized",
+                        "safety_rationale_truncated",
+                        "support_unknown_intent_cleared",
+                        "support_unknown_need_hints_cleared",
+                    }
                 )
             }
         elif field == "rationale_alias_used" and isinstance(value, bool):

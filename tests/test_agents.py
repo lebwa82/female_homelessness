@@ -5,6 +5,7 @@ import pytest
 
 from app import agents
 from app.agents import (
+    DEFAULT_PROVIDER_SETTINGS,
     SUPPORT_INSTRUCTIONS,
     AgentCallResult,
     AgentContext,
@@ -12,24 +13,31 @@ from app.agents import (
     YandexAgentGateway,
     parse_safety_diagnostic,
     parse_support_diagnostic,
+    provider_payload_is_valid,
+    response_output_text,
     usage_audit,
     yandex_model_settings,
-    yandex_output_type,
+    yandex_response_format,
 )
-from app.domain import DiagnosticStatus, SupportIntent
+from app.domain import DiagnosticStatus, SafetyEscalation, SupportIntent
 
 
-def test_qwen_uses_text_json_boundary_and_one_provider_settings_source() -> None:
+def test_qwen_uses_json_object_responses_boundary_and_one_provider_settings_source() -> None:
     provider_settings = ProviderSettings(temperature=0.2, max_tokens=111, reasoning_effort="low")
 
-    assert yandex_output_type("risk") is str
-    assert yandex_output_type("support") is str
+    assert yandex_response_format("risk") == {"type": "json_object"}
+    assert yandex_response_format("support") == {"type": "json_object"}
     assert yandex_model_settings(provider_settings) == {
         "temperature": 0.2,
-        "max_tokens": 111,
-        "openai_reasoning_effort": "low",
+        "max_output_tokens": 111,
+        "reasoning": {"effort": "low"},
     }
     assert provider_settings.audit_fields()["max_tokens"] == 111
+
+
+def test_default_qwen_settings_match_the_short_calm_mvp_contract() -> None:
+    assert DEFAULT_PROVIDER_SETTINGS.temperature == 0.3
+    assert DEFAULT_PROVIDER_SETTINGS.max_tokens == 150
 
 
 def test_yandex_client_uses_fixed_timeout_and_disables_sdk_retries(
@@ -60,7 +68,8 @@ def test_support_text_json_instructions_enumerate_the_only_valid_intents() -> No
         ('{"level":"none"}', {"level": "none"}),
         ('```json\n{"level":"none"}\n```', {"level": "none"}),
         ("not-json", {}),
-        ('{"level":"none"}\ntrailing', {}),
+        ('{"level":"none"}\ntrailing', {"level": "none"}),
+        ('Ответ:\n{"level":"none"}\nГотово.', {"level": "none"}),
         ('{"level":"none","level":"critical"}', {}),
         ('{"confidence":NaN}', {}),
         ('{"confidence":Infinity}', {}),
@@ -87,8 +96,42 @@ def test_provider_output_shape_reports_only_non_content_metadata() -> None:
     assert all("level" not in str(value) for value in shape.values())
 
 
+def test_response_output_text_reads_message_content_without_exposing_the_response_shape() -> None:
+    response = SimpleNamespace(
+        output=(
+            SimpleNamespace(content=(SimpleNamespace(text="first"), SimpleNamespace(text="second"))),
+            SimpleNamespace(content=()),
+        )
+    )
+
+    assert response_output_text(response) == "first\nsecond"
+
+
+def test_provider_payload_validation_only_retries_incomplete_diagnostics() -> None:
+    assert provider_payload_is_valid("risk", {"level": "none"})
+    assert provider_payload_is_valid("support", {"intent": "open_conversation", "draft_text": "Я рядом."})
+    assert not provider_payload_is_valid("risk", {"rationale": "missing level"})
+    assert not provider_payload_is_valid("support", {"intent": "open_conversation"})
+
+
 def test_usage_audit_reads_the_pydantic_ai_usage_object() -> None:
     usage = SimpleNamespace(input_tokens=11, output_tokens=7, total_tokens=18, cache_read_tokens=3)
+
+    assert usage_audit(usage) == {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "total_tokens": 18,
+        "cached_tokens": 3,
+    }
+
+
+def test_usage_audit_reads_the_responses_api_usage_object() -> None:
+    usage = SimpleNamespace(
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=18,
+        input_tokens_details=SimpleNamespace(cached_tokens=3),
+    )
 
     assert usage_audit(usage) == {
         "input_tokens": 11,
@@ -155,6 +198,57 @@ def test_level_only_safety_diagnostic_is_accepted_for_provider_schema_robustness
     assert status is DiagnosticStatus.COMPLETED
     assert diagnostic is not None and diagnostic.level.value == "none"
     assert audit["diagnostic_status"] == "completed"
+
+
+def test_safety_parser_accepts_only_closed_escalation_routes_and_categories() -> None:
+    diagnostic, status, _ = parse_safety_diagnostic(
+        AgentCallResult(
+            payload={
+                "level": "concern",
+                "escalation": "handoff",
+                "categories": ["child_safety"],
+            },
+            audit={"status": "completed"},
+        ),
+        "боюсь, что муж заберёт детей",
+    )
+
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None
+    assert diagnostic.escalation is SafetyEscalation.HANDOFF
+    assert [category.value for category in diagnostic.categories] == ["child_safety"]
+
+
+def test_direct_human_request_is_not_normalized_as_a_safety_concern() -> None:
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(
+            payload={
+                "level": "concern",
+                "escalation": "handoff",
+                "categories": ["direct_human_request"],
+            },
+            audit={"status": "completed"},
+        ),
+        "Позовите человека",
+    )
+
+    assert status is DiagnosticStatus.COMPLETED
+    assert diagnostic is not None and diagnostic.level.value == "none"
+    assert audit["normalization"]["categories"] == ["direct_human_request_level_normalized"]
+
+
+def test_safety_parser_rejects_an_unknown_category_instead_of_silently_treating_it_as_safe() -> None:
+    diagnostic, status, audit = parse_safety_diagnostic(
+        AgentCallResult(
+            payload={"level": "concern", "categories": ["arbitrary_label"]},
+            audit={"status": "completed"},
+        ),
+        "анонимное обращение",
+    )
+
+    assert diagnostic is None
+    assert status is DiagnosticStatus.INVALID
+    assert audit["validation_errors"]["fields"] == ["categories.0"]
 
 
 def test_safety_truncates_only_an_oversized_string_rationale() -> None:

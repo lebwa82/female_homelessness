@@ -116,7 +116,7 @@ class ConversationService:
         )
         await self.store.update(
             record,
-            state=ConversationState.OPEN_CONVERSATION.value,
+            state=ConversationState.GREETING.value,
             need=None,
             pending_aid_id=None,
             pending_contact_method=None,
@@ -125,7 +125,7 @@ class ConversationService:
             pending_offer=None,
             context_epoch=record.context_epoch + 1,
         )
-        turn = self._turn("Контекст очищен. Можно начать заново — я рядом.")
+        turn = self._turn(WELCOME, CONTINUE_CHOICES)
         await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
         return turn
 
@@ -158,6 +158,7 @@ class ConversationService:
             "completed",
             effect_key=self._effect_key(start_key, "started"),
         )
+        await self._reset_entry_workflow(record)
         turn = self._turn(WELCOME, CONTINUE_CHOICES)
         await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
         return turn
@@ -390,6 +391,13 @@ class ConversationService:
             await self._clear_abandoned_workflow(record, state=ConversationState.CLOSED)
             return self._turn(PAUSE)
         if callback_id == "continue_bot":
+            if record.state == ConversationState.SAFETY_ESCALATION.value:
+                try:
+                    need = NeedKind(record.need or "")
+                except ValueError:
+                    return await self._enter_need_discovery(record)
+                await self.store.update(record, state=ConversationState.CHOOSING_AID.value)
+                return self._offer_turn(need)
             if record.state != ConversationState.OPEN_CONVERSATION.value:
                 return await self._state_turn(record)
             return await self._open_conversation_turn(
@@ -732,13 +740,13 @@ class ConversationService:
                 await self.store.cancel_pending_reminder(record)
                 await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
 
-        if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
-            await self._clear_abandoned_workflow(record)
+        if decision.effect is PolicyEffect.SAFETY_ESCALATION:
+            await self._enter_safety_escalation(record, decision.need)
             await self.store.record_action(
                 record,
-                "critical_escalation",
+                "safety_escalation",
                 "completed",
-                effect_key=self._effect_key(request_key, "critical_escalation"),
+                effect_key=self._effect_key(request_key, "safety_escalation"),
             )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.HUMAN_HANDOFF:
@@ -839,7 +847,7 @@ class ConversationService:
         if decision.choice_set is ChoiceSet.AID_CATALOG:
             choices = (*choices[:-1], Choice(id="need:other", label="Что-то другое"), choices[-1])
         turn = ConversationService._turn(decision.text, choices)
-        if decision.effect is PolicyEffect.CRITICAL_ESCALATION:
+        if decision.effect is PolicyEffect.SAFETY_ESCALATION:
             return turn.model_copy(update={"audit": {**turn.audit, "critical_delivery": True}})
         return turn
 
@@ -862,6 +870,7 @@ class ConversationService:
                 "state_before": state_before,
                 "state_after": record.state,
                 "model_risk": assessment.level.value,
+                "safety_escalation": assessment.escalation.value,
                 "safety_label": evaluation.safety.level.value if evaluation.safety else None,
                 "safety_status": evaluation.safety_status.value,
                 "support_intent": (
@@ -914,6 +923,36 @@ class ConversationService:
             record,
             state=state.value if isinstance(state, ConversationState) else state,
             need=None,
+            pending_aid_id=None,
+            pending_contact_method=None,
+            pending_city=None,
+            pending_district=None,
+            pending_offer=None,
+        )
+
+    async def _reset_entry_workflow(self, record: ConversationRecord) -> None:
+        """Begin S01 without deleting retained aid/audit history or scheduled follow-ups."""
+        await self.store.update(
+            record,
+            state=ConversationState.GREETING.value,
+            need=None,
+            pending_aid_id=None,
+            pending_contact_method=None,
+            pending_city=None,
+            pending_district=None,
+            pending_offer=None,
+        )
+
+    async def _enter_safety_escalation(
+        self,
+        record: ConversationRecord,
+        need: NeedKind | None,
+    ) -> None:
+        """Persist only the classified post-S11 route; never re-read raw message text."""
+        await self.store.update(
+            record,
+            state=ConversationState.SAFETY_ESCALATION.value,
+            need=need.value if need is not None else None,
             pending_aid_id=None,
             pending_contact_method=None,
             pending_city=None,

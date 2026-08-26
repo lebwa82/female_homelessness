@@ -21,6 +21,7 @@ class ConversationState(str, Enum):
     FOLLOWUP_WAITING = "followup_waiting"
     FOLLOWUP_SENT = "followup_sent"
     FOLLOWUP_ANSWERED = "followup_answered"
+    SAFETY_ESCALATION = "safety_escalation"
     CLOSED = "closed"
 
 
@@ -47,6 +48,25 @@ class RiskLevel(str, Enum):
     URGENT = "urgent"
     CRITICAL = "critical"
     UNKNOWN = "unknown"
+
+
+class SafetyEscalation(str, Enum):
+    """Product route selected by Qwen's safety diagnostic, not urgency."""
+
+    NONE = "none"
+    HANDOFF = "handoff"
+    SUICIDE = "suicide"
+
+
+class SafetyCategory(str, Enum):
+    """Closed semantic taxonomy shared by Qwen, policy, audits, and evaluations."""
+
+    VIOLENCE_THREAT = "violence_threat"
+    ACUTE_HOMELESSNESS = "acute_homelessness"
+    CHILD_SAFETY = "child_safety"
+    EMOTIONAL_CRISIS = "emotional_crisis"
+    SUICIDE = "suicide"
+    DIRECT_HUMAN_REQUEST = "direct_human_request"
 
 
 class DiagnosticStatus(str, Enum):
@@ -151,7 +171,8 @@ class SafetyDiagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     level: RiskLevel
-    categories: tuple[str, ...] = Field(default=(), max_length=5)
+    escalation: SafetyEscalation = SafetyEscalation.NONE
+    categories: tuple[SafetyCategory, ...] = Field(default=(), max_length=5)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     rationale: str = Field(default="not_provided", min_length=1, max_length=240)
     evidence_claims: tuple[str, ...] = Field(default=(), max_length=5)
@@ -206,7 +227,7 @@ class PolicyEffect(str, Enum):
     OFFER_AID = "offer_aid"
     START_PSYCHOLOGIST_REQUEST = "start_psychologist_request"
     HUMAN_HANDOFF = "human_handoff"
-    CRITICAL_ESCALATION = "critical_escalation"
+    SAFETY_ESCALATION = "safety_escalation"
     CAPTURE_LOCATION = "capture_location"
     COMPLETE_CONTACT = "complete_contact"
     REPLAY_WORKFLOW = "replay_workflow"
@@ -238,7 +259,8 @@ class RiskAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     level: RiskLevel
-    categories: tuple[str, ...] = Field(default=(), max_length=5)
+    escalation: SafetyEscalation = SafetyEscalation.NONE
+    categories: tuple[SafetyCategory, ...] = Field(default=(), max_length=5)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     rationale: str = Field(default="", max_length=240)
     detector: str = Field(default="model", max_length=64)

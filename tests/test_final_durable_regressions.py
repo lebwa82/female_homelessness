@@ -49,6 +49,19 @@ def test_agent_run_audit_reduces_provider_controlled_keys_and_types_to_categorie
     assert _audit_has_no_provider_controlled_values(audit, (field_name, type_name))
 
 
+def test_agent_run_audit_keeps_a_bounded_format_retry_count() -> None:
+    audit = sanitize_agent_audit(
+        {
+            "status": "completed",
+            "format_retry_count": 1,
+            "normalization": {"categories": ["direct_human_request_level_normalized"]},
+        }
+    )
+
+    assert audit["format_retry_count"] == 1
+    assert audit["normalization"] == {"categories": ["direct_human_request_level_normalized"]}
+
+
 def test_content_retention_uses_the_configured_period() -> None:
     now = datetime(2026, 8, 22, tzinfo=UTC)
 

@@ -20,6 +20,8 @@ from app.domain import (
     ResolvedTurn,
     RiskAssessment,
     RiskLevel,
+    SafetyCategory,
+    SafetyEscalation,
     SupportIntent,
     SupportOffer,
 )
@@ -52,6 +54,7 @@ def model_risk_assessment(context: PolicyContext) -> RiskAssessment:
     if context.safety_status is DiagnosticStatus.COMPLETED and context.safety is not None:
         return RiskAssessment(
             level=context.safety.level,
+            escalation=context.safety.escalation,
             categories=context.safety.categories,
             confidence=context.safety.confidence,
             rationale=context.safety.rationale,
@@ -59,6 +62,7 @@ def model_risk_assessment(context: PolicyContext) -> RiskAssessment:
         )
     return RiskAssessment(
         level=RiskLevel.UNKNOWN,
+        escalation=SafetyEscalation.NONE,
         rationale="risk diagnostic unavailable",
         detector="qwen-risk",
     )
@@ -67,9 +71,43 @@ def model_risk_assessment(context: PolicyContext) -> RiskAssessment:
 def resolve_turn(context: PolicyContext) -> ResolvedTurn:
     """Resolve a message from model diagnostics and backend-owned workflow state."""
     assessment = model_risk_assessment(context)
-    if assessment.level is RiskLevel.CRITICAL:
-        return _finalize_turn(context, critical_resolved_turn(assessment))
+    if assessment.escalation is SafetyEscalation.SUICIDE:
+        return _finalize_turn(context, safety_resolved_turn(context, assessment))
+    if _is_plain_direct_human_request(assessment):
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text=HUMAN_HANDOFF_PROMPT,
+                choice_set=ChoiceSet.SAFE_CONTINUE,
+                effect=PolicyEffect.HUMAN_HANDOFF,
+            ),
+        )
 
+    support = context.support
+    if (
+        context.support_status is DiagnosticStatus.COMPLETED
+        and support is not None
+        and support.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST
+    ):
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text=HUMAN_HANDOFF_PROMPT,
+                choice_set=ChoiceSet.SAFE_CONTINUE,
+                effect=PolicyEffect.HUMAN_HANDOFF,
+            ),
+        )
+    if context.safety_status is not DiagnosticStatus.COMPLETED:
+        return _finalize_turn(
+            context,
+            ResolvedTurn(
+                text=_MODEL_UNAVAILABLE_PROMPT,
+                choice_set=ChoiceSet.SAFE_CONTINUE,
+                fallback_reason="safety_diagnostic_unavailable",
+            ),
+        )
+    if assessment.escalation is SafetyEscalation.HANDOFF or assessment.level is RiskLevel.CRITICAL:
+        return _finalize_turn(context, safety_resolved_turn(context, assessment))
     if context.support_status is not DiagnosticStatus.COMPLETED or context.support is None:
         return _finalize_turn(
             context,
@@ -80,16 +118,7 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
             ),
         )
 
-    support = context.support
-    if support.intent is SupportIntent.EXPLICIT_HUMAN_REQUEST:
-        return _finalize_turn(
-            context,
-            ResolvedTurn(
-                text=HUMAN_HANDOFF_PROMPT,
-                choice_set=ChoiceSet.SAFE_CONTINUE,
-                effect=PolicyEffect.HUMAN_HANDOFF,
-            ),
-        )
+    assert support is not None
     if context.state in _FINITE_WORKFLOW_STATES:
         return resolve_workflow_turn(context)
     if support.intent is SupportIntent.PSYCHOLOGIST_REQUEST:
@@ -175,8 +204,8 @@ def resolve_workflow_turn(context: PolicyContext) -> ResolvedTurn:
     return _finalize_turn(context, decision)
 
 
-def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
-    if "suicide" in risk.categories:
+def safety_resolved_turn(context: PolicyContext, risk: RiskAssessment) -> ResolvedTurn:
+    if risk.escalation is SafetyEscalation.SUICIDE or SafetyCategory.SUICIDE in risk.categories:
         text = (
             "Слышу вас. Это важно.\n\n"
             "Телефон доверия — бесплатно, круглосуточно: 8-800-2000-122\n\n"
@@ -191,9 +220,35 @@ def critical_resolved_turn(risk: RiskAssessment) -> ResolvedTurn:
     return ResolvedTurn(
         text=text,
         choice_set=ChoiceSet.SAFE_CONTINUE,
-        effect=PolicyEffect.CRITICAL_ESCALATION,
+        effect=PolicyEffect.SAFETY_ESCALATION,
+        need=_primary_escalation_need(context, risk),
         side_effects=(PolicySideEffect.RECORD_SAFETY,),
     )
+
+
+def _primary_escalation_need(context: PolicyContext, risk: RiskAssessment) -> NeedKind | None:
+    """Keep one relevant post-S11 route without interpreting raw user text locally."""
+    if SafetyCategory.CHILD_SAFETY in risk.categories:
+        return NeedKind.CHILDREN
+    if SafetyCategory.ACUTE_HOMELESSNESS in risk.categories:
+        return NeedKind.HOUSING
+    if context.support is None:
+        return None
+    for need in (
+        NeedKind.CHILDREN,
+        NeedKind.HOUSING,
+        NeedKind.LEGAL,
+        NeedKind.FOOD_MONEY,
+        NeedKind.SUPPORT,
+        NeedKind.OTHER,
+    ):
+        if need in context.support.need_hints:
+            return need
+    return None
+
+
+def _is_plain_direct_human_request(risk: RiskAssessment) -> bool:
+    return risk.categories == (SafetyCategory.DIRECT_HUMAN_REQUEST,)
 
 
 def _open_conversation_turn(context: PolicyContext) -> ResolvedTurn:
@@ -226,6 +281,7 @@ def _finalize_turn(context: PolicyContext, decision: ResolvedTurn) -> ResolvedTu
     side_effects = decision.side_effects
     if (
         assessment.level in {RiskLevel.CONCERN, RiskLevel.URGENT}
+        and decision.effect is not PolicyEffect.HUMAN_HANDOFF
         and PolicySideEffect.RECORD_SAFETY not in side_effects
     ):
         side_effects = (*side_effects, PolicySideEffect.RECORD_SAFETY)

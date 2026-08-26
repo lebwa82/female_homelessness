@@ -57,7 +57,7 @@ def test_one_update_identity_is_independent_from_derived_effect() -> None:
     record = ConversationRecord(71, "telegram", 501, 502, None)
 
     assert ConversationService._text_request_key(record, 1005, PolicyEffect.NONE) == ConversationService._text_request_key(
-        record, 1005, PolicyEffect.CRITICAL_ESCALATION
+        record, 1005, PolicyEffect.SAFETY_ESCALATION
     )
 
 

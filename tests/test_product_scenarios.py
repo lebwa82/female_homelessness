@@ -11,11 +11,13 @@ from app.domain import (
     IncomingMessage,
     NeedKind,
     RiskLevel,
+    SafetyCategory,
     SafetyDiagnostic,
+    SafetyEscalation,
     SupportDiagnostic,
     SupportOffer,
 )
-from app.service import ConversationService
+from app.service import OTHER_PROMPT, PAUSE, ConversationService
 from app.store import InMemoryConversationStore, StoredFollowupJob
 
 
@@ -87,12 +89,15 @@ async def test_clear_preserves_audit_records_and_replays_the_same_update() -> No
 
     first = await service.clear(incoming)
 
-    assert first.text == "Контекст очищен. Можно начать заново — я рядом."
-    assert [choice.id for choice in first.choices] == ["human"]
+    assert first.text == (
+        "Привет. Здесь можно получить поддержку без необходимости называть себя "
+        "или объяснять всё сразу.\n\nХотите продолжить?"
+    )
+    assert [choice.id for choice in first.choices] == ["continue", "pause", "human"]
     assert record.id == conversation_id
     assert record.generation == 0
     assert record.context_epoch == 1
-    assert record.state == ConversationState.OPEN_CONVERSATION.value
+    assert record.state == ConversationState.GREETING.value
     assert (
         record.need,
         record.pending_aid_id,
@@ -132,7 +137,8 @@ def diagnostic_evaluation(
     need_hints: tuple[NeedKind, ...] = (),
     suggested_support: SupportOffer | None = None,
     safety_level: RiskLevel = RiskLevel.NONE,
-    safety_categories: tuple[str, ...] = (),
+    safety_escalation: SafetyEscalation = SafetyEscalation.NONE,
+    safety_categories: tuple[SafetyCategory, ...] = (),
     status: DiagnosticStatus = DiagnosticStatus.COMPLETED,
 ) -> AgentEvaluation:
     support = (
@@ -148,6 +154,7 @@ def diagnostic_evaluation(
     return AgentEvaluation(
         safety=SafetyDiagnostic(
             level=safety_level,
+            escalation=safety_escalation,
             categories=safety_categories,
             confidence=1.0,
             rationale="diagnostic",
@@ -158,6 +165,98 @@ def diagnostic_evaluation(
         safety_audit={"diagnostic_status": "completed"},
         support_audit={"diagnostic_status": status.value},
     )
+
+
+@pytest.mark.asyncio
+async def test_start_discards_an_abandoned_aid_workflow_before_s03() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store)
+    record = await store.ensure(identity(message_id=900))
+    await store.update(
+        record,
+        state=ConversationState.CHOOSING_AID.value,
+        need=NeedKind.FOOD_MONEY.value,
+        pending_aid_id="food_card",
+    )
+
+    welcome = await service.start(identity("/start", message_id=901))
+    needs = await service.handle_callback(identity(message_id=902), "continue")
+
+    assert [choice.id for choice in welcome.choices] == ["continue", "pause", "human"]
+    assert [choice.id for choice in needs.choices] == [
+        "need:housing",
+        "need:food_money",
+        "need:legal",
+        "need:support",
+        "need:children",
+        "need:other",
+        "human",
+    ]
+    assert record.state == ConversationState.DISCOVERING_NEED.value
+    assert record.need is None
+    assert record.pending_aid_id is None
+
+
+@pytest.mark.asyncio
+async def test_pause_from_s01_closes_the_workflow_with_s02_copy() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store)
+
+    await service.start(identity("/start", message_id=910))
+    paused = await service.handle_callback(identity(message_id=911), "pause")
+
+    assert paused.text == PAUSE
+    assert [choice.id for choice in paused.choices] == ["human"]
+    assert store.conversations[101].state == ConversationState.CLOSED.value
+
+
+@pytest.mark.asyncio
+async def test_other_choice_from_s03_opens_s04_without_suggesting_aid() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(store=store)
+
+    await service.start(identity("/start", message_id=912))
+    await service.handle_callback(identity(message_id=913), "continue")
+    other = await service.handle_callback(identity(message_id=914), "need:other")
+
+    assert other.text == OTHER_PROMPT
+    assert [choice.id for choice in other.choices] == ["human"]
+    assert store.conversations[101].state == ConversationState.CHOOSING_AID.value
+
+
+@pytest.mark.asyncio
+async def test_s11_continue_opens_the_classified_child_help_catalog() -> None:
+    store = InMemoryConversationStore()
+    service = ConversationService(
+        store=store,
+        gateway=FixedGateway(
+            diagnostic_evaluation(
+                draft_text="Слышу, как тревожно сейчас.",
+                intent="concrete_need",
+                need_hints=(NeedKind.CHILDREN, NeedKind.LEGAL, NeedKind.SUPPORT),
+                safety_level=RiskLevel.CONCERN,
+                safety_escalation=SafetyEscalation.HANDOFF,
+                safety_categories=(SafetyCategory.CHILD_SAFETY,),
+            )
+        ),
+    )
+
+    escalation = await service.handle_text(
+        identity("мне страшно, что муж заберёт детей", message_id=903)
+    )
+    catalog = await service.handle_callback(identity(message_id=904), "continue_bot")
+    record = store.conversations[101]
+
+    assert [choice.id for choice in escalation.choices] == ["continue_bot", "human"]
+    assert [item.cause for item in store.escalations] == [EscalationCause.SAFETY]
+    assert [choice.id for choice in catalog.choices] == [
+        "aid:children_card",
+        "aid:legal_consultation",
+        "aid:peer_consultation",
+        "need:other",
+        "human",
+    ]
+    assert record.state == ConversationState.CHOOSING_AID.value
 
 
 @pytest.mark.asyncio
@@ -439,6 +538,7 @@ async def test_policy_audit_has_model_routing_allow_list_and_never_raw_turn_data
         "state_before",
         "state_after",
         "model_risk",
+        "safety_escalation",
         "safety_label",
         "safety_status",
         "support_intent",
@@ -451,6 +551,7 @@ async def test_policy_audit_has_model_routing_allow_list_and_never_raw_turn_data
         "fallback_reason",
     }
     assert audit["rendered_callback_ids"] == [choice.id for choice in turn.choices]
+    assert audit["safety_escalation"] == "none"
     assert "private-marker-7F3D" not in repr(audit)
     assert "next_action" not in audit
 
