@@ -19,6 +19,7 @@ from app.domain import (
     DeliveryAuthorization,
     IncomingMessage,
 )
+from app.release_info import active_release_info
 from app.service import PERSISTENCE_UNAVAILABLE_PROMPT, ConversationService
 from app.worker import worker_loop
 
@@ -190,11 +191,14 @@ async def system_info(message: Message) -> None:
     if not await claim_stateless_update_or_reply(message, incoming):
         return
     llm_status = "включена" if settings.llm_enabled else "выключена"
+    release_info = active_release_info()
+    build_version = release_info.revision or settings.build_version
     turn = AgentTurn(
         text=(
             "🛠 Служебная информация\n"
             f"ENV: {settings.app_env}\n"
-            f"Сборка: {settings.build_version}\n"
+            f"Сборка: {build_version}\n"
+            f"Релиз: {release_info.released_at}\n"
             f"LLM: {llm_status}"
         )
     ).with_human_choice().model_copy(update={"audit": {"skip_outbound_persistence": True}})
