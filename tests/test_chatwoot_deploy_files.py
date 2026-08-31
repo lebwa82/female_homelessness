@@ -74,6 +74,7 @@ def test_test_stack_has_an_explicit_operator_bootstrap_and_persistent_services()
     assert "up -d postgres redis chatwoot sidekiq caddy" in platform_unit
     assert "git archive" in deploy_script
     assert "women-help-chatwoot.service" in deploy_script
+    assert "systemctl restart women-help-chatwoot.service" in deploy_script
 
 
 def test_justfile_and_readme_expose_chatwoot_operator_commands() -> None:

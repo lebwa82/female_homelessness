@@ -108,7 +108,8 @@ cd "$TARGET_DIR"
 sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml up -d postgres redis
 sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml run --rm --no-deps -T chatwoot \
   bundle exec rails db:chatwoot_prepare </dev/null
-sudo systemctl enable --now women-help-chatwoot.service
+sudo systemctl enable women-help-chatwoot.service
+sudo systemctl restart women-help-chatwoot.service
 
 chatwoot_hostname="$(sudo /usr/bin/awk -F= '$1 == "CHATWOOT_HOSTNAME" {print $2}' "$CHATWOOT_ENV")"
 healthy=0
