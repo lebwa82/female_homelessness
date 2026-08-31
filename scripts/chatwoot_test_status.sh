@@ -3,7 +3,7 @@
 # printed, so this command is safe to share in an operator terminal session.
 set -euo pipefail
 
-host="${1:-51.250.26.31}"
+host="${1:-84.252.139.95}"
 if ! [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   echo "The test deployment host must be an IPv4 address." >&2
   exit 2

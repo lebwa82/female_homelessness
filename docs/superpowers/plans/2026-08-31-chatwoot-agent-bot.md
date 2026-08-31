@@ -102,7 +102,7 @@
 
 ## Task 8: Деплой на test VM и переключение Telegram
 
-1. Выполнить preflight актуальной test VM `51.250.26.31`: CPU/RAM/disk, Podman, firewall, свободные 80/443 и статус legacy service. Не выводить secret-files.
+1. Выполнить preflight актуальной test VM `84.252.139.95`: CPU/RAM/disk, Podman, firewall, свободные 80/443 и статус legacy service. Не выводить secret-files.
 2. Если публичный HTTPS hostname не найден, развернуть только stack и Agent Bot; не переключать native Telegram inbox, поскольку Telegram webhook требует доступный внешний URL. Зафиксировать точный следующий шаг, не подменяя его IP без TLS.
 3. Если hostname/TLS доступен, выложить pinned commit на VM, создать root-owned `/etc/women-help-chatwoot.env` из безопасных ключей и запустить compose/systemd.
 4. В Chatwoot UI создать Telegram inbox с действующим test token, добавить Agent Bot и дежурную team. Затем остановить legacy polling service, проверить test message — Chatwoot timeline, bot reply, assignment handoff и `bot_turn_key`.

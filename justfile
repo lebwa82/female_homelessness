@@ -87,5 +87,5 @@ chatwoot-bootstrap host="":
     bash scripts/bootstrap_chatwoot_agent.sh "{{host}}"
 
 # Follow service-level logs only; conversation bodies stay in the Chatwoot dashboard.
-chatwoot-logs host="51.250.26.31" service="women-help-chatwoot":
+chatwoot-logs host="84.252.139.95" service="women-help-chatwoot":
     ssh -o StrictHostKeyChecking=accept-new -l lebwa82 "{{host}}" "sudo journalctl -u {{service}} -n 100 -f"

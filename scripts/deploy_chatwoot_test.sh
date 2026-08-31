@@ -4,7 +4,7 @@
 # duty-team ID have been configured in /etc/women-help-agent.env.
 set -euo pipefail
 
-host="${1:-51.250.26.31}"
+host="${1:-84.252.139.95}"
 target_dir="${2:-/opt/women-help-chatwoot}"
 revision="$(git rev-parse --short HEAD)"
 archive_path="/tmp/women-help-chatwoot-${revision}.tar"
