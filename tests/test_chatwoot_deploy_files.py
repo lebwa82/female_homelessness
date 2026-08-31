@@ -71,6 +71,7 @@ def test_test_stack_has_an_explicit_operator_bootstrap_and_persistent_services()
     assert "--profile agent" in agent_unit
     assert "WorkingDirectory=/opt/women-help-chatwoot\n" in platform_unit
     assert "WorkingDirectory=/opt/women-help-chatwoot\n" in agent_unit
+    assert "up -d postgres redis chatwoot sidekiq caddy" in platform_unit
     assert "git archive" in deploy_script
     assert "women-help-chatwoot.service" in deploy_script
 
