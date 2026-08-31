@@ -75,16 +75,16 @@ agent_env_tmp="$(sudo mktemp /etc/.women-help-agent.env.XXXXXX)"
 if [[ -s "$AGENT_ENV" ]]; then
   sudo /usr/bin/awk -F= \
     '$1 != "CHATWOOT_WEBHOOK_SECRET" && $1 != "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
-    "$AGENT_ENV" >"$agent_env_tmp"
+    "$AGENT_ENV" | sudo /usr/bin/tee "$agent_env_tmp" >/dev/null
 elif [[ -s /etc/women-help-bot.env ]]; then
   sudo /usr/bin/awk -F= '/^(YANDEX_AI_API_KEY|APP_ENV|BUILD_VERSION)=/ {print $0}' \
-    /etc/women-help-bot.env >"$agent_env_tmp"
+    /etc/women-help-bot.env | sudo /usr/bin/tee "$agent_env_tmp" >/dev/null
 else
   sudo /usr/bin/truncate -s 0 "$agent_env_tmp"
 fi
 sudo /usr/bin/awk -F= \
   '$1 == "CHATWOOT_WEBHOOK_SECRET" || $1 == "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
-  "$CHATWOOT_ENV" >>"$agent_env_tmp"
+  "$CHATWOOT_ENV" | sudo /usr/bin/tee -a "$agent_env_tmp" >/dev/null
 sudo chmod 0600 "$agent_env_tmp"
 sudo chown root:root "$agent_env_tmp"
 sudo mv -f "$agent_env_tmp" "$AGENT_ENV"
