@@ -48,7 +48,8 @@ def test_compose_does_not_interpolate_secret_values_into_process_arguments() -> 
     assert "${SECRET_KEY_BASE}" not in compose
     assert "${CHATWOOT_WEBHOOK_SECRET}" not in compose
     assert "${CHATWOOT_WEBHOOK_HMAC_SECRET}" not in compose
-    assert "run --rm --no-deps chatwoot" in deploy_script
+    assert "run --rm --no-deps -T chatwoot" in deploy_script
+    assert "bundle exec rails db:chatwoot_prepare </dev/null" in deploy_script
     assert 'sudo /usr/bin/tee -a "$agent_env_tmp" >/dev/null' in deploy_script
 
 
