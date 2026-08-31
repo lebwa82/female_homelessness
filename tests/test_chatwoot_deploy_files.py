@@ -7,7 +7,7 @@ def test_test_stack_pins_chatwoot_and_keeps_postgres_local() -> None:
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
 
     assert "chatwoot/chatwoot:v4.12.1" in compose
-    assert "postgres:18.6-alpine3.24" in compose
+    assert "pgvector/pgvector:0.8.6-pg18-trixie" in compose
     assert "redis:7.4.10-alpine3.21" in compose
     assert "latest" not in compose
 
