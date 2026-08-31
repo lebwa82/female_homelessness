@@ -123,6 +123,70 @@ EnvironmentFile и не запускает/пересоздаёт PostgreSQL con
 
 Проверить доступ к модели двумя реальными структурированными вызовами: `just llm-health`.
 
+## Chatwoot: тестовый операторский контур
+
+В этом контуре Chatwoot — единственное постоянное хранилище переписки и
+назначений. Telegram после переключения станет только транспортом; Python
+Agent Bot не подключается к PostgreSQL и читает историю через API Chatwoot.
+Пока старый aiogram-бот продолжает принимать тестовые сообщения: запуск
+Chatwoot сам по себе его не останавливает.
+
+Контур поднимается одной командой из чистого закоммиченного дерева:
+
+```bash
+just deploy-chatwoot-test
+```
+
+На VM появляются два root-owned файла с правами `0600`:
+
+- `/etc/women-help-chatwoot.env` — локальная PostgreSQL Chatwoot, Redis,
+  публичные имена и секрет webhook;
+- `/etc/women-help-agent.env` — ключ Yandex AI Studio и доступы Agent Bot.
+
+Если у VM нет своей DNS-зоны, скрипт использует два имени `sslip.io` с её IP и
+получает для них TLS через Caddy. Это допустимо только для тестового контура.
+Состояние без раскрытия переменных: `just chatwoot-check`; системные логи:
+`just chatwoot-logs`.
+
+Для совместимости Agent Bot сейчас закреплён на Chatwoot `v4.12.1`: в
+self-hosted выпусках 4.13+ подтверждена регрессия создания Agent Bot. Этот
+релиз не передаёт HMAC-подпись для Agent Bot, поэтому webhook защищён отдельным
+высокоэнтропийным секретом в URL. После перехода на исправленный Chatwoot
+нужно дополнительно задать выданный им `CHATWOOT_WEBHOOK_HMAC_SECRET`: сервис
+в этом режиме принимает только подписанные доставки.
+
+Первый доступ к панели требует один раз создать администратора в Chatwoot.
+На время этого действия `ENABLE_ACCOUNT_SIGNUP=true`; сразу после регистрации
+измените его на `false` в `/etc/women-help-chatwoot.env` и перезапустите
+`women-help-chatwoot.service`. Затем в панели создайте команду дежурных,
+Telegram inbox и Agent Bot. Его outgoing URL — адрес `agent` из этого же
+файла с путём `/webhooks/chatwoot/agent/<CHATWOOT_WEBHOOK_SECRET>`; секрет
+вставляется из файла только локально на VM и не должен попадать в переписку
+или логи.
+
+В `/etc/women-help-agent.env` после настройки панели укажите
+`CHATWOOT_BASE_URL`, `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_INBOX_ID` и
+`CHATWOOT_READ_TOKEN`. Затем выполните:
+
+```bash
+just chatwoot-bootstrap
+```
+
+Команда идемпотентно создаст или найдёт дежурную команду и Agent Bot, привяжет
+его к inbox, запишет выданные `CHATWOOT_BOT_TOKEN` и
+`CHATWOOT_DUTY_TEAM_ID` в root-only файл и запустит
+`women-help-chatwoot-agent.service`. Значения токенов в терминал не выводятся.
+
+Только после smoke-проверки «Telegram → Chatwoot timeline → один ответ Agent
+Bot» можно остановить `women-help-bot` и передать его Telegram token нативному
+inbox Chatwoot. При эскалации Agent Bot сначала фиксирует `reply_owner=human`,
+назначает дежурную команду и открывает разговор; затем перестаёт отвечать. Для
+возврата боту дежурная явно ставит `reply_owner=bot`, снимает назначение и
+возвращает разговор в `pending`.
+
+Автоматического удаления данных в этом контуре нет: срок хранения и сквозное
+удаление остаются отдельным техдолгом до внешнего запуска.
+
 ## Qwen3.6 в Yandex AI Studio
 
 В коде заданы folder ID и модель `qwen3.6-35b-a3b`; нужен только сервисный

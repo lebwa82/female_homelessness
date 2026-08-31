@@ -1579,6 +1579,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiogram" },
+    { name = "aiohttp" },
     { name = "aiohttp-socks" },
     { name = "asyncpg" },
     { name = "greenlet" },
@@ -1601,6 +1602,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiogram" },
+    { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "aiohttp-socks", specifier = ">=0.11.0" },
     { name = "asyncpg" },
     { name = "greenlet" },

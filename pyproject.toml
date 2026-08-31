@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Safety-first Telegram MVP for first contact with women facing homelessness"
 requires-python = ">=3.14"
 dependencies = [
+  "aiohttp>=3.13.3",
   "aiogram",
   "aiohttp-socks>=0.11.0",
   "asyncpg",

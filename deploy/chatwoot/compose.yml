@@ -1,0 +1,121 @@
+name: women-help-chatwoot
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18.6-alpine3.24
+    env_file:
+      - /etc/women-help-chatwoot.env
+    environment:
+      POSTGRES_DB: chatwoot
+      POSTGRES_USER: chatwoot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - chatwoot_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatwoot -d chatwoot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: docker.io/library/redis:7.4.10-alpine3.21
+    command: redis-server --appendonly yes
+    volumes:
+      - chatwoot_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  chatwoot:
+    image: docker.io/chatwoot/chatwoot:v4.12.1
+    env_file:
+      - /etc/women-help-chatwoot.env
+    environment:
+      RAILS_ENV: production
+      NODE_ENV: production
+      INSTALLATION_ENV: linux
+      FRONTEND_URL: https://${CHATWOOT_HOSTNAME}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: chatwoot
+      POSTGRES_USERNAME: chatwoot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_URL: redis://redis:6379
+      ACTIVE_STORAGE_SERVICE: local
+      ENABLE_ACCOUNT_SIGNUP: ${ENABLE_ACCOUNT_SIGNUP:-true}
+    command: bundle exec rails server -b 0.0.0.0 -p 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - chatwoot_storage:/app/storage
+    restart: unless-stopped
+
+  sidekiq:
+    image: docker.io/chatwoot/chatwoot:v4.12.1
+    env_file:
+      - /etc/women-help-chatwoot.env
+    environment:
+      RAILS_ENV: production
+      NODE_ENV: production
+      INSTALLATION_ENV: linux
+      FRONTEND_URL: https://${CHATWOOT_HOSTNAME}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: chatwoot
+      POSTGRES_USERNAME: chatwoot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_URL: redis://redis:6379
+      ACTIVE_STORAGE_SERVICE: local
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - chatwoot_storage:/app/storage
+    restart: unless-stopped
+
+  agent-bot:
+    build:
+      context: ../..
+      dockerfile: deploy/chatwoot/Containerfile
+    env_file:
+      - /etc/women-help-agent.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CHATWOOT_WEBHOOK_SECRET: ${CHATWOOT_WEBHOOK_SECRET}
+      CHATWOOT_WEBHOOK_HMAC_SECRET: ${CHATWOOT_WEBHOOK_HMAC_SECRET:-}
+    profiles: ["agent"]
+    restart: unless-stopped
+
+  caddy:
+    image: docker.io/library/caddy:2.11.4-alpine
+    env_file:
+      - /etc/women-help-chatwoot.env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - chatwoot
+    restart: unless-stopped
+
+volumes:
+  chatwoot_postgres_data:
+  chatwoot_redis_data:
+  chatwoot_storage:
+  caddy_data:
+  caddy_config:

@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -26,6 +27,15 @@ class Settings(BaseSettings):
     followup_reminder_seconds: int = Field(default=48 * 60 * 60, ge=1)
     message_retention_days: int = Field(default=30, ge=1)
     worker_poll_seconds: int = Field(default=15, ge=1)
+    chatwoot_base_url: str = ""
+    chatwoot_account_id: int = Field(default=0, ge=0)
+    chatwoot_read_token: str = ""
+    chatwoot_bot_token: str = ""
+    chatwoot_webhook_secret: str = ""
+    chatwoot_webhook_hmac_secret: str = ""
+    chatwoot_duty_team_id: int = Field(default=0, ge=0)
+    chatwoot_listen_host: str = "0.0.0.0"
+    chatwoot_listen_port: int = Field(default=8080, ge=1, le=65535)
 
     @field_validator("yandex_cloud_folder_id", mode="before")
     @classmethod
@@ -70,6 +80,22 @@ class Settings(BaseSettings):
             "production": "серверная версия",
             "test": "тестовая версия",
         }[self.app_env]
+
+    def chatwoot_configuration_error(self) -> str | None:
+        required = {
+            "CHATWOOT_BASE_URL": self.chatwoot_base_url,
+            "CHATWOOT_ACCOUNT_ID": self.chatwoot_account_id,
+            "CHATWOOT_READ_TOKEN": self.chatwoot_read_token,
+            "CHATWOOT_BOT_TOKEN": self.chatwoot_bot_token,
+            "CHATWOOT_WEBHOOK_SECRET": self.chatwoot_webhook_secret,
+            "CHATWOOT_DUTY_TEAM_ID": self.chatwoot_duty_team_id,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            return f"missing Chatwoot configuration: {', '.join(missing)}"
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", self.chatwoot_webhook_secret):
+            return "invalid CHATWOOT_WEBHOOK_SECRET"
+        return None
 
 
 settings = Settings()

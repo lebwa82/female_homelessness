@@ -73,3 +73,19 @@ eval-safety-live:
 # just deploy-prod user@host
 deploy-prod host="": check
     bash scripts/deploy_prod.sh "{{host}}"
+
+# Deploy the isolated Chatwoot test contour. It does not switch the live Telegram bot.
+deploy-chatwoot-test host="":
+    bash scripts/deploy_chatwoot_test.sh "{{host}}"
+
+# Inspect the Chatwoot test contour without reading or printing its secrets.
+chatwoot-check host="":
+    bash scripts/chatwoot_test_status.sh "{{host}}"
+
+# Create/reuse the duty team and Agent Bot after the dashboard inbox is created.
+chatwoot-bootstrap host="":
+    bash scripts/bootstrap_chatwoot_agent.sh "{{host}}"
+
+# Follow service-level logs only; conversation bodies stay in the Chatwoot dashboard.
+chatwoot-logs host="51.250.26.31" service="women-help-chatwoot":
+    ssh -o StrictHostKeyChecking=accept-new -l lebwa82 "{{host}}" "sudo journalctl -u {{service}} -n 100 -f"

@@ -1,0 +1,8 @@
+{$CHATWOOT_HOSTNAME} {
+    encode zstd gzip
+    reverse_proxy chatwoot:3000
+}
+
+{$AGENT_HOSTNAME} {
+    reverse_proxy agent-bot:8080
+}
