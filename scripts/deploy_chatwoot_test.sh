@@ -68,12 +68,26 @@ ENVIRONMENT
   sudo chown root:root "$CHATWOOT_ENV"
 fi
 
-if [[ ! -s "$AGENT_ENV" ]] && [[ -s /etc/women-help-bot.env ]]; then
+# podman-compose 1.x writes generated `podman run` commands to its output.
+# Keep every secret in root-only env files and synchronise only the agent's
+# route credentials here, without ever printing their values.
+agent_env_tmp="$(sudo mktemp /etc/.women-help-agent.env.XXXXXX)"
+if [[ -s "$AGENT_ENV" ]]; then
+  sudo /usr/bin/awk -F= \
+    '$1 != "CHATWOOT_WEBHOOK_SECRET" && $1 != "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
+    "$AGENT_ENV" >"$agent_env_tmp"
+elif [[ -s /etc/women-help-bot.env ]]; then
   sudo /usr/bin/awk -F= '/^(YANDEX_AI_API_KEY|APP_ENV|BUILD_VERSION)=/ {print $0}' \
-    /etc/women-help-bot.env | sudo /usr/bin/tee "$AGENT_ENV" >/dev/null
-  sudo chmod 0600 "$AGENT_ENV"
-  sudo chown root:root "$AGENT_ENV"
+    /etc/women-help-bot.env >"$agent_env_tmp"
+else
+  sudo /usr/bin/truncate -s 0 "$agent_env_tmp"
 fi
+sudo /usr/bin/awk -F= \
+  '$1 == "CHATWOOT_WEBHOOK_SECRET" || $1 == "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
+  "$CHATWOOT_ENV" >>"$agent_env_tmp"
+sudo chmod 0600 "$agent_env_tmp"
+sudo chown root:root "$agent_env_tmp"
+sudo mv -f "$agent_env_tmp" "$AGENT_ENV"
 
 sudo install -d -m 0755 "$RELEASE_ROOT"
 sudo rm -rf "$STAGING_DIR"
@@ -92,7 +106,7 @@ sudo systemctl daemon-reload
 
 cd "$TARGET_DIR"
 sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml up -d postgres redis
-sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml run --rm chatwoot \
+sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml run --rm --no-deps chatwoot \
   bundle exec rails db:chatwoot_prepare
 sudo systemctl enable --now women-help-chatwoot.service
 

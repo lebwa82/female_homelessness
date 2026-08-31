@@ -30,12 +30,25 @@ def test_caddy_exposes_chatwoot_and_agent_over_separate_hostnames() -> None:
 
 
 def test_agent_webhook_has_a_separate_secret_url_path() -> None:
-    compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
     app = (ROOT / "app/chatwoot/app.py").read_text(encoding="utf-8")
+    deploy_script = (ROOT / "scripts/deploy_chatwoot_test.sh").read_text(encoding="utf-8")
 
-    assert "CHATWOOT_WEBHOOK_SECRET" in compose
-    assert "CHATWOOT_WEBHOOK_HMAC_SECRET" in compose
+    assert "CHATWOOT_WEBHOOK_SECRET" in deploy_script
+    assert "CHATWOOT_WEBHOOK_HMAC_SECRET" in deploy_script
     assert '"/webhooks/chatwoot/agent/{route_secret}"' in app
+
+
+def test_compose_does_not_interpolate_secret_values_into_process_arguments() -> None:
+    compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
+    deploy_script = (ROOT / "scripts/deploy_chatwoot_test.sh").read_text(encoding="utf-8")
+
+    # podman-compose 1.x logs generated `podman run` commands. Keep secrets in
+    # root-only env files so they never become values in those commands.
+    assert "${POSTGRES_PASSWORD}" not in compose
+    assert "${SECRET_KEY_BASE}" not in compose
+    assert "${CHATWOOT_WEBHOOK_SECRET}" not in compose
+    assert "${CHATWOOT_WEBHOOK_HMAC_SECRET}" not in compose
+    assert "run --rm --no-deps chatwoot" in deploy_script
 
 
 def test_test_stack_has_an_explicit_operator_bootstrap_and_persistent_services() -> None:
