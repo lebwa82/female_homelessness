@@ -69,6 +69,8 @@ def test_test_stack_has_an_explicit_operator_bootstrap_and_persistent_services()
     assert "agent" in compose
     assert "podman compose" in platform_unit
     assert "--profile agent" in agent_unit
+    assert "WorkingDirectory=/opt/women-help-chatwoot\n" in platform_unit
+    assert "WorkingDirectory=/opt/women-help-chatwoot\n" in agent_unit
     assert "git archive" in deploy_script
     assert "women-help-chatwoot.service" in deploy_script
 
