@@ -4,7 +4,7 @@
 
 **Цель:** перенести test-контур Telegram-бота на Chatwoot как единственное постоянное хранилище разговоров. Python-приложение становится stateless Agent Bot: читает и изменяет только Chatwoot API, использует существующие Qwen-диагностики и не подключается к PostgreSQL напрямую.
 
-**Архитектура:** Chatwoot v4.12.1 + Redis + PostgreSQL запускаются в одном Podman Compose-проекте. Telegram — нативный inbox Chatwoot. `app.chatwoot_agent` — `aiohttp` веб-сервис: принимает события Agent Bot, повторно читает Chatwoot, применяет policy и пишет ответ/приватные заметки/атрибуты через API. Постоянных таблиц Python-приложение не имеет. v4.12.1 выбрана осознанно: self-hosted 4.13+ имеет подтверждённую регрессию создания Agent Bot. Для v4.12.1 endpoint защищён высокоэнтропийным URL-secret; после обновления на исправленный release отдельный `CHATWOOT_WEBHOOK_HMAC_SECRET` включает обязательную HMAC-проверку.
+**Архитектура:** Chatwoot `latest` + Redis + PostgreSQL запускаются в одном Podman Compose-проекте. Telegram — нативный inbox Chatwoot. `app.chatwoot_agent` — `aiohttp` веб-сервис: принимает события Agent Bot, повторно читает Chatwoot, применяет policy и пишет ответ/приватные заметки/атрибуты через API. Постоянных таблиц Python-приложение не имеет. По решению пользователя тестовый контур обновляется через `latest` при явном деплое; первоначальный pin v4.12.1 из-за регрессии Agent Bot больше не применяется. Перед включением интеграции нужно проверить создание Agent Bot на фактической версии и задать отдельный `CHATWOOT_WEBHOOK_HMAC_SECRET` для обязательной HMAC-проверки, сохранив URL-secret.
 
 **Технологии:** Python 3.14, aiohttp, Pydantic, OpenAI SDK для Yandex AI Studio, Chatwoot REST API, Podman Compose, Caddy, PostgreSQL 18, Redis 7.
 

@@ -3,13 +3,12 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 
 
-def test_test_stack_pins_chatwoot_and_keeps_postgres_local() -> None:
+def test_test_stack_uses_latest_chatwoot_and_keeps_postgres_local() -> None:
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
 
-    assert "chatwoot/chatwoot:v4.12.1" in compose
+    assert compose.count("image: docker.io/chatwoot/chatwoot:latest") == 2
     assert "pgvector/pgvector:0.8.6-pg18-trixie" in compose
     assert "redis:7.4.10-alpine3.21" in compose
-    assert "latest" not in compose
 
 
 def test_agent_bot_has_no_database_dependency_or_persistent_volume() -> None:

@@ -91,11 +91,25 @@ sudo chown root:root "$agent_env_tmp"
 sudo mv -f "$agent_env_tmp" "$AGENT_ENV"
 
 sudo install -d -m 0755 "$RELEASE_ROOT"
-sudo rm -rf "$STAGING_DIR"
-sudo install -d -m 0755 "$STAGING_DIR"
-sudo tar -xf "$ARCHIVE_PATH" -C "$STAGING_DIR"
+if ! sudo test -d "$RELEASE_DIR"; then
+  sudo install -d -m 0755 "$STAGING_DIR"
+  sudo tar -xf "$ARCHIVE_PATH" -C "$STAGING_DIR"
+  sudo mv "$STAGING_DIR" "$RELEASE_DIR"
+fi
 sudo rm -f "$ARCHIVE_PATH"
-sudo mv "$STAGING_DIR" "$RELEASE_DIR"
+
+# `latest` is refreshed only by an explicit deployment, before downtime.
+# Repeating a deployment of the same Git revision must still refresh the image.
+sudo podman pull docker.io/chatwoot/chatwoot:latest </dev/null
+agent_was_active=0
+if sudo systemctl is-active --quiet women-help-chatwoot-agent.service; then
+  agent_was_active=1
+  sudo systemctl stop women-help-chatwoot-agent.service </dev/null
+fi
+if sudo systemctl is-active --quiet women-help-chatwoot.service; then
+  sudo systemctl stop women-help-chatwoot.service </dev/null
+fi
+
 sudo ln -sfn "$RELEASE_DIR" "${TARGET_DIR}.next"
 sudo mv -Tf "${TARGET_DIR}.next" "$TARGET_DIR"
 sudo python3 "$TARGET_DIR/scripts/update_chatwoot_address.py" "$HOST_IP"
@@ -112,12 +126,14 @@ sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml ru
   bundle exec rails db:chatwoot_prepare </dev/null
 sudo systemctl enable women-help-chatwoot.service
 sudo systemctl restart women-help-chatwoot.service
+if [[ "$agent_was_active" == 1 ]]; then
+  sudo systemctl start women-help-chatwoot-agent.service </dev/null
+fi
 
 chatwoot_hostname="$(sudo /usr/bin/awk -F= '$1 == "CHATWOOT_HOSTNAME" {print $2}' "$CHATWOOT_ENV")"
 healthy=0
 for _ in $(seq 1 30); do
-  if curl -fsS --max-time 5 -H "Host: ${chatwoot_hostname}" \
-    http://127.0.0.1/ >/dev/null; then
+  if curl -fsSL --max-time 5 "https://${chatwoot_hostname}/" >/dev/null 2>&1; then
     healthy=1
     break
   fi
@@ -130,6 +146,11 @@ if [[ "$healthy" != 1 ]]; then
 fi
 
 sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml ps
+sudo podman inspect --format '{{.Name}} image={{.Image}}' \
+  women-help-chatwoot_chatwoot_1 women-help-chatwoot_sidekiq_1
+printf 'Chatwoot version: '
+sudo podman exec women-help-chatwoot_chatwoot_1 ruby -rjson \
+  -e 'puts JSON.parse(File.read("/app/package.json")).fetch("version")'
 sudo stat -c 'chatwoot-env mode=%a owner=%U:%G; agent-env=%s' "$CHATWOOT_ENV" "$AGENT_ENV" 2>/dev/null || \
   sudo stat -c 'chatwoot-env mode=%a owner=%U:%G; agent-env=missing' "$CHATWOOT_ENV"
 

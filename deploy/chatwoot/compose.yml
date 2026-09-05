@@ -30,7 +30,7 @@ services:
     restart: unless-stopped
 
   chatwoot:
-    image: docker.io/chatwoot/chatwoot:v4.12.1
+    image: docker.io/chatwoot/chatwoot:latest
     env_file:
       - /etc/women-help-chatwoot.env
     environment:
@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
 
   sidekiq:
-    image: docker.io/chatwoot/chatwoot:v4.12.1
+    image: docker.io/chatwoot/chatwoot:latest
     env_file:
       - /etc/women-help-chatwoot.env
     environment:
