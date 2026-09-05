@@ -4,7 +4,8 @@
 # duty-team ID have been configured in /etc/women-help-agent.env.
 set -euo pipefail
 
-host="${1:-84.252.139.95}"
+host="${1:-}"
+if [[ -z "$host" ]]; then host="$(uv run python -m scripts.resolve_prod_host --ip-only)"; fi
 target_dir="${2:-/opt/women-help-chatwoot}"
 revision="$(git rev-parse --short HEAD)"
 archive_path="/tmp/women-help-chatwoot-${revision}.tar"
@@ -97,6 +98,7 @@ sudo rm -f "$ARCHIVE_PATH"
 sudo mv "$STAGING_DIR" "$RELEASE_DIR"
 sudo ln -sfn "$RELEASE_DIR" "${TARGET_DIR}.next"
 sudo mv -Tf "${TARGET_DIR}.next" "$TARGET_DIR"
+sudo python3 "$TARGET_DIR/scripts/update_chatwoot_address.py" "$HOST_IP"
 
 sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-chatwoot.service" \
   /etc/systemd/system/women-help-chatwoot.service

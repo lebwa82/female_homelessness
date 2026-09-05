@@ -3,7 +3,8 @@
 # may read credentials, but it emits only public Chatwoot object IDs.
 set -euo pipefail
 
-host="${1:-84.252.139.95}"
+host="${1:-}"
+if [[ -z "$host" ]]; then host="$(uv run python -m scripts.resolve_prod_host --ip-only)"; fi
 if ! [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   echo "The test deployment host must be an IPv4 address." >&2
   exit 2
@@ -13,7 +14,7 @@ ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -l
   'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 
-readonly PROJECT=/opt/women-help-chatwoot/current
+readonly PROJECT=/opt/women-help-chatwoot
 readonly CHATWOOT_ENV=/etc/women-help-chatwoot.env
 readonly AGENT_ENV=/etc/women-help-agent.env
 

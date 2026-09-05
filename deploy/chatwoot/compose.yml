@@ -45,7 +45,8 @@ services:
       REDIS_URL: redis://redis:6379
       ACTIVE_STORAGE_SERVICE: local
       ENABLE_ACCOUNT_SIGNUP: ${ENABLE_ACCOUNT_SIGNUP:-true}
-    command: bundle exec rails server -b 0.0.0.0 -p 3000
+    # A VM reboot can leave server.pid in the persistent container filesystem.
+    command: ["/bin/sh", "-c", "rm -f /app/tmp/pids/server.pid && exec bundle exec rails server -b 0.0.0.0 -p 3000"]
     depends_on:
       postgres:
         condition: service_healthy
