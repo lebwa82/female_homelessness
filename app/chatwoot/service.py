@@ -8,9 +8,12 @@ from typing import Any, Protocol
 
 from app.agents import YandexAgentGateway
 from app.chatwoot.contracts import IncomingChatwootMessage
-from app.domain import ConversationState, IncomingMessage
+from app.config import settings
+from app.domain import AgentTurn, ConversationState, IncomingMessage
+from app.release_info import active_release_info
 from app.service import ConversationService
 from app.store import ConversationRecord, InMemoryConversationStore
+from app.ui import HUMAN_CHOICE
 
 _CONTEXT_MARKER_PREFIX = "[women-help/context-epoch:"
 _WORKFLOW_ATTRS = (
@@ -22,6 +25,7 @@ _WORKFLOW_ATTRS = (
     "pending_district",
     "pending_offer",
     "context_epoch",
+    "workflow_navigation",
 )
 
 
@@ -32,7 +36,9 @@ class ChatwootConversationApi(Protocol):
 
     async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool: ...
 
-    async def set_custom_attributes(self, conversation_id: int, attributes: dict[str, Any]) -> None: ...
+    async def set_custom_attributes(
+        self, conversation_id: int, attributes: dict[str, Any]
+    ) -> None: ...
 
     async def set_status(self, conversation_id: int, status: str) -> None: ...
 
@@ -90,7 +96,19 @@ class ChatwootAgentService:
         messages = await self._api.get_messages(event.conversation_id)
         seeded = _seed_conversation(event, conversation, messages)
         legacy_service = ConversationService(store=seeded.store, gateway=self._gateway)
-        if event.content == "/start":
+        if event.content == "/system_info":
+            release = active_release_info()
+            turn = AgentTurn(
+                text=(
+                    f"🛠 Служебная информация\nENV: {settings.app_env}\n"
+                    f"Сборка: {release.revision or 'неизвестно'}\n"
+                    f"Релиз: {release.released_at}\n"
+                    f"LLM: {'включена' if settings.llm_enabled else 'выключена'}\n"
+                    "Канал: Chatwoot → Telegram"
+                ),
+                choices=(HUMAN_CHOICE,),
+            )
+        elif event.content == "/start":
             turn = await legacy_service.start(seeded.incoming)
         elif event.content == "/clear":
             turn = await legacy_service.clear(seeded.incoming)
@@ -155,6 +173,7 @@ class ChatwootAgentService:
                 "pending_district": record.pending_district,
                 "pending_offer": record.pending_offer,
                 "context_epoch": record.context_epoch,
+                "workflow_navigation": record.navigation,
             },
         )
 
@@ -174,7 +193,9 @@ class ChatwootAgentService:
             return False
         return True
 
-    async def _persist_aid_requests(self, conversation_id: int, seeded: _SeededConversation) -> None:
+    async def _persist_aid_requests(
+        self, conversation_id: int, seeded: _SeededConversation
+    ) -> None:
         """Keep operator-needed request details in a Chatwoot-private note only."""
         for request in seeded.store.aid_requests:
             contact = request.contact_value or "not_provided"
@@ -213,6 +234,7 @@ def _seed_conversation(
         pending_district=_optional_string_attribute(attributes, "pending_district"),
         pending_offer=_optional_string_attribute(attributes, "pending_offer"),
         context_epoch=_epoch(attributes.get("context_epoch")),
+        navigation=attributes.get("workflow_navigation") or {},
     )
     store = InMemoryConversationStore(conversations={event.contact_id: record})
     for role, content in _history_after_epoch(messages, record.context_epoch, event.message_id):
@@ -228,6 +250,11 @@ def _custom_attributes(conversation: dict[str, Any]) -> dict[str, Any]:
 def _bot_owns(conversation: dict[str, Any]) -> bool:
     attributes = _custom_attributes(conversation)
     if attributes.get("reply_owner") == "human":
+        return False
+    meta = conversation.get("meta") or {}
+    if meta.get("team") or (meta.get("assignee") and meta.get("assignee_type") != "AgentBot"):
+        return False
+    if conversation.get("status") in {"open", "resolved", "snoozed"}:
         return False
     return conversation.get("assignee_id") is None and conversation.get("assignee_team_id") is None
 
@@ -245,6 +272,8 @@ def _history_after_epoch(
     history: list[tuple[str, str]] = []
     for message in ordered[start_index:]:
         if message.get("private") is True or message.get("id") == current_message_id:
+            continue
+        if message.get("message_type") not in {"incoming", "outgoing", 0, 1}:
             continue
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -276,7 +305,7 @@ def _is_callback(content: str) -> bool:
         "level2:details",
         "level2:later",
         "support:psychologist",
-    } or content.startswith(("need:", "aid:", "contact:"))
+    } or content.startswith(("need:", "aid:", "contact:", "back:"))
 
 
 def _context_marker(epoch: int) -> str:
@@ -286,7 +315,7 @@ def _context_marker(epoch: int) -> str:
 def _epoch(value: object) -> int:
     try:
         epoch = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
     return max(epoch, 0)
 

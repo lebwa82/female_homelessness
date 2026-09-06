@@ -45,6 +45,9 @@ services:
       REDIS_URL: redis://redis:6379
       ACTIVE_STORAGE_SERVICE: local
       ENABLE_ACCOUNT_SIGNUP: ${ENABLE_ACCOUNT_SIGNUP:-true}
+      http_proxy: http://telegram-proxy:3128
+      https_proxy: http://telegram-proxy:3128
+      no_proxy: localhost,127.0.0.1,chatwoot,agent-bot,.sslip.io
     # A VM reboot can leave server.pid in the persistent container filesystem.
     command: ["/bin/sh", "-c", "rm -f /app/tmp/pids/server.pid && exec bundle exec rails server -b 0.0.0.0 -p 3000"]
     depends_on:
@@ -71,6 +74,9 @@ services:
       POSTGRES_USERNAME: chatwoot
       REDIS_URL: redis://redis:6379
       ACTIVE_STORAGE_SERVICE: local
+      http_proxy: http://telegram-proxy:3128
+      https_proxy: http://telegram-proxy:3128
+      no_proxy: localhost,127.0.0.1,chatwoot,agent-bot,.sslip.io
     command: bundle exec sidekiq -C config/sidekiq.yml
     depends_on:
       postgres:
@@ -82,6 +88,7 @@ services:
     restart: unless-stopped
 
   agent-bot:
+    image: localhost/women-help-chatwoot-agent:current
     build:
       context: ../..
       dockerfile: deploy/chatwoot/Containerfile
@@ -90,6 +97,13 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
     profiles: ["agent"]
+    restart: unless-stopped
+
+  telegram-proxy:
+    image: localhost/women-help-chatwoot-agent:current
+    env_file:
+      - /etc/women-help-agent.env
+    command: ["/app/.venv/bin/python", "-m", "app.chatwoot.proxy"]
     restart: unless-stopped
 
   caddy:

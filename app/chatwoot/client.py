@@ -101,10 +101,22 @@ class ChatwootClient:
         return _as_object(payload)
 
     async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]:
-        payload = await self._transport.request(
-            "GET", self._path(f"/conversations/{conversation_id}/messages"), self._read_token
-        )
-        return _messages_from_payload(payload)
+        path = self._path(f"/conversations/{conversation_id}/messages")
+        messages: dict[int, dict[str, Any]] = {}
+        before: int | None = None
+        while True:
+            suffix = f"?before={before}" if before is not None else ""
+            payload = await self._transport.request("GET", path + suffix, self._read_token)
+            page = _messages_from_payload(payload)
+            # Chatwoot's messages endpoint returns 20 records per page.
+            if len(page) < 20:
+                return tuple(messages.values()) + page
+            ids = [message["id"] for message in page]
+            next_before = min(ids)
+            if before is not None and next_before >= before:
+                raise ChatwootApiError("message_pagination_stalled", 200)
+            messages.update({message["id"]: message for message in page})
+            before = next_before
 
     async def set_custom_attributes(self, conversation_id: int, attributes: dict[str, Any]) -> None:
         await self._transport.request(
@@ -127,7 +139,7 @@ class ChatwootClient:
             "POST",
             self._path(f"/conversations/{conversation_id}/assignments"),
             self._bot_token,
-            {"assignee_team_id": team_id},
+            {"team_id": team_id},
         )
 
     async def add_private_note(self, conversation_id: int, content: str) -> None:

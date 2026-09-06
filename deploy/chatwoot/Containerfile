@@ -13,5 +13,9 @@ RUN uv sync --frozen --no-dev
 COPY app ./app
 COPY deploy ./deploy
 COPY knowledge ./knowledge
+COPY skills ./skills
+ARG RELEASE_REVISION=dev
+ARG RELEASED_AT_UTC
+RUN python -c 'import json,os; from pathlib import Path; Path(".release.json").write_text(json.dumps({"revision":os.environ["RELEASE_REVISION"],"released_at_utc":os.environ.get("RELEASED_AT_UTC","")}))'
 
 CMD ["/app/.venv/bin/python", "-m", "app.chatwoot"]

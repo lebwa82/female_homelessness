@@ -81,10 +81,14 @@ class AgentBotWebhook:
         return web.Response(status=204)
 
     async def _process(self, event: object) -> None:
-        try:
-            await self._service.process(event)
-        except Exception as error:  # noqa: BLE001 - do not log user payload or provider details
-            logger.warning("chatwoot agent delivery failed: %s", type(error).__name__)
+        for attempt in range(3):
+            try:
+                await self._service.process(event)
+                return
+            except Exception as error:  # noqa: BLE001 - never log user payload or provider details
+                logger.warning("chatwoot agent delivery failed: %s", type(error).__name__)
+                if attempt < 2:
+                    await asyncio.sleep(3 * (attempt + 1))
 
 
 def create_application(

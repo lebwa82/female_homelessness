@@ -15,6 +15,7 @@ dependencies = [
   "pydantic-settings",
   "ru-core-news-sm",
   "sqlalchemy",
+  "pproxy>=2.7.9",
 ]
 
 [dependency-groups]

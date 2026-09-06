@@ -28,7 +28,11 @@ def parse_message_created(payload: object) -> IncomingChatwootMessage | None:
     sender = payload.get("sender")
     inbox = payload.get("inbox")
     content = payload.get("content")
-    if not isinstance(conversation, dict) or not isinstance(sender, dict) or not isinstance(inbox, dict):
+    if (
+        not isinstance(conversation, dict)
+        or not isinstance(sender, dict)
+        or not isinstance(inbox, dict)
+    ):
         return None
     if not isinstance(content, str) or not content.strip():
         return None
@@ -53,6 +57,6 @@ def _positive_int(value: Any) -> int | None:
         return None
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return parsed if parsed > 0 else None

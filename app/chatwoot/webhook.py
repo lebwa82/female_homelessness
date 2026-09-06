@@ -37,8 +37,6 @@ def verify_webhook_signature(
         raise InvalidWebhookSignature("invalid webhook")
 
     signed = timestamp.encode("ascii") + b"." + raw_body
-    expected = "sha256=" + hmac.new(
-        secret.encode("utf-8"), signed, hashlib.sha256
-    ).hexdigest()
+    expected = "sha256=" + hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, received_signature):
         raise InvalidWebhookSignature("invalid webhook")
