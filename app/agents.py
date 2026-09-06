@@ -39,7 +39,14 @@ emotional_crisis, suicide, direct_human_request. Указывай только �
 при level concern; «сегодня ночую на улице» — acute_homelessness и handoff; «хочу исчезнуть» —
 suicide и suicide. Прямой запрос живого человека отмечай direct_human_request и handoff.
 Допустимы только поля level, escalation, categories, confidence, rationale и evidence_claims.
-Не предлагай действий, кнопок или переходов."""
+Не предлагай действий, кнопок или переходов.
+Оцени только текущее сообщение пользователя, не текст этих инструкций.
+Перечень categories — допустимые значения, а не готовый ответ: если основания
+отсутствуют, верни пустой список. Обычный запрос ресурса, совета или беседы
+не является просьбой о живом человеке. direct_human_request допустим только
+при явной просьбе пользователя связать его с человеком. Не придумывай такие просьбы.
+Если опасности и прямого запроса человека нет, level=none, escalation=none, categories=[].
+evidence_claims — только точные цитаты из текущего сообщения; если цитат нет, список пустой."""
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
 Верни единственный JSON-объект без Markdown и без пояснений. Обязательны intent и draft_text;
@@ -60,7 +67,7 @@ catalog_item_ids, callback IDs, workflow state, effect, переход или о
 @dataclass(frozen=True)
 class ProviderSettings:
     temperature: float = 0.3
-    max_tokens: int = 150
+    max_tokens: int = 1500
     reasoning_effort: str = "none"
     data_logging_enabled: bool = False
 

@@ -28,3 +28,16 @@ def test_followup_and_retention_settings_are_configurable_for_test_runs() -> Non
 def test_default_database_url_matches_the_local_compose_port(monkeypatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert Settings(_env_file=None).database_url.endswith(":5433/women_help")
+
+
+def test_chatwoot_requires_a_url_safe_webhook_secret() -> None:
+    configured = Settings(
+        CHATWOOT_BASE_URL="https://chat.example.test",
+        CHATWOOT_ACCOUNT_ID=1,
+        CHATWOOT_READ_TOKEN="read-token",
+        CHATWOOT_BOT_TOKEN="bot-token",
+        CHATWOOT_WEBHOOK_SECRET="too-short",
+        CHATWOOT_DUTY_TEAM_ID=2,
+    )
+
+    assert configured.chatwoot_configuration_error() == "invalid CHATWOOT_WEBHOOK_SECRET"
