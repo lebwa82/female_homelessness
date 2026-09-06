@@ -9,8 +9,8 @@ RemainAfterExit=yes
 EnvironmentFile=/etc/women-help-chatwoot.env
 EnvironmentFile=/etc/women-help-agent.env
 WorkingDirectory=/opt/women-help-chatwoot
-ExecStart=/usr/bin/podman compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml --profile agent up -d agent-bot
-ExecStop=/usr/bin/podman compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml --profile agent stop agent-bot
+ExecStart=/usr/bin/podman compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml up -d agent-bot
+ExecStop=/usr/bin/podman compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml stop agent-bot
 TimeoutStartSec=10min
 
 [Install]

@@ -27,7 +27,7 @@ def upstream_uri(value: str) -> str:
 
 
 async def serve() -> None:
-    value = settings.resolved_telegram_proxy_url
+    value = settings.resolved_telegram_proxy_url()
     if not value:
         raise ValueError("TELEGRAM_PROXY_URL is required for the internal adapter")
     server = pproxy.Server("http://0.0.0.0:3128")

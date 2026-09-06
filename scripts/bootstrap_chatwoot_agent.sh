@@ -23,8 +23,8 @@ sudo test -s "$CHATWOOT_ENV"
 sudo test -s "$AGENT_ENV"
 cd "$PROJECT"
 
-sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml --profile agent build agent-bot
-sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml --profile agent run --rm \
+sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml build agent-bot
+sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml run --rm \
   --volume "$AGENT_ENV:/run/women-help-agent.env:rw" \
   --volume "$CHATWOOT_ENV:/run/women-help-chatwoot.env:ro" \
   agent-bot python -m deploy.chatwoot.bootstrap \

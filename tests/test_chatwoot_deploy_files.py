@@ -67,7 +67,8 @@ def test_test_stack_has_an_explicit_operator_bootstrap_and_persistent_services()
     assert "profiles:" in compose
     assert "agent" in compose
     assert "podman compose" in platform_unit
-    assert "--profile agent" in agent_unit
+    assert "up -d agent-bot" in agent_unit
+    assert "--profile" not in agent_unit
     assert "WorkingDirectory=/opt/women-help-chatwoot\n" in platform_unit
     assert "WorkingDirectory=/opt/women-help-chatwoot\n" in agent_unit
     assert "up -d postgres redis telegram-proxy chatwoot sidekiq caddy" in platform_unit
