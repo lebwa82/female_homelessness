@@ -101,6 +101,10 @@ async def test_mutations_use_agent_bot_identity() -> None:
     await api.add_private_note(23, "handoff recorded")
 
     assert [call[2] for call in transport.calls] == ["bot-token"] * 4
+    assert transport.calls[0][3] == {
+        "custom_attributes": {"reply_owner": "human"},
+        "merge": True,
+    }
     assert transport.calls[2][3] == {"team_id": 9}
     assert [call[:2] for call in transport.calls] == [
         ("POST", "/api/v1/accounts/12/conversations/23/custom_attributes"),

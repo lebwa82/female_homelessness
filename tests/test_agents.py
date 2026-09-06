@@ -37,7 +37,7 @@ def test_qwen_uses_json_object_responses_boundary_and_one_provider_settings_sour
 
 def test_default_qwen_settings_match_the_short_calm_mvp_contract() -> None:
     assert DEFAULT_PROVIDER_SETTINGS.temperature == 0.3
-    assert DEFAULT_PROVIDER_SETTINGS.max_tokens == 150
+    assert DEFAULT_PROVIDER_SETTINGS.max_tokens == 1500
 
 
 def test_yandex_client_uses_fixed_timeout_and_disables_sdk_retries(

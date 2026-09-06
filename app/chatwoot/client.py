@@ -123,7 +123,7 @@ class ChatwootClient:
             "POST",
             self._path(f"/conversations/{conversation_id}/custom_attributes"),
             self._bot_token,
-            {"custom_attributes": attributes},
+            {"custom_attributes": attributes, "merge": True},
         )
 
     async def set_status(self, conversation_id: int, status: str) -> None:
