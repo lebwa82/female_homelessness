@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -16,6 +17,7 @@ from app.store import ConversationRecord, InMemoryConversationStore
 from app.ui import HUMAN_CHOICE
 
 _CONTEXT_MARKER_PREFIX = "[women-help/context-epoch:"
+logger = logging.getLogger(__name__)
 _WORKFLOW_ATTRS = (
     "workflow_state",
     "workflow_need",
@@ -123,6 +125,19 @@ class ChatwootAgentService:
         before_side_effects = await self._api.get_conversation(event.conversation_id)
         if not _bot_owns(before_side_effects):
             return False
+
+        if seeded.store.agent_runs:
+            fields = ("status", "reason", "error_type", "error_origin", "latency_ms")
+            diagnostics = [
+                {"agent": name, **{key: audit.get(key) for key in fields}}
+                for _, name, audit in seeded.store.agent_runs
+            ]
+            await self._api.set_custom_attributes(
+                event.conversation_id, {"bot_last_diagnostics": diagnostics}
+            )
+            for item in diagnostics:
+                if item["status"] != "completed":
+                    logger.warning("chatwoot diagnostic unavailable: %s", item)
 
         handoff = _requires_human_handoff(seeded)
         if handoff:

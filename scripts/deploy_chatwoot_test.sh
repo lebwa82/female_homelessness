@@ -78,7 +78,7 @@ if [[ -s "$AGENT_ENV" ]]; then
     '$1 != "CHATWOOT_WEBHOOK_SECRET" && $1 != "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
     "$AGENT_ENV" | sudo /usr/bin/tee "$agent_env_tmp" >/dev/null
 elif [[ -s /etc/women-help-bot.env ]]; then
-  sudo /usr/bin/awk -F= '/^(YANDEX_AI_API_KEY|APP_ENV|BUILD_VERSION)=/ {print $0}' \
+  sudo /usr/bin/awk -F= '/^(YANDEX_AI_API_KEY|APP_ENV|BUILD_VERSION|TELEGRAM_PROXY_URL)=/ {print $0}' \
     /etc/women-help-bot.env | sudo /usr/bin/tee "$agent_env_tmp" >/dev/null
 else
   sudo /usr/bin/truncate -s 0 "$agent_env_tmp"
@@ -100,6 +100,11 @@ sudo rm -f "$ARCHIVE_PATH"
 
 # `latest` is refreshed only by an explicit deployment, before downtime.
 # Repeating a deployment of the same Git revision must still refresh the image.
+sudo podman build \
+  --build-arg "RELEASE_REVISION=$REVISION" \
+  --build-arg "RELEASED_AT_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  -t localhost/women-help-chatwoot-agent:current \
+  -f "$RELEASE_DIR/deploy/chatwoot/Containerfile" "$RELEASE_DIR" </dev/null
 sudo podman pull docker.io/chatwoot/chatwoot:latest </dev/null
 agent_was_active=0
 if sudo systemctl is-active --quiet women-help-chatwoot-agent.service; then

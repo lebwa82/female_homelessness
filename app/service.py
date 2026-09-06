@@ -63,12 +63,12 @@ class _CriticalTurnPersistenceFailure(Exception):
         self.turn = turn
 
 
-def _diagnostics_unavailable() -> AgentEvaluation:
+def _diagnostics_unavailable(error_type: str | None = None) -> AgentEvaluation:
     return AgentEvaluation(
         safety_status=DiagnosticStatus.UNAVAILABLE,
         support_status=DiagnosticStatus.UNAVAILABLE,
-        safety_audit={"status": "unavailable"},
-        support_audit={"status": "unavailable"},
+        safety_audit={"status": "unavailable", "error_type": error_type},
+        support_audit={"status": "unavailable", "error_type": error_type},
     )
 
 
@@ -611,8 +611,8 @@ class ConversationService:
                     knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
                 )
             )
-        except Exception:  # noqa: BLE001 - diagnostics never alter the deterministic route
-            return _diagnostics_unavailable()
+        except Exception as error:  # noqa: BLE001 - never include provider text or user input
+            return _diagnostics_unavailable(type(error).__name__)
 
     async def _replay_text_outcome(
         self,
