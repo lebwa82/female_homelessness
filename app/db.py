@@ -135,6 +135,7 @@ class Conversation(Base):
     pending_city: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pending_district: Mapped[str | None] = mapped_column(String(120), nullable=True)
     pending_offer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    navigation: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     context_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -487,6 +488,7 @@ async def init_db() -> None:
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_city VARCHAR(120)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_district VARCHAR(120)",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_offer VARCHAR(64)",
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS navigation JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS generation INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS context_epoch INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0",

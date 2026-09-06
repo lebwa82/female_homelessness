@@ -16,7 +16,7 @@
 - Every user turn still starts exactly two Yandex calls concurrently: SafetyAgent and SupportAgent.
 - Open conversation is the default: no contextual menu when no verified transactional signal exists; the permanent human button remains available.
 - “Выслушай / хочу выговориться / поговори со мной” is conversation, not handoff. Explicit transfer to a person or explicit refusal to speak to a bot is handoff.
-- Critical self-harm copy retains `8-800-2000-122`; verified current danger has highest precedence.
+- Critical self-harm copy retains `8 (800) 100-49-94`; verified current danger has highest precedence.
 - Model diagnostics never authorize callbacks, effects, state transitions, requests, or escalations.
 - Do not log raw prompts, history, evidence quotes, secrets, or environment values. Audit only hashes, versions, rule IDs, typed statuses, and resolved fields.
 - Do not weaken or delete the 53 anonymized dialogue histories to make live evaluation pass.

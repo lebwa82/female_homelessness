@@ -25,6 +25,7 @@ from app.domain import (
     RiskAssessment,
     RiskLevel,
 )
+from app.navigation import checkpoint_update
 from app.pii import redact_for_model
 
 
@@ -45,6 +46,7 @@ class ConversationRecord:
     generation: int = 0
     context_epoch: int = 0
     version: int = 0
+    navigation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -212,7 +214,8 @@ class InMemoryConversationStore:
         async with lock:
             yield
 
-    async def update(self, record: ConversationRecord, **values: str | int | None) -> ConversationRecord:
+    async def update(self, record: ConversationRecord, **values: Any) -> ConversationRecord:
+        values = checkpoint_update(record, values)
         for key, value in values.items():
             setattr(record, key, value)
         record.version += 1
@@ -627,7 +630,8 @@ class PostgresConversationStore:
                 await session.execute(db.select(db.func.pg_advisory_unlock(record.id)))
                 await db.finish_repository_write(session)
 
-    async def update(self, record: ConversationRecord, **values: str | int | None) -> ConversationRecord:
+    async def update(self, record: ConversationRecord, **values: Any) -> ConversationRecord:
+        values = checkpoint_update(record, values)
         async with db.repository_session() as session:
             result = await session.execute(
                 db.select(db.Conversation)
@@ -967,4 +971,5 @@ class PostgresConversationStore:
             generation=row.generation,
             context_epoch=row.context_epoch,
             version=row.version,
+            navigation=row.navigation or {},
         )

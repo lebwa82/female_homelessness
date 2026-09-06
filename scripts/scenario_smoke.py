@@ -83,7 +83,7 @@ async def run_scenarios() -> None:
         store=open_conversation_store, gateway=SmokeGateway()
     )
     open_turn = await open_conversation_service.handle_text(incoming("мне нужно выговориться"))
-    assert [choice.id for choice in open_turn.choices] == ["human"]
+    assert [choice.id for choice in open_turn.choices if not choice.id.startswith("back:")] == ["human"]
     assert not open_conversation_store.escalations
 
     store = InMemoryConversationStore()
@@ -100,7 +100,7 @@ async def run_scenarios() -> None:
     critical_store = InMemoryConversationStore()
     critical_service = ConversationService(store=critical_store, gateway=CriticalSmokeGateway())
     critical = await critical_service.handle_text(incoming("не хочу жить"))
-    assert "8-800-2000-122" in critical.text
+    assert "8 (800) 100-49-94" in critical.text
     assert critical_store.escalations[-1].level is RiskLevel.CRITICAL
 
     psychologist_store = InMemoryConversationStore()

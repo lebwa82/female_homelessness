@@ -93,7 +93,7 @@ async def test_clear_preserves_audit_records_and_replays_the_same_update() -> No
         "Привет. Здесь можно получить поддержку без необходимости называть себя "
         "или объяснять всё сразу.\n\nХотите продолжить?"
     )
-    assert [choice.id for choice in first.choices] == ["continue", "pause", "human"]
+    assert [choice.id for choice in first.choices if not choice.id.startswith("back:")] == ["continue", "pause", "human"]
     assert record.id == conversation_id
     assert record.generation == 0
     assert record.context_epoch == 1
@@ -182,8 +182,8 @@ async def test_start_discards_an_abandoned_aid_workflow_before_s03() -> None:
     welcome = await service.start(identity("/start", message_id=901))
     needs = await service.handle_callback(identity(message_id=902), "continue")
 
-    assert [choice.id for choice in welcome.choices] == ["continue", "pause", "human"]
-    assert [choice.id for choice in needs.choices] == [
+    assert [choice.id for choice in welcome.choices if not choice.id.startswith("back:")] == ["continue", "pause", "human"]
+    assert [choice.id for choice in needs.choices if not choice.id.startswith("back:")] == [
         "need:housing",
         "need:food_money",
         "need:legal",
@@ -206,7 +206,7 @@ async def test_pause_from_s01_closes_the_workflow_with_s02_copy() -> None:
     paused = await service.handle_callback(identity(message_id=911), "pause")
 
     assert paused.text == PAUSE
-    assert [choice.id for choice in paused.choices] == ["human"]
+    assert [choice.id for choice in paused.choices if not choice.id.startswith("back:")] == ["human"]
     assert store.conversations[101].state == ConversationState.CLOSED.value
 
 
@@ -220,7 +220,7 @@ async def test_other_choice_from_s03_opens_s04_without_suggesting_aid() -> None:
     other = await service.handle_callback(identity(message_id=914), "need:other")
 
     assert other.text == OTHER_PROMPT
-    assert [choice.id for choice in other.choices] == ["human"]
+    assert [choice.id for choice in other.choices if not choice.id.startswith("back:")] == ["human"]
     assert store.conversations[101].state == ConversationState.CHOOSING_AID.value
 
 
@@ -247,9 +247,9 @@ async def test_s11_continue_opens_the_classified_child_help_catalog() -> None:
     catalog = await service.handle_callback(identity(message_id=904), "continue_bot")
     record = store.conversations[101]
 
-    assert [choice.id for choice in escalation.choices] == ["continue_bot", "human"]
+    assert [choice.id for choice in escalation.choices if not choice.id.startswith("back:")] == ["continue_bot", "human"]
     assert [item.cause for item in store.escalations] == [EscalationCause.SAFETY]
-    assert [choice.id for choice in catalog.choices] == [
+    assert [choice.id for choice in catalog.choices if not choice.id.startswith("back:")] == [
         "aid:children_card",
         "aid:legal_consultation",
         "aid:peer_consultation",
@@ -270,7 +270,7 @@ async def test_exact_listen_regression_uses_conversational_draft_and_only_global
     turn = await service.handle_text(identity("мне просто хочется выговориться — ты можешь меня выслушать?"))
 
     assert turn.text == "Да, я могу вас выслушать."
-    assert [choice.id for choice in turn.choices] == ["human"]
+    assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == ["human"]
     assert store.escalations == []
     assert store.aid_requests == []
     assert store.conversations[101].state == "open_conversation"
@@ -292,7 +292,7 @@ async def test_model_need_hint_creates_a_button_but_never_an_aid_request() -> No
 
     turn = await service.handle_text(identity("мне хочется выговориться"))
 
-    assert [choice.id for choice in turn.choices] == ["need:housing", "human"]
+    assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == ["need:housing", "human"]
     assert turn.text == "Могу показать вариант помощи с жильём."
     assert store.aid_requests == []
     assert store.escalations == []
@@ -310,7 +310,7 @@ async def test_model_human_request_wins_during_a_workflow() -> None:
 
     turn = await service.handle_text(identity("Позовите человека", message_id=304))
 
-    assert [choice.id for choice in turn.choices] == ["continue_bot", "human"]
+    assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == ["continue_bot", "human"]
     assert [item.cause for item in store.escalations] == [EscalationCause.HUMAN_REQUEST]
     assert record.state == "open_conversation"
 
@@ -332,7 +332,7 @@ async def test_concrete_need_keeps_conversation_open_until_contextual_button_is_
     suggestion = await service.handle_text(identity("мне нужна еда", message_id=305))
 
     assert suggestion.text == "Слышу вас. Давайте разберёмся, чем можно помочь."
-    assert [choice.id for choice in suggestion.choices] == ["need:food_money", "human"]
+    assert [choice.id for choice in suggestion.choices if not choice.id.startswith("back:")] == ["need:food_money", "human"]
     assert store.conversations[101].state == "open_conversation"
     assert store.aid_requests == []
     assert not any(choice.id.startswith("aid:") for choice in suggestion.choices)
@@ -370,7 +370,7 @@ async def test_all_detected_needs_render_without_a_button_limit() -> None:
     )
 
     assert turn.text == "Я рядом. Можно идти по шагам."
-    assert [choice.id for choice in turn.choices] == [
+    assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == [
         "need:food_money",
         "need:housing",
         "need:legal",
@@ -389,7 +389,7 @@ async def test_unrelated_conversation_never_gets_contextual_need_buttons(text: s
 
     turn = await service.handle_text(identity(text, message_id=308))
 
-    assert [choice.id for choice in turn.choices] == ["human"]
+    assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == ["human"]
 
 
 @pytest.mark.asyncio
@@ -416,8 +416,8 @@ async def test_pending_psychologist_offer_needs_a_later_verified_signal_before_b
     interest = await service.handle_text(identity("расскажите, пожалуйста", message_id=308))
     contact = await service.handle_callback(identity(message_id=309), "support:psychologist")
 
-    assert [choice.id for choice in offer.choices] == ["human"]
-    assert [choice.id for choice in interest.choices] == ["support:psychologist", "human"]
+    assert [choice.id for choice in offer.choices if not choice.id.startswith("back:")] == ["human"]
+    assert [choice.id for choice in interest.choices if not choice.id.startswith("back:")] == ["support:psychologist", "human"]
     assert any(choice.id == "contact:current_telegram" for choice in contact.choices)
     assert store.conversations[101].state == "collecting_contact_method"
     assert store.conversations[101].pending_offer is None
@@ -442,7 +442,7 @@ async def test_pending_psychologist_offer_expires_after_an_unrelated_reply() -> 
     await service.handle_text(identity("мне трудно", message_id=313))
     turn = await service.handle_text(identity("да, хочу продукты", message_id=314))
 
-    assert [choice.id for choice in turn.choices] == ["human"]
+    assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == ["human"]
     assert store.conversations[101].state == "open_conversation"
     assert store.conversations[101].pending_offer is None
     assert store.aid_requests == []
@@ -491,7 +491,7 @@ async def test_handoff_and_critical_routes_clear_a_soft_psychologist_offer(route
     assert store.conversations[101].pending_offer is None
     later = await service.handle_text(identity("да, хочу", message_id=317))
 
-    assert [choice.id for choice in later.choices] == ["human"]
+    assert [choice.id for choice in later.choices if not choice.id.startswith("back:")] == ["human"]
     assert store.conversations[101].state == "open_conversation"
     assert store.conversations[101].pending_offer is None
 
@@ -518,9 +518,9 @@ async def test_model_concern_and_critical_diagnostics_record_escalations() -> No
     )
     critical_turn = await critical.handle_text(identity("не хочу жить", message_id=311))
 
-    assert [choice.id for choice in concern_turn.choices] == ["human"]
+    assert [choice.id for choice in concern_turn.choices if not choice.id.startswith("back:")] == ["human"]
     assert concern_store.escalations[-1].cause is EscalationCause.SAFETY
-    assert "8-800-2000-122" in critical_turn.text
+    assert "8 (800) 100-49-94" in critical_turn.text
     assert critical_store.escalations[-1].cause is EscalationCause.SAFETY
 
 
@@ -695,8 +695,8 @@ async def test_human_callback_retries_after_pre_effect_failure_then_replays_idem
     replay = await service.handle_callback(incoming, "human")
 
     assert len(store.escalations) == 1
-    assert [choice.id for choice in successful.choices] == ["continue_bot", "human"]
-    assert [choice.id for choice in replay.choices] == ["continue_bot", "human"]
+    assert [choice.id for choice in successful.choices if not choice.id.startswith("back:")] == ["continue_bot", "human"]
+    assert [choice.id for choice in replay.choices if not choice.id.startswith("back:")] == ["continue_bot", "human"]
 
 
 @pytest.mark.asyncio
@@ -713,5 +713,5 @@ async def test_human_callback_retries_after_post_effect_failure_without_duplicat
 
     assert len(store.escalations) == 1
     assert store.escalations[0].request.request_key is not None
-    assert [choice.id for choice in successful.choices] == ["continue_bot", "human"]
-    assert [choice.id for choice in replay.choices] == ["continue_bot", "human"]
+    assert [choice.id for choice in successful.choices if not choice.id.startswith("back:")] == ["continue_bot", "human"]
+    assert [choice.id for choice in replay.choices if not choice.id.startswith("back:")] == ["continue_bot", "human"]

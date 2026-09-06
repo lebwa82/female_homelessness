@@ -17,6 +17,7 @@ from app.store import ConversationRecord, PostgresConversationStore
 from app.worker import PostgresJobRepository
 
 _REQUIRED_COLUMNS = {
+    ("conversations", "navigation"),
     ("conversations", "pending_offer"), ("conversations", "generation"), ("conversations", "version"),
     ("conversation_tombstones", "platform_user_hash"), ("conversation_tombstones", "generation"),
     ("escalations", "cause"), ("escalations", "level"), ("escalations", "request_key"),

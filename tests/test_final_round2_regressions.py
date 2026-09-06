@@ -48,12 +48,12 @@ async def test_outbound_audit_failure_cannot_suppress_canonical_crisis_delivery(
         raise RuntimeError("synthetic outbound audit failure")
 
     monkeypatch.setattr(bot, "conversation_service", SimpleNamespace(record_outbound=failing_outbound))
-    turn = AgentTurn(text="Телефон доверия — 8-800-2000-122")
+    turn = AgentTurn(text="Телефон доверия — 8 (800) 100-49-94")
 
     await bot.send_turn(message, incoming("synthetic", 902), turn)
 
     answer.assert_awaited_once()
-    assert "8-800-2000-122" in answer.await_args.args[0]
+    assert "8 (800) 100-49-94" in answer.await_args.args[0]
 
 
 @pytest.mark.asyncio

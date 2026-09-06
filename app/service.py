@@ -30,11 +30,13 @@ from app.domain import (
     SupportOffer,
 )
 from app.knowledge import find_verified_articles, format_verified_context
+from app.navigation import back_update, checkpoint_update, previous_checkpoint
 from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, model_risk_assessment, resolve_turn
 from app.store import ConversationRecord, PostgresConversationStore
 from app.ui import (
     CONTACT_CHOICES,
     CONTINUE_CHOICES,
+    FOLLOWUP_CHOICES,
     LEVEL_TWO_CHOICES,
     MORE_HELP_CHOICES,
     NEED_CHOICES,
@@ -125,7 +127,7 @@ class ConversationService:
             pending_offer=None,
             context_epoch=record.context_epoch + 1,
         )
-        turn = self._turn(WELCOME, CONTINUE_CHOICES)
+        turn = self._with_back_choice(record, self._turn(WELCOME, CONTINUE_CHOICES))
         await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
         return turn
 
@@ -159,7 +161,7 @@ class ConversationService:
             effect_key=self._effect_key(start_key, "started"),
         )
         await self._reset_entry_workflow(record)
-        turn = self._turn(WELCOME, CONTINUE_CHOICES)
+        turn = self._with_back_choice(record, self._turn(WELCOME, CONTINUE_CHOICES))
         await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
         return turn
 
@@ -367,7 +369,7 @@ class ConversationService:
         except Exception:
             await self.store.fail_callback(record, callback_id, incoming.message_id, lease_token)
             raise
-        turn = self._bind_execution_key(turn, outcome_key)
+        turn = self._bind_execution_key(self._with_back_choice(record, turn), outcome_key)
         await self.store.save_text_outcome(record, outcome_key, text_lease_token, turn)
         await self.store.complete_callback(record, callback_id, incoming.message_id, lease_token)
         return turn
@@ -378,6 +380,14 @@ class ConversationService:
         callback_id: str,
         request_key: str,
     ) -> AgentTurn:
+        if callback_id.startswith("back:"):
+            synchronization = checkpoint_update(record, {})
+            if synchronization:
+                await self.store.update(record, **synchronization)
+            values = back_update(record.navigation, callback_id)
+            if values is not None:
+                await self.store.update(record, **values)
+            return await self._state_turn(record)
         if callback_id.startswith("followup:") and record.state == ConversationState.FOLLOWUP_SENT.value:
             await self.store.cancel_pending_reminder(record)
             record = await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
@@ -566,6 +576,7 @@ class ConversationService:
                 assessment,
                 request_key=request_key,
             )
+            turn = self._with_back_choice(record, turn)
             await self._record_policy_decision(
                 record,
                 state_before,
@@ -1074,6 +1085,20 @@ class ConversationService:
         )
 
     @staticmethod
+    def _with_back_choice(record: ConversationRecord, turn: AgentTurn) -> AgentTurn:
+        # Keep a stored outcome's original token: replay must not turn an old
+        # button into permission to navigate a newer workflow.
+        if any(choice.id.startswith("back:") for choice in turn.choices):
+            return turn
+        if previous_checkpoint(record.navigation) is None:
+            return turn
+        choices = tuple(choice for choice in turn.choices if choice.id != "human")
+        return turn.model_copy(update={"choices": (
+            *choices,
+            Choice(id=f"back:{record.navigation['revision']}", label="Вернуться на шаг назад"),
+        )}).with_human_choice()
+
+    @staticmethod
     def _turn(text: str, choices: tuple[Choice, ...] = ()) -> AgentTurn:
         return AgentTurn(text=text, choices=choices).with_human_choice()
 
@@ -1123,6 +1148,19 @@ class ConversationService:
         return ConversationService._turn(text, CONTACT_CHOICES)
 
     async def _state_turn(self, record: ConversationRecord) -> AgentTurn:
+        if record.state == ConversationState.GREETING.value:
+            return self._turn(WELCOME, CONTINUE_CHOICES)
+        if record.state == ConversationState.CLOSED.value:
+            return self._turn(PAUSE)
+        if record.state == ConversationState.FOLLOWUP_SENT.value:
+            return self._turn("Как вы сейчас по сравнению с прошлым разговором?", FOLLOWUP_CHOICES)
+        if record.state == ConversationState.FOLLOWUP_ANSWERED.value:
+            return self._turn("Хотите узнать подробнее о дальнейшей поддержке?", LEVEL_TWO_CHOICES)
+        if record.state == ConversationState.SAFETY_ESCALATION.value:
+            return self._turn(
+                "Здесь можно продолжить разговор или позвать человека.",
+                (Choice(id="continue_bot", label="Продолжить здесь"),),
+            )
         if record.state == ConversationState.AID_REQUESTED.value:
             return ConversationService._turn("Запрос уже сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
         if record.state == ConversationState.DISCOVERING_NEED.value:

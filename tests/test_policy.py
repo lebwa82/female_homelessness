@@ -45,7 +45,7 @@ def test_model_critical_diagnostic_is_authoritative_over_empty_local_projection(
 
     assert decision.effect is PolicyEffect.SAFETY_ESCALATION
     assert decision.choice_set is ChoiceSet.SAFE_CONTINUE
-    assert "8-800-2000-122" in decision.text
+    assert "8 (800) 100-49-94" in decision.text
 
 
 def test_model_handoff_route_is_authoritative_even_when_urgency_is_only_concern() -> None:
@@ -68,7 +68,7 @@ def test_model_handoff_route_is_authoritative_even_when_urgency_is_only_concern(
     assert decision.effect is PolicyEffect.SAFETY_ESCALATION
     assert decision.choice_set is ChoiceSet.SAFE_CONTINUE
     assert decision.need is NeedKind.CHILDREN
-    assert "8-800-2000-122" not in decision.text
+    assert "8 (800) 100-49-94" not in decision.text
 
 
 def test_model_suicide_route_uses_s12_without_relying_on_a_category_string() -> None:
@@ -82,7 +82,7 @@ def test_model_suicide_route_uses_s12_without_relying_on_a_category_string() -> 
     )
 
     assert decision.effect is PolicyEffect.SAFETY_ESCALATION
-    assert "8-800-2000-122" in decision.text
+    assert "8 (800) 100-49-94" in decision.text
 
 
 def test_confirmed_s11_route_does_not_depend_on_the_parallel_support_call() -> None:
