@@ -30,8 +30,8 @@ AID_CATALOG = (
     ),
     AidItem(
         id=PSYCHOLOGIST_AID_ID,
-        label="Три встречи с психологом",
-        description="Три онлайн-встречи через партнёрскую платформу.",
+        label="Встреча с психологом",
+        description="Встреча с психологом онлайн через партнёрскую платформу.",
     ),
     AidItem(
         id="food_card",
@@ -51,8 +51,8 @@ AID_CATALOG = (
     ),
     AidItem(
         id="peer_consultation",
-        label="Разговор с равной консультанткой",
-        description="Разговор с женщиной с похожим опытом.",
+        label="Разговор с женщиной, пережившей схожий опыт",
+        description="Разговор с женщиной, пережившей схожий опыт.",
     ),
     AidItem(
         id="addiction_specialist",

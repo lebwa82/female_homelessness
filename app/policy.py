@@ -208,7 +208,7 @@ def safety_resolved_turn(context: PolicyContext, risk: RiskAssessment) -> Resolv
     if risk.escalation is SafetyEscalation.SUICIDE or SafetyCategory.SUICIDE in risk.categories:
         text = (
             "Слышу вас. Это важно.\n\n"
-            "Телефон доверия — бесплатно, круглосуточно: 8-800-2000-122\n\n"
+            "Телефон доверия — бесплатно, круглосуточно: 8 (800) 100-49-94\n\n"
             "Я здесь параллельно. Можно написать, что происходит."
         )
     else:

@@ -17,7 +17,7 @@
 - One persistent conversation is reused for each Telegram user.
 - Exactly two independent LLM requests start concurrently for each ordinary user text: risk and support.
 - No LLM-selected side effect executes until risk classification has completed and backend policy accepts it.
-- Critical risk discards the support action; suicide copy includes `8-800-2000-122` exactly.
+- Critical risk discards the support action; suicide copy includes `8 (800) 100-49-94` exactly.
 - Human escalation is simulated with user-facing copy and a database event; no staff chat or Chatwoot call is made.
 - Full local message history is retained for 30 days and sent to Yandex only after Presidio masking with `x-data-logging-enabled: false`.
 - No name, exact address, age, document, image, voice or video collection is added.
@@ -274,7 +274,7 @@ async def test_critical_risk_discards_support_side_effect(service, gateway, repo
         ),
     )
     turn = await service.handle_text(identity, "не хочу жить")
-    assert "8-800-2000-122" in turn.text
+    assert "8 (800) 100-49-94" in turn.text
     assert repo.aid_requests == []
     assert repo.escalations[-1].level == "critical"
 ```

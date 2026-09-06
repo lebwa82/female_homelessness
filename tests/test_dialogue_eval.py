@@ -74,14 +74,14 @@ async def test_evaluator_replays_pending_offer_and_active_workflow_through_servi
         "effect", "rendered_callback_ids", "state_after"
     )} == {
         "effect": "none",
-        "rendered_callback_ids": ("support:psychologist", "human"),
+        "rendered_callback_ids": ("support:psychologist", "back:1", "human"),
         "state_after": "open_conversation",
     }
     assert {key: by_id["multi-aid-completion-open-01"].hard_projection[key] for key in (
         "effect", "rendered_callback_ids", "state_after"
     )} == {
         "effect": "replay_workflow",
-        "rendered_callback_ids": ("more_help", "finish", "human"),
+        "rendered_callback_ids": ("more_help", "finish", "back:1", "human"),
         "state_after": "aid_requested",
     }
 
@@ -259,7 +259,7 @@ async def test_production_regression_replays_through_conversation_service() -> N
     report = await evaluate_case(gateway, case)
 
     assert report.hard_failures == ()
-    assert report.hard_projection["rendered_callback_ids"] == ("human",)
+    assert report.hard_projection["rendered_callback_ids"] == ("back:1", "human")
     assert report.hard_projection["effect"] == "none"
     assert report.hard_projection["state_after"] == "open_conversation"
     assert report.hard_projection["escalation_count"] == 0

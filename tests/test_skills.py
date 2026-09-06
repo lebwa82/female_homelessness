@@ -25,7 +25,7 @@ def test_skills_encode_tone_buttons_and_human_invariants() -> None:
     assert "мотивационного интервью" in prompt.lower()
     assert "не более четырёх" in prompt.lower()
     assert "поговорить с живым человеком" in prompt.lower()
-    assert "8-800-2000-122" in prompt
+    assert "8 (800) 100-49-94" in prompt
     assert "не придумывай" in prompt.lower()
     assert all((Path("skills") / name / "SKILL.md").is_file() for name in SKILL_NAMES)
 
