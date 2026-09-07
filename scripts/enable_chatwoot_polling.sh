@@ -2,6 +2,7 @@
 # Run after deploying a release containing telegram-ingress. No secret output.
 set -euo pipefail
 host="$(uv run python -m scripts.resolve_prod_host --ip-only)"
+uv run python -m scripts.resolve_prod_host --verify-ssh "$host" >/dev/null
 ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
   -l lebwa82 "$host" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail

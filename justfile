@@ -68,11 +68,14 @@ eval-dialogues-live:
 eval-safety-live:
     uv run python -m scripts.dialogue_eval --live tests/fixtures/live_safety_scenarios.jsonl
 
-# Deploy the clean, committed Git snapshot to the MVP VM and verify it.
-# The current public IP is resolved from Yandex Cloud; override when needed:
-# just deploy-prod user@host
+# Deploy the current Chatwoot contour, never the retired standalone bot.
+# The current public IP is resolved by VM ID and checked over SSH before writes.
 deploy-prod host="": check
-    bash scripts/deploy_prod.sh "{{host}}"
+    bash scripts/deploy_chatwoot_test.sh "{{host}}"
+
+# Show the current SSH target without relying on a saved IP address.
+prod-host:
+    uv run python -m scripts.resolve_prod_host
 
 # Deploy the isolated Chatwoot test contour. It does not switch the live Telegram bot.
 deploy-chatwoot-test host="":

@@ -2,6 +2,7 @@
 # Query the cloud on each invocation and repair generated test hostnames.
 set -euo pipefail
 host="$(uv run python -m scripts.resolve_prod_host --ip-only)"
+uv run python -m scripts.resolve_prod_host --verify-ssh "$host" >/dev/null
 result="$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
   -l lebwa82 "$host" "sudo python3 - '$host'" < scripts/update_chatwoot_address.py)"
 changed="${result%%$'\n'*}"

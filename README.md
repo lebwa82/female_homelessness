@@ -96,7 +96,11 @@ TELEGRAM_PROXY_URL=socks5://login:password@proxy.example:1080
 Ссылка `tg://proxy?server=…&secret=…` — это MTProto, она не подходит для HTTP
 Telegram Bot API.
 
-## Постоянный запуск на VM
+## Исторический standalone-запуск (не использовать на текущей VM)
+
+Действующий сервер использует Chatwoot и `women-help-chatwoot-agent`.
+Ниже сохранена инструкция прежнего standalone-контура; не включайте его сервис
+рядом с текущим Telegram ingress.
 
 После первого деплоя проекта в `/opt/women-help-bot` и `uv sync --all-groups`
 создайте файл `/etc/women-help-bot.env` с теми же переменными, что и в локальном
@@ -123,14 +127,12 @@ sudo systemctl status women-help-bot
 just deploy-prod
 ```
 
-Команда получает актуальный production-host через настроенный resolver и отправляет
-на VM только содержимое текущего Git-коммита (без `.env` и других неотслеживаемых
-файлов). На VM она распаковывает revision в staging, запускает offline checks и
-PostgreSQL assurance из staged artifact через существующий root-only EnvironmentFile,
-требует healthy существующий PostgreSQL container и только затем atomically activates
-release. При неуспешном restart прежний release восстанавливается. Скрипт не печатает
-EnvironmentFile и не запускает/пересоздаёт PostgreSQL container. Другой SSH-хост можно передать как
-`just deploy-prod user@example.org`.
+Команда разворачивает действующий Chatwoot-контур, не прежний standalone-бот.
+Она получает свежий IP по ID VM через Yandex Cloud и перед загрузкой проверяет
+ID самой машины по SSH. На VM отправляется только текущий Git-коммит, без `.env`.
+Деплой собирает Python image, обновляет Chatwoot `latest`, выполняет подготовку БД,
+восстанавливает активные сервисы и проверяет HTTPS и маршруты Agent Bot.
+Текущий SSH-адрес можно посмотреть командой `just prod-host`.
 
 Проверить доступ к модели двумя реальными структурированными вызовами: `just llm-health`.
 
@@ -204,8 +206,13 @@ just chatwoot-refresh-address
 Команда обновляет только автоматически созданные имена `sslip.io`, перезапускает
 Chatwoot при изменении и выводит новую ссылку после HTTPS-проверки. Собственные
 домены и секреты сохраняются. Это обновление по команде, а не фоновый мониторинг:
-старая ссылка с прежним IP не станет указывать на новый адрес. Для постоянной
-ссылки и подключённых webhook нужен статический IP или свой домен с обновлением DNS.
+старая ссылка с прежним IP не станет указывать на новый адрес.
+
+Теперь IP `158.160.16.252` зарезервирован: текущая постоянная ссылка —
+[Chatwoot](https://chatwoot.158-160-16-252.sslip.io/). Обычная остановка и запуск VM
+больше не требуют обновления адресов. Зарезервированный IP тарифицируется и при
+остановленной машине. Resolver по ID и проверка SSH остаются дополнительной защитой
+от случайного деплоя на другую VM.
 
 Тестовый контур использует `chatwoot/chatwoot:latest` для панели и Sidekiq.
 `just deploy-chatwoot-test` сначала скачивает свежий образ, затем останавливает

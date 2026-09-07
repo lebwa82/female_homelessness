@@ -10,6 +10,8 @@ if ! [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
   exit 2
 fi
 
+uv run python -m scripts.resolve_prod_host --verify-ssh "$host" >/dev/null
+
 ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -l lebwa82 "$host" \
   'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail

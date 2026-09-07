@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import re
 import subprocess
 import sys
 from typing import Any
@@ -38,14 +39,53 @@ def resolve_prod_host() -> str:
     return public_ssh_host(instance)
 
 
+def verify_ssh_host(host: str) -> str:
+    """Refuse remote mutations unless the SSH peer is the permanent project VM."""
+    login, separator, address = host.rpartition("@")
+    if not separator:
+        login, address = DEFAULT_SSH_LOGIN, host
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]*", login):
+        raise ValueError("Invalid SSH login")
+    target = f"{login}@{ipaddress.IPv4Address(address)}"
+    result = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            target,
+            (
+                "curl -fsS --max-time 5 -H Metadata-Flavor:Google "
+                "http://169.254.169.254/computeMetadata/v1/instance/id"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if result.stdout.strip() != PROD_VM_ID:
+        raise ValueError("SSH peer is not the project VM")
+    return target
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Resolve the project VM through Yandex Cloud")
     parser.add_argument("--ip-only", action="store_true")
+    parser.add_argument(
+        "--verify-ssh", metavar="HOST", help="Verify VM identity over SSH before changes"
+    )
     args = parser.parse_args()
     try:
-        host = resolve_prod_host()
+        host = verify_ssh_host(args.verify_ssh) if args.verify_ssh else resolve_prod_host()
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         # Never surface cloud CLI output: it can contain account credentials.
-        print(f"Cannot resolve project VM ({type(error).__name__}); check yc access.", file=sys.stderr)
+        print(
+            f"Project VM resolution/identity check failed ({type(error).__name__}).",
+            file=sys.stderr,
+        )
         sys.exit(1)
     print(host.split("@", 1)[1] if args.ip_only else host)

@@ -24,6 +24,9 @@ if [[ "$target_dir" != "/opt/women-help-chatwoot" ]]; then
   exit 2
 fi
 
+# Check even an explicit IP override before copying code or touching services.
+uv run python -m scripts.resolve_prod_host --verify-ssh "$host" >/dev/null
+
 echo "Staging Chatwoot test release ${revision} on ${host}."
 git archive --format=tar HEAD |
   ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 -l lebwa82 "$host" \
@@ -159,6 +162,11 @@ done
 if [[ "$healthy" != 1 ]]; then
   echo "Chatwoot did not become reachable through Caddy." >&2
   exit 4
+fi
+
+if [[ "$agent_was_active" == 1 ]]; then
+  sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" handoff_schema </dev/null
+  sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" refresh_routes </dev/null
 fi
 
 sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml ps
