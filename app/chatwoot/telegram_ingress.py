@@ -49,7 +49,7 @@ class Ingress:
     async def prepare(self) -> None:
         # Do not disable Telegram delivery before the local receiver is ready.
         async with self.http.get(
-            f"{self.base_url}/auth/sign_in", allow_redirects=False
+            f"{self.base_url}/", allow_redirects=False
         ) as response:
             if response.status not in {200, 302}:
                 raise ChatwootUnavailable()
@@ -138,7 +138,8 @@ async def run() -> None:
         raise RuntimeError("Polling requires a proxy and an internal Chatwoot URL")
     async with (
         Bot(settings.telegram_bot_token, session=AiohttpSession(proxy=proxy)) as bot,
-        aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as http,
+        aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20),
+                              headers={"Accept-Encoding": "identity"}) as http,
         Redis.from_url(settings.telegram_ingress_redis_url, socket_timeout=5,
                        socket_connect_timeout=5) as redis,
     ):
@@ -169,6 +170,13 @@ async def main() -> None:
         await run()
 
 
+def error_kinds(error: BaseException) -> str:
+    """Expose TaskGroup failure classes without its secret-bearing traceback."""
+    if isinstance(error, BaseExceptionGroup):
+        return ",".join(sorted({error_kinds(child) for child in error.exceptions}))
+    return type(error).__name__
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -176,5 +184,5 @@ if __name__ == "__main__":
             raise SystemExit(0 if asyncio.run(healthy()) else 1)
         asyncio.run(main())
     except Exception as error:  # noqa: BLE001 - SDK errors can embed tokens and payloads
-        logger.error("Telegram ingress stopped kind=%s", type(error).__name__)
+        logger.error("Telegram ingress stopped kind=%s", error_kinds(error))
         raise SystemExit(1) from None

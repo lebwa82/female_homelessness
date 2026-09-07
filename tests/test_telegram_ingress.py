@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import AnswerCallbackQuery
 from aiogram.types import Update
 
-from app.chatwoot.telegram_ingress import ChatwootUnavailable, Ingress, keep_lease
+from app.chatwoot.telegram_ingress import ChatwootUnavailable, Ingress, error_kinds, keep_lease
 from deploy.chatwoot import activate
 
 
@@ -43,6 +43,7 @@ class Http:
 
     @asynccontextmanager
     async def get(self, url, **kwargs):
+        assert url == "http://chatwoot:3000/"
         yield SimpleNamespace(status=self.status)
 
     @asynccontextmanager
@@ -136,6 +137,14 @@ async def test_lease_loss_propagates_and_stops_owner(monkeypatch):
     lock = SimpleNamespace(extend=AsyncMock(side_effect=RuntimeError("lease lost")))
     with pytest.raises(RuntimeError):
         await keep_lease(lock)
+
+
+def test_nested_failures_log_classes_only():
+    error = ExceptionGroup("private payload", [
+        ExceptionGroup("private URL", [ChatwootUnavailable("private credentials")]),
+        TimeoutError("private token"),
+    ])
+    assert error_kinds(error) == "ChatwootUnavailable,TimeoutError"
 
 
 def test_ingress_env_contains_only_transport_credentials(tmp_path, monkeypatch, capsys):
