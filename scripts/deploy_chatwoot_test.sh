@@ -107,6 +107,11 @@ sudo podman build \
   -f "$RELEASE_DIR/deploy/chatwoot/Containerfile" "$RELEASE_DIR" </dev/null
 sudo podman pull docker.io/chatwoot/chatwoot:latest </dev/null
 agent_was_active=0
+ingress_was_active=0
+if sudo systemctl is-active --quiet women-help-telegram-ingress.service; then
+  ingress_was_active=1
+  sudo systemctl stop women-help-telegram-ingress.service </dev/null
+fi
 if sudo systemctl is-active --quiet women-help-chatwoot-agent.service; then
   agent_was_active=1
   sudo systemctl stop women-help-chatwoot-agent.service </dev/null
@@ -118,11 +123,14 @@ fi
 sudo ln -sfn "$RELEASE_DIR" "${TARGET_DIR}.next"
 sudo mv -Tf "${TARGET_DIR}.next" "$TARGET_DIR"
 sudo python3 "$TARGET_DIR/scripts/update_chatwoot_address.py" "$HOST_IP"
+sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" prepare_ingress
 
 sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-chatwoot.service" \
   /etc/systemd/system/women-help-chatwoot.service
 sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-chatwoot-agent.service" \
   /etc/systemd/system/women-help-chatwoot-agent.service
+sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-telegram-ingress.service" \
+  /etc/systemd/system/women-help-telegram-ingress.service
 sudo systemctl daemon-reload
 
 cd "$TARGET_DIR"
@@ -133,6 +141,9 @@ sudo systemctl enable women-help-chatwoot.service
 sudo systemctl restart women-help-chatwoot.service
 if [[ "$agent_was_active" == 1 ]]; then
   sudo systemctl start women-help-chatwoot-agent.service </dev/null
+fi
+if [[ "$ingress_was_active" == 1 ]]; then
+  sudo systemctl start women-help-telegram-ingress.service </dev/null
 fi
 
 chatwoot_hostname="$(sudo /usr/bin/awk -F= '$1 == "CHATWOOT_HOSTNAME" {print $2}' "$CHATWOOT_ENV")"

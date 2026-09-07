@@ -25,7 +25,8 @@ def test_refresh_routes_uses_current_hosts_and_does_not_log_credentials(monkeypa
     assert config["agent_health_url"] == "https://agent.192-0-2-2.sslip.io/healthz"
     assert config["agent_url"].startswith("https://agent.192-0-2-2.sslip.io/")
     assert "drop_pending_updates: false" in script
-    assert "deleteWebhook" not in script
+    assert config["transport"] == "webhook"
+    assert "polling ? '/deleteWebhook' : '/setWebhook'" in script
     assert "private-fixture-route" not in capsys.readouterr().out
 
 
@@ -50,3 +51,18 @@ def test_shell_refresh_checks_routes_even_if_env_hosts_did_not_change():
     assert "'sudo python3 - refresh_routes' < deploy/chatwoot/activate.py" in script
     assert script.index("ready=0") > script.index('if [[ "$changed" == "changed" ]]')
     assert script.index("refresh_routes") > script.index("HTTPS check failed")
+
+
+def test_refresh_keeps_polling_when_vm_address_changes(monkeypatch):
+    monkeypatch.setattr(activate, "env", lambda path: {
+        "CHATWOOT_HOSTNAME": "chatwoot.192-0-2-3.sslip.io",
+        "AGENT_HOSTNAME": "agent.192-0-2-3.sslip.io",
+        "CHATWOOT_WEBHOOK_SECRET": "fixture",
+        "TELEGRAM_UPDATE_TRANSPORT": "polling",
+    })
+    calls = []
+    monkeypatch.setattr(activate, "rails", lambda script, config: calls.append(config) or {})
+    activate.refresh_routes()
+    assert calls[0]["transport"] == "polling"
+    script = Path("scripts/refresh_chatwoot_address.sh").read_text()
+    assert "restart women-help-telegram-ingress.service" in script

@@ -106,6 +106,19 @@ services:
     command: ["/app/.venv/bin/python", "-m", "app.chatwoot.proxy"]
     restart: unless-stopped
 
+  telegram-ingress:
+    image: localhost/women-help-chatwoot-agent:current
+    env_file:
+      - /etc/women-help-telegram.env
+    command: ["/app/.venv/bin/python", "-m", "app.chatwoot.telegram_ingress"]
+    profiles: ["polling"]
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-m", "app.chatwoot.telegram_ingress", "--check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+    restart: unless-stopped
+
   caddy:
     image: docker.io/library/caddy:2.11.4-alpine
     env_file:

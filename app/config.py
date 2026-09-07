@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_proxy_url: str = ""
+    telegram_update_transport: Literal["webhook", "polling"] = "webhook"
+    telegram_ingress_redis_url: str = "redis://redis:6379/0"
     app_env: Literal["development", "production", "test"] = Field(
         default="development", validation_alias=AliasChoices("APP_ENV", "ENV")
     )

@@ -93,3 +93,7 @@ chatwoot-logs host="" service="women-help-chatwoot":
 # Resolve the current VM IP, refresh generated HTTPS names and check the panel.
 chatwoot-refresh-address:
     bash scripts/refresh_chatwoot_address.sh
+
+# Включить приём Telegram через прокси (Chatwoot сохраняет всю переписку).
+chatwoot-enable-polling:
+    bash scripts/enable_chatwoot_polling.sh

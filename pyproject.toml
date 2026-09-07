@@ -16,6 +16,7 @@ dependencies = [
   "ru-core-news-sm",
   "sqlalchemy",
   "pproxy>=2.7.9",
+  "redis>=7.0.0",
 ]
 
 [dependency-groups]

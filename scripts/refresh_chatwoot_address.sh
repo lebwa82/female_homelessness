@@ -11,9 +11,12 @@ if [[ "$changed" == "changed" ]]; then
     -l lebwa82 "$host" 'bash -s' <<'REMOTE_SCRIPT'
 set -euo pipefail
 agent_active=0
+ingress_active=0
 if sudo systemctl is-active --quiet women-help-chatwoot-agent; then agent_active=1; fi
+if sudo systemctl is-active --quiet women-help-telegram-ingress; then ingress_active=1; fi
 sudo systemctl restart women-help-chatwoot.service </dev/null
 if [[ "$agent_active" == 1 ]]; then sudo systemctl restart women-help-chatwoot-agent.service </dev/null; fi
+if [[ "$ingress_active" == 1 ]]; then sudo systemctl restart women-help-telegram-ingress.service </dev/null; fi
 REMOTE_SCRIPT
 fi
 printf 'Chatwoot: %s\n' "$url"
