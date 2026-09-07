@@ -194,7 +194,7 @@ def queues():
       duty = account.teams.find(cfg.fetch('duty_id'))
       duty.update!(description: 'Общая очередь: срочные обращения, неопределённая потребность, несколько направлений.',
         allow_auto_assign: false) if duty.description.blank?
-      legal = account.teams.find_or_initialize_by(name: 'Юристы')
+      legal = account.teams.where('LOWER(name) = ?', 'юристы').first || account.teams.new(name: 'Юристы')
       if legal.new_record?
         legal.description = 'Юридические вопросы: документы, трудовые и семейные споры, защита прав. Не экстренное реагирование.'
         legal.allow_auto_assign = false

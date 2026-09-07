@@ -56,7 +56,7 @@ async def main(conversation_id: int):
     macros = macro_payload if isinstance(macro_payload, list) else macro_payload["payload"]
     macro_ids = {m["name"]: m["id"] for m in macros}
     teams = await api.get_teams()
-    legal_id = next(t["id"] for t in teams if t["name"] == "Юристы")
+    legal_id = next(t["id"] for t in teams if t["name"].casefold() == "юристы")
     default_id = settings.chatwoot_duty_team_id
     assert legal_id != default_id
     assert await api.get_team_members(legal_id)
