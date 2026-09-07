@@ -13,7 +13,7 @@ from app.chatwoot.client import ChatwootClient
 from app.config import settings
 
 
-async def main(conversation_id: int) -> None:
+async def main(conversation_id: int, *, handoff_only: bool = False) -> None:
     api = ChatwootClient(
         base_url=settings.chatwoot_base_url,
         account_id=settings.chatwoot_account_id,
@@ -69,15 +69,16 @@ async def main(conversation_id: int) -> None:
     back = next(value for value in choices(response) if value.startswith("back:"))
     assert "need:other" in choices(await send(back))
     passed("back_restores_state")
-    response = await send("Мне нужна еда.")
-    buttons = choices(response)
-    assert any("food" in value for value in buttons)
-    assert "human" in buttons
-    passed("live_qwen_and_contextual_buttons", buttons=buttons)
+    if not handoff_only:
+        response = await send("Мне нужна еда.")
+        buttons = choices(response)
+        assert any("food" in value for value in buttons)
+        assert "human" in buttons
+        passed("live_qwen_and_contextual_buttons", buttons=buttons)
     response = await send("/system_info")
     assert "Chatwoot → Telegram" in response["content"]
     passed("system_info")
-    await send("human")
+    handoff_reply = await send("human")
     current = await api.get_conversation(conversation_id)
     assert current["custom_attributes"]["reply_owner"] == "bot"
     assert current["custom_attributes"]["handoff_requested"] is True
@@ -91,6 +92,29 @@ async def main(conversation_id: int) -> None:
     assert len(notes) == 1 and notes[0]["private"]
     assert f"mention://team/{settings.chatwoot_duty_team_id}/" in notes[0]["content"]
     passed("duty_notified_without_takeover", notification_message_id=notes[0]["id"])
+    # Chatwoot keeps one notification per conversation. The bot's acknowledgement
+    # can already replace the mention with a participant notification; both must
+    # refer to this exact handoff, not a stale notification from an earlier turn.
+    deadline = monotonic() + 30
+    while monotonic() < deadline:
+        notifications = await api._transport.request(
+            "GET",
+            f"/api/v1/accounts/{settings.chatwoot_account_id}/notifications",
+            settings.chatwoot_read_token,
+        )
+        found = any(
+            item.get("notification_type")
+            in {"conversation_mention", "participating_conversation_new_message"}
+            and (item.get("secondary_actor") or {}).get("id")
+            in {notes[0]["id"], handoff_reply["id"]}
+            for item in notifications["data"]["payload"]
+        )
+        if found:
+            passed("native_duty_bell_notification")
+            break
+        await asyncio.sleep(0.5)
+    else:
+        raise RuntimeError("Native handoff notification not found for duty identity")
     await send("Продолжим разговор.")
     passed("bot_continues_after_notification")
     current = await api.get_conversation(conversation_id)
@@ -145,9 +169,14 @@ async def main(conversation_id: int) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--conversation", type=int, required=True)
+    parser.add_argument(
+        "--handoff-only",
+        action="store_true",
+        help="Focus on operator ownership, notification and command regressions",
+    )
     args = parser.parse_args()
     try:
-        asyncio.run(main(args.conversation))
+        asyncio.run(main(args.conversation, handoff_only=args.handoff_only))
     except Exception as error:  # noqa: BLE001 - safe diagnostics only
         print(json.dumps({"error_type": type(error).__name__}), flush=True)
         raise SystemExit(1) from None
