@@ -199,9 +199,57 @@ def status():
     )
 
 
+def refresh_routes():
+    """Repair both persisted webhook destinations after a test VM IP change.
+
+    Run after Rails has restarted with its new FRONTEND_URL. Re-registering a
+    Telegram webhook directly preserves queued updates and the existing inbox.
+    """
+    cw = env(CW)
+    result = rails(
+        """
+      frontend = cfg.fetch('frontend_url')
+      raise 'Rails has not loaded the new frontend URL' unless ENV.fetch('FRONTEND_URL').chomp('/') == frontend
+      account = Account.find_by(id: 1)
+      bot = account&.agent_bots&.find_by(name: 'Women Help Agent')
+      if bot
+        health = HTTParty.get(cfg.fetch('agent_health_url'), timeout: 15)
+        raise 'Agent endpoint is not ready' unless health.code == 200
+      end
+      updated = bot && bot.outgoing_url != cfg.fetch('agent_url')
+      bot.update!(outgoing_url: cfg.fetch('agent_url')) if updated
+      verified = []
+      channels = account ? account.telegram_channels : []
+      channels.each do |channel|
+        expected = frontend + '/webhooks/telegram/' + channel.bot_token
+        info = HTTParty.get(channel.telegram_api_url + '/getWebhookInfo', timeout: 15).parsed_response
+        raise 'Telegram webhook inspection failed' unless info['ok']
+        if info.dig('result', 'url') != expected
+          response = HTTParty.post(channel.telegram_api_url + '/setWebhook', timeout: 15,
+            body: {url: expected, drop_pending_updates: false}).parsed_response
+          raise 'Telegram webhook registration failed' unless response['ok']
+          info = HTTParty.get(channel.telegram_api_url + '/getWebhookInfo', timeout: 15).parsed_response
+        end
+        raise 'Telegram webhook verification failed' unless info['ok'] && info.dig('result', 'url') == expected
+        verified << channel.id
+      end
+      puts 'ACTIVATION_RESULT=' + {agent_route_updated: !!updated,
+        agent_configured: !!bot, verified_telegram_channels: verified}.to_json
+    """,
+        {
+            "frontend_url": f"https://{cw['CHATWOOT_HOSTNAME']}",
+            "agent_url": f"https://{cw['AGENT_HOSTNAME']}/webhooks/chatwoot/agent/{cw['CHATWOOT_WEBHOOK_SECRET']}",
+            "agent_health_url": f"https://{cw['AGENT_HOSTNAME']}/healthz",
+        },
+    )
+    print(json.dumps(result))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=["backup", "prepare", "provision", "connect", "status"])
+    parser.add_argument(
+        "phase", choices=["backup", "prepare", "provision", "connect", "status", "refresh_routes"]
+    )
     args = parser.parse_args()
     try:
         globals()[args.phase]()
