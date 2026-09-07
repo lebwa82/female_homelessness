@@ -87,3 +87,11 @@ def test_justfile_and_readme_expose_chatwoot_operator_commands() -> None:
     assert "bootstrap_chatwoot_agent.sh" in justfile
     assert "Chatwoot" in readme
     assert "women-help-chatwoot-agent" in readme
+
+
+def test_polling_activation_has_one_owner_for_container_start() -> None:
+    unit = (ROOT / "deploy/chatwoot/women-help-telegram-ingress.service").read_text()
+    activate = (ROOT / "scripts/enable_chatwoot_polling.sh").read_text()
+    assert "up -d --force-recreate --no-deps telegram-ingress" in unit
+    assert "systemctl enable --now women-help-telegram-ingress.service" in activate
+    assert "up -d" not in activate

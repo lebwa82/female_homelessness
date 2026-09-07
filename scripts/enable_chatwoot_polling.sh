@@ -15,8 +15,6 @@ sudo install -m 0644 deploy/chatwoot/women-help-telegram-ingress.service \
   /etc/systemd/system/women-help-telegram-ingress.service
 sudo systemctl daemon-reload
 sudo systemctl stop women-help-telegram-ingress.service
-sudo podman compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml \
-  up -d --force-recreate --no-deps telegram-ingress
 sudo systemctl enable --now women-help-telegram-ingress.service
 for attempt in {1..30}; do
   if sudo podman exec women-help-chatwoot_telegram-ingress_1 \
