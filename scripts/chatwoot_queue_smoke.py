@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import traceback
 from time import monotonic
 
 from app.chatwoot.client import ChatwootClient
@@ -91,7 +92,7 @@ async def main(conversation_id: int):
         })
         await send("/clear")
         await send("Мне нужна консультация юриста по трудовому договору.")
-        await send("human")
+        handoff_reply = await send("human")
         current = await api.get_conversation(conversation_id)
         assert team_id(current) == legal_id
         assert current["custom_attributes"]["routing_last_decision"]["reason"] == "model_selected"
@@ -99,6 +100,23 @@ async def main(conversation_id: int):
         notice = current["custom_attributes"]["routing_notice"]
         assert notice["sent"] and notice["team_id"] == legal_id
         passed("live_qwen_routes_to_legal_and_notifies_team")
+        note = next(
+            m for m in await api.get_messages(conversation_id)
+            if m.get("content_attributes", {}).get("bot_event_key") == notice["key"]
+        )
+
+        async def notified():
+            response = await request("GET", base + "/notifications")
+            return any(
+                n.get("notification_type") in {
+                    "conversation_mention", "participating_conversation_new_message",
+                }
+                and (n.get("secondary_actor") or {}).get("id") in {note["id"], handoff_reply["id"]}
+                for n in response["data"]["payload"]
+            )
+
+        await wait_for(notified, "legal_bell_notification")
+        passed("native_legal_bell_notification")
 
         profile = await request("GET", "/api/v1/profile")
         await post("/assignments", {"assignee_id": profile["id"]})
@@ -135,6 +153,20 @@ async def main(conversation_id: int):
         await return_to_bot()
         await send("/start")
         passed("native_return_macro_reenables_bot")
+        await macro("Передать юристам")
+
+        async def moved_to_legal():
+            c = await api.get_conversation(conversation_id)
+            attrs = c["custom_attributes"]
+            return (
+                team_id(c) == legal_id and attrs.get("routing_origin") == "manual"
+                and attrs.get("reply_owner") == "bot"
+                and attrs.get("routing_notice", {}).get("team_id") == legal_id
+                and attrs.get("routing_notice", {}).get("sent")
+            )
+
+        await wait_for(moved_to_legal, "legal_transfer_macro")
+        passed("native_legal_transfer_without_forced_takeover")
         folders = await request("GET", base + "/custom_filters?filter_type=conversation")
         folders = folders if isinstance(folders, list) else folders["payload"]
         folder = next(f for f in folders if f["name"] == "Юридическая помощь")
@@ -153,5 +185,11 @@ if __name__ == "__main__":
     try:
         asyncio.run(main(args.conversation))
     except Exception as error:  # noqa: BLE001 - no conversation or credential-bearing errors
-        print(json.dumps({"passed": False, "error_type": type(error).__name__}))
+        location = traceback.extract_tb(error.__traceback__)[-1]
+        print(json.dumps({
+            "passed": False, "error_type": type(error).__name__,
+            "function": location.name, "line": location.lineno,
+            "check": str(error) if type(error) is RuntimeError and str(error).startswith("timeout:")
+            else None,
+        }))
         raise SystemExit(1) from None

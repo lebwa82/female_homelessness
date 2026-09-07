@@ -218,14 +218,22 @@ def queues():
       end
       commands = [
         ['Вернуть боту', [{action_name: 'add_private_note', action_params: ['[women-help:return-to-bot]']}]],
-        ['Передать юристам', [{action_name: 'assign_team', action_params: [legal.id.to_s]}]],
-        ['Передать дежурным', [{action_name: 'assign_team', action_params: [duty.id.to_s]}]]
+        ['Передать юристам', [{action_name: 'assign_team', action_params: [legal.id]}]],
+        ['Передать дежурным', [{action_name: 'assign_team', action_params: [duty.id]}]]
       ]
       commands.each do |name, actions|
         macro = account.macros.find_or_initialize_by(name: name, visibility: :global)
         if macro.new_record?
           macro.assign_attributes(actions: actions, created_by: admin, updated_by: admin)
           macro.save!
+        else
+          # Only migrate our exact old string-ID action. Keep any user edits.
+          expected = JSON.parse(actions.to_json)
+          legacy = expected.deep_dup
+          legacy.each { |a| a['action_params'].map!(&:to_s) if a['action_name'] == 'assign_team' }
+          if macro.actions == legacy && macro.actions != expected
+            macro.update!(actions: expected, updated_by: admin)
+          end
         end
       end
       puts 'ACTIVATION_RESULT=' + {duty_team_id: duty.id, legal_team_id: legal.id,
