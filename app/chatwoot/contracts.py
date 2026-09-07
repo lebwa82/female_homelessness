@@ -22,6 +22,37 @@ class ConversationChanged:
     conversation_id: int
 
 
+RETURN_TO_BOT = "[women-help:return-to-bot]"
+
+
+@dataclass(frozen=True, slots=True)
+class StaffMessage:
+    message_id: int
+    conversation_id: int
+    sender_id: int
+    return_to_bot: bool = False
+
+
+def parse_staff_message(payload: object) -> StaffMessage | None:
+    """Only authenticated Chatwoot User messages may control bot ownership."""
+    if not isinstance(payload, dict) or payload.get("event") != "message_created":
+        return None
+    if payload.get("message_type") != "outgoing":
+        return None
+    sender, conversation = payload.get("sender"), payload.get("conversation")
+    if not isinstance(sender, dict) or sender.get("type") != "user":
+        return None
+    if not isinstance(conversation, dict):
+        return None
+    returning = payload.get("private") is True and payload.get("content") == RETURN_TO_BOT
+    if payload.get("private") is True and not returning:
+        return None
+    ids = [_positive_int(v) for v in (payload.get("id"), conversation.get("id"), sender.get("id"))]
+    if None in ids:
+        return None
+    return StaffMessage(*ids, return_to_bot=returning)
+
+
 def parse_conversation_changed(payload: object) -> ConversationChanged | None:
     if not isinstance(payload, dict) or payload.get("event") not in {
         "conversation_updated",

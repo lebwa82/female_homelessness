@@ -57,6 +57,19 @@ async def test_reads_conversation_and_messages_with_read_identity() -> None:
     assert [call[2] for call in transport.calls] == ["read-token", "read-token"]
 
 
+async def test_catalog_members_and_return_use_correct_api_identities():
+    transport = RecordingTransport(responses={
+        ("GET", "/api/v1/accounts/12/teams"): [{"id": 9, "name": "Duty"}],
+        ("GET", "/api/v1/accounts/12/teams/9/team_members"): [{"id": 4}, {"id": 5}],
+    })
+    api = client(transport)
+    assert (await api.get_teams())[0]["id"] == 9
+    assert await api.get_team_members(9) == (4, 5)
+    await api.unassign_human(23)
+    assert [c[2] for c in transport.calls] == ["read-token", "read-token", "bot-token"]
+    assert transport.calls[-1][3] == {"assignee_id": None}
+
+
 @pytest.mark.asyncio
 async def test_sends_telegram_input_select_and_persistent_turn_key() -> None:
     transport = RecordingTransport()

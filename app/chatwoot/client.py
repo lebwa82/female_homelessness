@@ -100,6 +100,26 @@ class ChatwootClient:
         )
         return _as_object(payload)
 
+    async def get_teams(self) -> tuple[dict[str, Any], ...]:
+        payload = await self._transport.request("GET", self._path("/teams"), self._read_token)
+        if not isinstance(payload, list):
+            raise ChatwootApiError("invalid_teams", 200)
+        return tuple(item for item in payload if isinstance(item, dict))
+
+    async def get_team_members(self, team_id: int) -> tuple[int, ...]:
+        payload = await self._transport.request(
+            "GET", self._path(f"/teams/{team_id}/team_members"), self._read_token
+        )
+        if not isinstance(payload, list):
+            raise ChatwootApiError("invalid_team_members", 200)
+        return tuple(m["id"] for m in payload if isinstance(m, dict) and type(m.get("id")) is int)
+
+    async def unassign_human(self, conversation_id: int) -> None:
+        await self._transport.request(
+            "POST", self._path(f"/conversations/{conversation_id}/assignments"),
+            self._bot_token, {"assignee_id": None},
+        )
+
     async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]:
         path = self._path(f"/conversations/{conversation_id}/messages")
         messages: dict[int, dict[str, Any]] = {}

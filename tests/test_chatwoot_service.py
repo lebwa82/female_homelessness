@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from app.agents import AgentEvaluation
-from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage
+from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage, StaffMessage
 from app.chatwoot.service import ChatwootAgentService
 from app.domain import (
     DiagnosticStatus,
@@ -52,6 +52,16 @@ class FakeChatwoot:
     notes: list[str] = field(default_factory=list)
     reply_exists: bool = False
     note_keys: set[str] = field(default_factory=set)
+
+    async def get_teams(self):
+        return ({"id": 9, "name": "Дежурные", "description": "Общая очередь"},)
+
+    async def get_team_members(self, team_id):
+        return (4,)
+
+    async def unassign_human(self, conversation_id):
+        self.conversation["assignee_id"] = None
+        self.conversation.get("meta", {}).pop("assignee", None)
 
     async def get_conversation(self, conversation_id: int) -> dict[str, Any]:
         self.conversation_reads += 1
@@ -216,9 +226,9 @@ async def test_safety_handoff_notifies_team_without_stopping_bot() -> None:
     assert handled is True
     assert api.conversation["custom_attributes"]["reply_owner"] == "bot"
     assert api.conversation["custom_attributes"]["handoff_requested"] is True
-    assert api.teams == []
+    assert api.teams == [9]
     assert api.statuses == []
-    assert "mention://team/9/duty" in api.notes[-1]
+    assert "mention://team/9/queue" in api.notes[-1]
     assert len(api.replies) == 1
 
 
@@ -329,6 +339,8 @@ async def test_takeover_and_return_sync_owner_without_model_or_reply():
     assert api.conversation["custom_attributes"]["reply_owner"] == "human"
     api.conversation["assignee_id"] = None
     await service.process(ConversationChanged(23))
+    assert api.conversation["custom_attributes"]["reply_owner"] == "human"
+    await service.process(StaffMessage(50, 23, 4, return_to_bot=True))
     assert api.conversation["custom_attributes"]["reply_owner"] == "bot"
     count = len(api.attributes)
     await service.process(ConversationChanged(23))

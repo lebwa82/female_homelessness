@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.agents import YandexAgentGateway
-from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage
+from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage, StaffMessage
+from app.chatwoot.queues import QueueCoordinator
+from app.chatwoot.routing import QueueRouter
 from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
 from app.release_info import active_release_info
@@ -46,6 +48,12 @@ class ChatwootConversationApi(Protocol):
 
     async def assign_team(self, conversation_id: int, team_id: int) -> None: ...
 
+    async def unassign_human(self, conversation_id: int) -> None: ...
+
+    async def get_teams(self) -> tuple[dict[str, Any], ...]: ...
+
+    async def get_team_members(self, team_id: int) -> tuple[int, ...]: ...
+
     async def add_private_note(
         self, conversation_id: int, content: str, *, event_key: str | None = None
     ) -> None: ...
@@ -76,18 +84,26 @@ class ChatwootAgentService:
         *,
         gateway: YandexAgentGateway | None = None,
         duty_team_id: int | None = None,
+        queue_router: QueueRouter | None = None,
     ) -> None:
         self._api = api
         self._gateway = gateway or YandexAgentGateway()
         self._duty_team_id = duty_team_id
+        self._queues = QueueCoordinator(api, duty_team_id, queue_router)
         self._locks: dict[int, asyncio.Lock] = {}
 
-    async def process(self, event: IncomingChatwootMessage | ConversationChanged) -> bool:
+    async def process(
+        self, event: IncomingChatwootMessage | ConversationChanged | StaffMessage
+    ) -> bool:
         """Process one trusted inbound event; ``False`` means intentionally silent."""
         lock = self._locks.setdefault(event.conversation_id, asyncio.Lock())
         async with lock:
+            if isinstance(event, StaffMessage):
+                await self._staff_message(event)
+                return False
             if isinstance(event, ConversationChanged):
-                await self._sync_owner(event.conversation_id)
+                conversation = await self._sync_owner(event.conversation_id)
+                await self._queues.sync(conversation)
                 return False
             return await self._process_locked(event)
 
@@ -97,6 +113,8 @@ class ChatwootAgentService:
             return await self._clear_context(event, conversation)
         if not _bot_owns(conversation) and event.content != "/system_info":
             return False
+
+        await self._queues.sync(conversation)
 
         turn_key = f"message:{event.message_id}"
         if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
@@ -127,7 +145,7 @@ class ChatwootAgentService:
         # A staff member may have claimed the conversation while Qwen was
         # evaluating. Never overwrite that ownership with a stale workflow
         # projection.
-        before_side_effects = await self._api.get_conversation(event.conversation_id)
+        before_side_effects = await self._sync_owner(event.conversation_id)
         if not _bot_owns(before_side_effects) and event.content != "/system_info":
             return False
 
@@ -155,7 +173,7 @@ class ChatwootAgentService:
         # A notification is not a takeover. A real human assignment wins even
         # while we are notifying the duty team; do not publish a late model reply.
         if event.content != "/system_info":
-            current = await self._api.get_conversation(event.conversation_id)
+            current = await self._sync_owner(event.conversation_id)
             if not _bot_owns(current):
                 return False
         if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
@@ -193,12 +211,37 @@ class ChatwootAgentService:
 
     async def _sync_owner(self, conversation_id: int) -> dict[str, Any]:
         conversation = await self._api.get_conversation(conversation_id)
-        owner = "human" if _human_assigned(conversation) else "bot"
-        if _custom_attributes(conversation).get("reply_owner") != owner:
-            # This field is a UI projection, never permission to override an
-            # assignment. All reply guards re-read the actual Chatwoot assignee.
-            await self._api.set_custom_attributes(conversation_id, {"reply_owner": owner})
+        attrs = _custom_attributes(conversation)
+        # Migrate the old assignment projection once; thereafter human mode is
+        # sticky across team changes, unassignment and process restarts.
+        latched = attrs.get("ownership_version") == 2 and attrs.get("reply_owner") == "human"
+        owner = "human" if _human_assigned(conversation) or latched else "bot"
+        if attrs.get("reply_owner") != owner or attrs.get("ownership_version") != 2:
+            update = {"reply_owner": owner, "ownership_version": 2}
+            await self._api.set_custom_attributes(conversation_id, update)
+            conversation = {**conversation, "custom_attributes": {**attrs, **update}}
         return conversation
+
+    async def _staff_message(self, event: StaffMessage) -> None:
+        conversation = await self._api.get_conversation(event.conversation_id)
+        attrs = _custom_attributes(conversation)
+        if event.message_id <= attrs.get("ownership_last_staff_message_id", 0):
+            return
+        if event.return_to_bot:
+            # The public Telegram input parser can never create this event.
+            # Keep history, queue, requests and workflow; change only ownership.
+            await self._api.unassign_human(event.conversation_id)
+            await self._api.set_status(event.conversation_id, "pending")
+        await self._api.set_custom_attributes(event.conversation_id, {
+            "reply_owner": "bot" if event.return_to_bot else "human",
+            "ownership_version": 2,
+            "ownership_last_staff_message_id": event.message_id,
+        })
+        if event.return_to_bot:
+            await self._api.add_private_note(
+                event.conversation_id, "Бот снова включён явным действием сотрудницы.",
+                event_key=f"return-to-bot:{event.message_id}",
+            )
 
     async def _clear_context(
         self, event: IncomingChatwootMessage, conversation: dict[str, Any]
@@ -227,7 +270,7 @@ class ChatwootAgentService:
         )
         current = await self._sync_owner(event.conversation_id)
         text = "Контекст бота очищен. Переписка и запрос дежурному, если он был, сохранены."
-        if _human_assigned(current):
+        if not _bot_owns(current):
             text += " Разговор остаётся у специалиста."
         else:
             text += " Можно продолжить здесь."
@@ -242,14 +285,19 @@ class ChatwootAgentService:
         """Native team mention creates Chatwoot bell notifications, not a takeover."""
         if self._duty_team_id is None:
             return False
-        # Notify before advancing the workflow. On transport failure the webhook
-        # worker retries; a persisted note key avoids sending the same mention twice.
-        await self._api.add_private_note(
-            event.conversation_id,
-            f"[Дежурные](mention://team/{self._duty_team_id}/duty): запрошено подключение "
-            "специалиста. Бот остаётся доступен, пока сотрудница не назначит разговор на себя.",
-            event_key=f"handoff:{event.message_id}",
+        conversation = await self._sync_owner(event.conversation_id)
+        if not _bot_owns(conversation):
+            return False
+        messages = await self._api.get_messages(event.conversation_id)
+        history = _history_after_epoch(messages, seeded.record.context_epoch, event.message_id)
+        selected = await self._queues.route(
+            conversation, (*history, ("user", event.content)), event.message_id,
+            urgent=any(a[1] == "safety_escalation" for a in seeded.store.actions),
+            can_route=_bot_owns,
         )
+        if selected is None:
+            await self._sync_owner(event.conversation_id)
+            return False
         await self._persist_workflow(
             event.conversation_id,
             seeded.record,
@@ -322,7 +370,12 @@ def _human_assigned(conversation: dict[str, Any]) -> bool:
 
 def _bot_owns(conversation: dict[str, Any]) -> bool:
     return not (
-        _human_assigned(conversation) or conversation.get("status") in {"resolved", "snoozed"}
+        _human_assigned(conversation)
+        or (
+            _custom_attributes(conversation).get("ownership_version") == 2
+            and _custom_attributes(conversation).get("reply_owner") == "human"
+        )
+        or conversation.get("status") in {"resolved", "snoozed"}
     )
 
 

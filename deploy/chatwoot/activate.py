@@ -173,7 +173,7 @@ def handoff_schema():
         attribute_key: "reply_owner", attribute_model: :conversation_attribute)
       definition.assign_attributes(attribute_display_name: "Кто отвечает", attribute_display_type: :list,
         attribute_values: ["bot", "human"],
-        attribute_description: "Автоматически по назначению: human — назначена сотрудница, иначе bot. Не переключатель.")
+        attribute_description: "После подключения сотрудницы сохраняется human. Возврат — макрос «Вернуть боту», не снятие назначения.")
       definition.save!
       request = account.custom_attribute_definitions.find_or_initialize_by(
         attribute_key: "handoff_requested", attribute_model: :conversation_attribute)
@@ -183,6 +183,59 @@ def handoff_schema():
       puts "ACTIVATION_RESULT=" + {handoff_schema_ready: true}.to_json
     """)
     print(json.dumps(result))
+
+
+def queues():
+    """Initial queues and native navigation, without a parallel staff database."""
+    agent = env(AGENT)
+    result = rails("""
+      account = Account.find(cfg.fetch('account_id'))
+      admin = account.account_users.where(role: :administrator).first!.user
+      duty = account.teams.find(cfg.fetch('duty_id'))
+      duty.update!(description: 'Общая очередь: срочные обращения, неопределённая потребность, несколько направлений.',
+        allow_auto_assign: false) if duty.description.blank?
+      legal = account.teams.find_or_initialize_by(name: 'Юристы')
+      if legal.new_record?
+        legal.description = 'Юридические вопросы: документы, трудовые и семейные споры, защита прав. Не экстренное реагирование.'
+        legal.allow_auto_assign = false
+        legal.save!
+        duty.members.each { |user| legal.team_members.find_or_create_by!(user: user) }
+      end
+      # Navigation folders are personal in Chatwoot; create them for every
+      # existing staff identity. The built-in Teams view works for future users.
+      account.account_users.includes(:user).each do |membership|
+        user = membership.user
+        account.inboxes.each { |inbox| inbox.inbox_members.find_or_create_by!(user: user) }
+        [duty, legal].each do |team|
+          folder = account.custom_filters.find_or_initialize_by(
+            user: user, name: team == duty ? 'Дежурные' : 'Юридическая помощь', filter_type: :conversation)
+          if folder.new_record?
+            folder.query = {payload: [{attribute_key: 'team_id', filter_operator: 'equal_to',
+              values: [team.id.to_s], query_operator: nil, attribute_model: 'standard'}]}
+            folder.save!
+          end
+        end
+      end
+      commands = [
+        ['Вернуть боту', [{action_name: 'add_private_note', action_params: ['[women-help:return-to-bot]']}]],
+        ['Передать юристам', [{action_name: 'assign_team', action_params: [legal.id.to_s]}]],
+        ['Передать дежурным', [{action_name: 'assign_team', action_params: [duty.id.to_s]}]]
+      ]
+      commands.each do |name, actions|
+        macro = account.macros.find_or_initialize_by(name: name, visibility: :global)
+        if macro.new_record?
+          macro.assign_attributes(actions: actions, created_by: admin, updated_by: admin)
+          macro.save!
+        end
+      end
+      puts 'ACTIVATION_RESULT=' + {duty_team_id: duty.id, legal_team_id: legal.id,
+        legal_members: legal.members.count, folders_ready: true, macros_ready: true}.to_json
+    """, {
+        "account_id": int(agent.get("CHATWOOT_ACCOUNT_ID", "1")),
+        "duty_id": int(agent["CHATWOOT_DUTY_TEAM_ID"]),
+    })
+    print(json.dumps(result))
+    handoff_schema()
 
 
 def connect():
@@ -328,6 +381,7 @@ if __name__ == "__main__":
             "prepare_ingress",
             "enable_polling",
             "handoff_schema",
+            "queues",
         ],
     )
     args = parser.parse_args()

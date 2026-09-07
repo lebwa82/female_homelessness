@@ -10,6 +10,7 @@ import json
 from time import monotonic
 
 from app.chatwoot.client import ChatwootClient
+from app.chatwoot.contracts import RETURN_TO_BOT
 from app.config import settings
 
 
@@ -53,8 +54,17 @@ async def main(conversation_id: int, *, handoff_only: bool = False) -> None:
         print(json.dumps({"check": name, "passed": True, **metadata}), flush=True)
 
     async def return_to_bot():
-        await post("/assignments", {"assignee_id": None})
-        await post("/toggle_status", {"status": "pending"})
+        command = await post("/messages", {
+            "message_type": "outgoing", "private": True, "content": RETURN_TO_BOT,
+        })
+        deadline = monotonic() + 30
+        while monotonic() < deadline:
+            attrs = (await api.get_conversation(conversation_id))["custom_attributes"]
+            if attrs.get("ownership_last_staff_message_id") == command["id"]:
+                assert attrs["reply_owner"] == "bot"
+                return
+            await asyncio.sleep(0.5)
+        raise RuntimeError("Explicit return command was not processed")
 
     await return_to_bot()
     old_count = len(await api.get_messages(conversation_id))
