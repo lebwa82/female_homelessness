@@ -64,7 +64,10 @@ async def test_sends_telegram_input_select_and_persistent_turn_key() -> None:
     await client(transport).send_reply(
         23,
         text="Choose one",
-        choices=(Choice(id="option-a", label="Option A"), Choice(id="human", label="Talk to a person")),
+        choices=(
+            Choice(id="option-a", label="Option A"),
+            Choice(id="human", label="Talk to a person"),
+        ),
         turn_key="message:41",
     )
 
@@ -128,3 +131,21 @@ async def test_detects_previously_sent_turn_key_before_retrying() -> None:
     )
 
     assert await client(transport).has_reply_for_turn(23, "message:41") is True
+
+
+@pytest.mark.asyncio
+async def test_private_notification_retry_uses_persisted_event_key() -> None:
+    transport = RecordingTransport(
+        responses={("GET", "/api/v1/accounts/12/conversations/23/messages"): {"payload": []}}
+    )
+    api = client(transport)
+    await api.add_private_note(23, "notification", event_key="handoff:41")
+    post = transport.calls[-1]
+    assert post[2] == "bot-token"
+    assert post[3]["private"] is True
+    assert post[3]["content_attributes"] == {"bot_event_key": "handoff:41"}
+    transport.responses[("GET", "/api/v1/accounts/12/conversations/23/messages")] = {
+        "payload": [{"content_attributes": {"bot_event_key": "handoff:41"}}]
+    }
+    await api.add_private_note(23, "notification", event_key="handoff:41")
+    assert len([call for call in transport.calls if call[0] == "POST"]) == 1

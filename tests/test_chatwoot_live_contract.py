@@ -12,8 +12,8 @@ def test_native_chatwoot_human_assignment_stops_bot():
     assert not _bot_owns(
         {"status": "pending", "meta": {"assignee_type": "User", "assignee": {"id": 1}}}
     )
-    assert not _bot_owns({"status": "open", "meta": {}})
-    assert not _bot_owns({"status": "pending", "meta": {"team": {"id": 1}}})
+    assert _bot_owns({"status": "open", "meta": {}})
+    assert _bot_owns({"status": "pending", "meta": {"team": {"id": 1}}})
 
 
 def test_navigation_survives_stateless_service_recreation():

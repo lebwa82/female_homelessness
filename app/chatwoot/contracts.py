@@ -17,6 +17,21 @@ class IncomingChatwootMessage:
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationChanged:
+    conversation_id: int
+
+
+def parse_conversation_changed(payload: object) -> ConversationChanged | None:
+    if not isinstance(payload, dict) or payload.get("event") not in {
+        "conversation_updated",
+        "conversation_status_changed",
+    }:
+        return None
+    conversation_id = _positive_int(payload.get("id"))
+    return ConversationChanged(conversation_id) if conversation_id else None
+
+
 def parse_message_created(payload: object) -> IncomingChatwootMessage | None:
     """Return a public inbound text message, otherwise intentionally ignore it."""
     if not isinstance(payload, dict) or payload.get("event") != "message_created":

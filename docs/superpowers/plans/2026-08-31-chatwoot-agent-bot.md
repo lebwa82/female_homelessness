@@ -57,8 +57,8 @@
 2. Запустить фокусный тест и подтвердить RED.
 3. Реализовать orchestration, переиспользуя существующие безопасные диагностические и policy-компоненты без PostgreSQL store.
 4. Хранить состояние сценария в conversation custom attributes; `/clear` увеличивает `context_epoch` и добавляет private note; извлечение model history начинается после последней такой заметки.
-5. При human handoff записывать `reply_owner=human`, открывать разговор, назначать дежурную team и добавлять private note. Если любой из этих вызовов неуспешен — не отправлять видимый ответ.
-6. Перед запуском Qwen и непосредственно перед post-message повторно читать current conversation. При `reply_owner=human` или человеческом assignment — молча завершать ход.
+5. При human handoff добавлять private note с team mention (нативное уведомление), фиксировать `handoff_requested=true`, не менять назначение и не отключать бота. Повтор заметки дедуплицировать по `bot_event_key`; ошибку доставки передавать механизму retry.
+6. Перед запуском Qwen и непосредственно перед post-message повторно читать current conversation. Только назначение конкретного человека блокирует обычные ответы. `reply_owner` — автоматическая проекция назначения; `/clear` и `/system_info` остаются доступными без снятия назначения.
 7. Преобразовать кнопки policy в Chatwoot `input_select`: Telegram inbox отправляет их как native inline-кнопки, а `value` возвращается следующим входящим ходом. Не подменять этим canonical state Chatwoot. Сопоставление callback id должно быть явно тестировано.
 8. Запустить фокусные тесты.
 

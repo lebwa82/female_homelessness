@@ -145,10 +145,6 @@ def provision():
       team.team_members.find_or_create_by!(user: admin)
       bot = account.agent_bots.find_or_initialize_by(name: "Women Help Agent")
       bot.outgoing_url = cfg.fetch("url"); bot.save!
-      definition = account.custom_attribute_definitions.find_or_initialize_by(attribute_key: "reply_owner", attribute_model: 0)
-      definition.assign_attributes(attribute_display_name: "Кто отвечает", attribute_display_type: 6,
-        attribute_values: ["bot", "human"], attribute_description: "bot — отвечает робот; human — отвечает дежурный")
-      definition.save!
       puts "ACTIVATION_RESULT=" + {bot_id: bot.id, team_id: team.id,
         read_token: admin.access_token.token, bot_token: bot.access_token.token, signature: bot.secret}.to_json
     """,
@@ -166,6 +162,27 @@ def provision():
     cw["CHATWOOT_WEBHOOK_HMAC_SECRET"] = data["signature"]
     save(CW, cw)
     print(json.dumps({"bot_id": data["bot_id"], "team_id": data["team_id"]}))
+    handoff_schema()
+
+
+def handoff_schema():
+    """Register operator-visible flags without changing assignments or credentials."""
+    result = rails("""
+      account = Account.find(1)
+      definition = account.custom_attribute_definitions.find_or_initialize_by(
+        attribute_key: "reply_owner", attribute_model: :conversation_attribute)
+      definition.assign_attributes(attribute_display_name: "Кто отвечает", attribute_display_type: :list,
+        attribute_values: ["bot", "human"],
+        attribute_description: "Автоматически по назначению: human — назначена сотрудница, иначе bot. Не переключатель.")
+      definition.save!
+      request = account.custom_attribute_definitions.find_or_initialize_by(
+        attribute_key: "handoff_requested", attribute_model: :conversation_attribute)
+      request.assign_attributes(attribute_display_name: "Запрошен дежурный", attribute_display_type: :checkbox,
+        attribute_description: "Запрос отмечен в приватной заметке с уведомлением команды. Бот отвечает до назначения сотрудницы.")
+      request.save!
+      puts "ACTIVATION_RESULT=" + {handoff_schema_ready: true}.to_json
+    """)
+    print(json.dumps(result))
 
 
 def connect():
@@ -203,24 +220,30 @@ def prepare_ingress():
     proxy = agent.get("TELEGRAM_PROXY_URL") or old.get("TELEGRAM_PROXY_URL", "")
     if mode == "polling" and not (token and proxy):
         raise ValueError("Missing Telegram transport credentials")
-    save(INGRESS, {
-        "TELEGRAM_UPDATE_TRANSPORT": mode,
-        "TELEGRAM_BOT_TOKEN": token,
-        "TELEGRAM_PROXY_URL": proxy,
-        "CHATWOOT_BASE_URL": "http://chatwoot:3000",
-        "TELEGRAM_INGRESS_REDIS_URL": "redis://redis:6379/0",
-    })
+    save(
+        INGRESS,
+        {
+            "TELEGRAM_UPDATE_TRANSPORT": mode,
+            "TELEGRAM_BOT_TOKEN": token,
+            "TELEGRAM_PROXY_URL": proxy,
+            "CHATWOOT_BASE_URL": "http://chatwoot:3000",
+            "TELEGRAM_INGRESS_REDIS_URL": "redis://redis:6379/0",
+        },
+    )
     print(json.dumps({"telegram_ingress_env_prepared": True, "transport": mode}))
 
 
 def enable_polling():
     """Explicit operator choice; does not drop updates or start a second poller."""
     token = env(BOT)["TELEGRAM_BOT_TOKEN"]
-    result = rails("""
+    result = rails(
+        """
       channel = Account.find(1).telegram_channels.find_by!(bot_token: cfg.fetch('token'))
       raise 'Inbox missing' unless channel.inbox
       puts 'ACTIVATION_RESULT=' + {inbox_id: channel.inbox.id}.to_json
-    """, {"token": token})
+    """,
+        {"token": token},
+    )
     cw = env(CW)
     cw["TELEGRAM_UPDATE_TRANSPORT"] = "polling"
     save(CW, cw)
@@ -294,8 +317,18 @@ def refresh_routes():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "phase", choices=["backup", "prepare", "provision", "connect", "status", "refresh_routes",
-                          "prepare_ingress", "enable_polling"]
+        "phase",
+        choices=[
+            "backup",
+            "prepare",
+            "provision",
+            "connect",
+            "status",
+            "refresh_routes",
+            "prepare_ingress",
+            "enable_polling",
+            "handoff_schema",
+        ],
     )
     args = parser.parse_args()
     try:

@@ -142,12 +142,22 @@ class ChatwootClient:
             {"team_id": team_id},
         )
 
-    async def add_private_note(self, conversation_id: int, content: str) -> None:
+    async def add_private_note(
+        self, conversation_id: int, content: str, *, event_key: str | None = None
+    ) -> None:
+        if event_key and any(
+            m.get("content_attributes", {}).get("bot_event_key") == event_key
+            for m in await self.get_messages(conversation_id)
+        ):
+            return
+        payload = {"content": content, "message_type": "outgoing", "private": True}
+        if event_key:
+            payload["content_attributes"] = {"bot_event_key": event_key}
         await self._transport.request(
             "POST",
             self._path(f"/conversations/{conversation_id}/messages"),
             self._bot_token,
-            {"content": content, "message_type": "outgoing", "private": True},
+            payload,
         )
 
     async def send_reply(

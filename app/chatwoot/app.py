@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from aiohttp import web
 
-from app.chatwoot.contracts import parse_message_created
+from app.chatwoot.contracts import parse_conversation_changed, parse_message_created
 from app.chatwoot.webhook import InvalidWebhookSignature, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
@@ -61,20 +61,19 @@ class AgentBotWebhook:
             payload = json.loads(raw_body)
         except json.JSONDecodeError:
             return web.Response(status=204)
-        event = parse_message_created(payload)
+        event = parse_message_created(payload) or parse_conversation_changed(payload)
         if event is None:
             return web.Response(status=204)
 
-        # Chatwoot v4.12.1 is deliberately pinned for this self-hosted test
-        # stack because newer releases cannot create Agent Bots. It does not
-        # yet sign bot deliveries, so the unguessable route is its credential
-        # and the incoming message identity is its deduplication key.
-        if not delivery_id:
+        # Legacy installations without signed deliveries use message identity.
+        # Assignment changes have no message id and must be re-read each time.
+        if not delivery_id and hasattr(event, "message_id"):
             delivery_id = f"legacy:{event.conversation_id}:{event.message_id}"
-        if delivery_id in self._deliveries:
+        if delivery_id and delivery_id in self._deliveries:
             return web.Response(status=204)
 
-        self._deliveries.add(delivery_id)
+        if delivery_id:
+            self._deliveries.add(delivery_id)
         task = asyncio.create_task(self._process(event))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)

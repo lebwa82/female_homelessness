@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from app.chatwoot.app import AgentBotWebhook
+from app.chatwoot.contracts import ConversationChanged
 
 
 @dataclass
@@ -31,12 +32,15 @@ class RecordingService:
         return True
 
 
-def _signed_request(payload: dict[str, Any], *, secret: str, delivery: str = "delivery-1") -> FakeRequest:
+def _signed_request(
+    payload: dict[str, Any], *, secret: str, delivery: str = "delivery-1"
+) -> FakeRequest:
     body = json.dumps(payload, separators=(",", ":")).encode()
     timestamp = str(int(time()))
-    signature = "sha256=" + hmac.new(
-        secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256
-    ).hexdigest()
+    signature = (
+        "sha256="
+        + hmac.new(secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    )
     return FakeRequest(
         body=body,
         headers={
@@ -153,3 +157,15 @@ async def test_non_message_event_is_safely_ignored() -> None:
 
     assert response.status == 204
     assert service.events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["conversation_updated", "conversation_status_changed"])
+async def test_signed_assignment_event_reaches_owner_synchronization(name: str) -> None:
+    service = RecordingService()
+    webhook = AgentBotWebhook(service, route_secret="route", signature_secret="signature")
+    request = _signed_request({"event": name, "id": 23}, secret="signature")
+    assert (await webhook.handle(request)).status == 204
+    assert (await webhook.handle(request)).status == 204
+    await asyncio.sleep(0)
+    assert service.events == [ConversationChanged(23)]

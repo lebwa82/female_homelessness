@@ -53,18 +53,7 @@ async def main(conversation_id: int) -> None:
         print(json.dumps({"check": name, "passed": True, **metadata}), flush=True)
 
     async def return_to_bot():
-        await post("/assignments", {"team_id": None})
         await post("/assignments", {"assignee_id": None})
-        current = await api.get_conversation(conversation_id)
-        await post(
-            "/custom_attributes",
-            {
-                "custom_attributes": {
-                    **current.get("custom_attributes", {}),
-                    "reply_owner": "bot",
-                }
-            },
-        )
         await post("/toggle_status", {"status": "pending"})
 
     await return_to_bot()
@@ -90,9 +79,31 @@ async def main(conversation_id: int) -> None:
     passed("system_info")
     await send("human")
     current = await api.get_conversation(conversation_id)
-    assert current["custom_attributes"]["reply_owner"] == "human"
-    assert current["status"] == "open" and current["meta"].get("team")
-    passed("handoff_to_duty_team")
+    assert current["custom_attributes"]["reply_owner"] == "bot"
+    assert current["custom_attributes"]["handoff_requested"] is True
+    assert not current["meta"].get("assignee")
+    key = f"handoff:{current['custom_attributes']['handoff_last_message_id']}"
+    notes = [
+        m
+        for m in await api.get_messages(conversation_id)
+        if m.get("content_attributes", {}).get("bot_event_key") == key
+    ]
+    assert len(notes) == 1 and notes[0]["private"]
+    assert f"mention://team/{settings.chatwoot_duty_team_id}/" in notes[0]["content"]
+    passed("duty_notified_without_takeover", notification_message_id=notes[0]["id"])
+    await send("Продолжим разговор.")
+    passed("bot_continues_after_notification")
+    current = await api.get_conversation(conversation_id)
+    epoch = current["custom_attributes"].get("context_epoch", 0)
+    await send("/clear")
+    current = await api.get_conversation(conversation_id)
+    assert current["custom_attributes"]["context_epoch"] == epoch + 1
+    assert current["custom_attributes"]["handoff_requested"] is True
+    passed("clear_preserves_duty_request")
+
+    profile = await api._transport.request("GET", "/api/v1/profile", settings.chatwoot_read_token)
+    staff_id = profile["id"]
+    await post("/assignments", {"assignee_id": staff_id})
     await post(
         "/messages",
         {"message_type": "outgoing", "content": "Техническая проверка ответа дежурного."},
@@ -115,8 +126,18 @@ async def main(conversation_id: int) -> None:
     )
     assert before == after
     passed("human_reply_without_bot_interruption")
+    await send("/clear")
+    current = await api.get_conversation(conversation_id)
+    assert current["custom_attributes"]["reply_owner"] == "human"
+    assert current["custom_attributes"]["handoff_requested"] is True
+    assert current["meta"]["assignee"]["id"] == staff_id
+    await send("/system_info")
+    passed("commands_keep_human_ownership")
     await return_to_bot()
     assert "continue" in choices(await send("/start"))
+    assert (await api.get_conversation(conversation_id))["custom_attributes"][
+        "reply_owner"
+    ] == "bot"
     passed("return_to_bot")
     await post("/toggle_status", {"status": "resolved"})
 

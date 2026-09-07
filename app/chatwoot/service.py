@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.agents import YandexAgentGateway
-from app.chatwoot.contracts import IncomingChatwootMessage
+from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage
 from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
 from app.release_info import active_release_info
@@ -46,7 +46,9 @@ class ChatwootConversationApi(Protocol):
 
     async def assign_team(self, conversation_id: int, team_id: int) -> None: ...
 
-    async def add_private_note(self, conversation_id: int, content: str) -> None: ...
+    async def add_private_note(
+        self, conversation_id: int, content: str, *, event_key: str | None = None
+    ) -> None: ...
 
     async def send_reply(
         self,
@@ -80,15 +82,20 @@ class ChatwootAgentService:
         self._duty_team_id = duty_team_id
         self._locks: dict[int, asyncio.Lock] = {}
 
-    async def process(self, event: IncomingChatwootMessage) -> bool:
+    async def process(self, event: IncomingChatwootMessage | ConversationChanged) -> bool:
         """Process one trusted inbound event; ``False`` means intentionally silent."""
         lock = self._locks.setdefault(event.conversation_id, asyncio.Lock())
         async with lock:
+            if isinstance(event, ConversationChanged):
+                await self._sync_owner(event.conversation_id)
+                return False
             return await self._process_locked(event)
 
     async def _process_locked(self, event: IncomingChatwootMessage) -> bool:
-        conversation = await self._api.get_conversation(event.conversation_id)
-        if not _bot_owns(conversation):
+        conversation = await self._sync_owner(event.conversation_id)
+        if event.content == "/clear":
+            return await self._clear_context(event, conversation)
+        if not _bot_owns(conversation) and event.content != "/system_info":
             return False
 
         turn_key = f"message:{event.message_id}"
@@ -112,8 +119,6 @@ class ChatwootAgentService:
             )
         elif event.content == "/start":
             turn = await legacy_service.start(seeded.incoming)
-        elif event.content == "/clear":
-            turn = await legacy_service.clear(seeded.incoming)
         elif _is_callback(event.content):
             turn = await legacy_service.handle_callback(seeded.incoming, event.content)
         else:
@@ -123,7 +128,7 @@ class ChatwootAgentService:
         # evaluating. Never overwrite that ownership with a stale workflow
         # projection.
         before_side_effects = await self._api.get_conversation(event.conversation_id)
-        if not _bot_owns(before_side_effects):
+        if not _bot_owns(before_side_effects) and event.content != "/system_info":
             return False
 
         if seeded.store.agent_runs:
@@ -141,21 +146,15 @@ class ChatwootAgentService:
 
         handoff = _requires_human_handoff(seeded)
         if handoff:
-            if not await self._handoff(event.conversation_id, seeded):
+            if not await self._notify_duty(event, seeded):
                 return False
-        else:
-            await self._persist_workflow(event.conversation_id, seeded.record, reply_owner="bot")
+        elif event.content != "/system_info":
+            await self._persist_workflow(event.conversation_id, seeded.record)
             await self._persist_aid_requests(event.conversation_id, seeded)
 
-        if event.content == "/clear":
-            await self._api.add_private_note(
-                event.conversation_id, _context_marker(seeded.record.context_epoch)
-            )
-
-        # For a normal turn a human intervention wins even if it happens after
-        # model evaluation. A handoff is different: its one safe transition
-        # message is intentionally sent immediately after ownership changes.
-        if not handoff:
+        # A notification is not a takeover. A real human assignment wins even
+        # while we are notifying the duty team; do not publish a late model reply.
+        if event.content != "/system_info":
             current = await self._api.get_conversation(event.conversation_id)
             if not _bot_owns(current):
                 return False
@@ -174,12 +173,11 @@ class ChatwootAgentService:
         conversation_id: int,
         record: ConversationRecord,
         *,
-        reply_owner: str,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         await self._api.set_custom_attributes(
             conversation_id,
             {
-                "reply_owner": reply_owner,
                 "workflow_state": record.state,
                 "workflow_need": record.need,
                 "pending_aid_id": record.pending_aid_id,
@@ -189,23 +187,77 @@ class ChatwootAgentService:
                 "pending_offer": record.pending_offer,
                 "context_epoch": record.context_epoch,
                 "workflow_navigation": record.navigation,
+                **(extra or {}),
             },
         )
 
-    async def _handoff(self, conversation_id: int, seeded: _SeededConversation) -> bool:
-        """Switch ownership first; any failure suppresses the model response."""
+    async def _sync_owner(self, conversation_id: int) -> dict[str, Any]:
+        conversation = await self._api.get_conversation(conversation_id)
+        owner = "human" if _human_assigned(conversation) else "bot"
+        if _custom_attributes(conversation).get("reply_owner") != owner:
+            # This field is a UI projection, never permission to override an
+            # assignment. All reply guards re-read the actual Chatwoot assignee.
+            await self._api.set_custom_attributes(conversation_id, {"reply_owner": owner})
+        return conversation
+
+    async def _clear_context(
+        self, event: IncomingChatwootMessage, conversation: dict[str, Any]
+    ) -> bool:
+        turn_key = f"message:{event.message_id}"
+        if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
+            return False
+        attrs = _custom_attributes(conversation)
+        messages = await self._api.get_messages(event.conversation_id)
+        seeded = _seed_conversation(event, conversation, messages)
+        # A retry after writing the reset but before sending its acknowledgement
+        # must not increment the epoch a second time.
+        if attrs.get("last_clear_message_id") != event.message_id:
+            await ConversationService(store=seeded.store, gateway=self._gateway).clear(
+                seeded.incoming
+            )
+            await self._persist_workflow(
+                event.conversation_id,
+                seeded.record,
+                extra={"last_clear_message_id": event.message_id},
+            )
+        await self._api.add_private_note(
+            event.conversation_id,
+            _context_marker(seeded.record.context_epoch),
+            event_key=f"clear:{event.message_id}",
+        )
+        current = await self._sync_owner(event.conversation_id)
+        text = "Контекст бота очищен. Переписка и запрос дежурному, если он был, сохранены."
+        if _human_assigned(current):
+            text += " Разговор остаётся у специалиста."
+        else:
+            text += " Можно продолжить здесь."
+        await self._api.send_reply(
+            event.conversation_id, text=text, choices=(HUMAN_CHOICE,), turn_key=turn_key
+        )
+        return True
+
+    async def _notify_duty(
+        self, event: IncomingChatwootMessage, seeded: _SeededConversation
+    ) -> bool:
+        """Native team mention creates Chatwoot bell notifications, not a takeover."""
         if self._duty_team_id is None:
             return False
-        try:
-            await self._persist_workflow(conversation_id, seeded.record, reply_owner="human")
-            await self._api.assign_team(conversation_id, self._duty_team_id)
-            await self._api.set_status(conversation_id, "open")
-            await self._api.add_private_note(
-                conversation_id,
-                "Women-help: conversation routed to the duty team; automated replies are disabled.",
-            )
-        except Exception:  # noqa: BLE001 - an incomplete transfer must fail closed
-            return False
+        # Notify before advancing the workflow. On transport failure the webhook
+        # worker retries; a persisted note key avoids sending the same mention twice.
+        await self._api.add_private_note(
+            event.conversation_id,
+            f"[Дежурные](mention://team/{self._duty_team_id}/duty): запрошено подключение "
+            "специалиста. Бот остаётся доступен, пока сотрудница не назначит разговор на себя.",
+            event_key=f"handoff:{event.message_id}",
+        )
+        await self._persist_workflow(
+            event.conversation_id,
+            seeded.record,
+            extra={
+                "handoff_requested": True,
+                "handoff_last_message_id": event.message_id,
+            },
+        )
         return True
 
     async def _persist_aid_requests(
@@ -262,16 +314,16 @@ def _custom_attributes(conversation: dict[str, Any]) -> dict[str, Any]:
     return dict(attributes) if isinstance(attributes, dict) else {}
 
 
-def _bot_owns(conversation: dict[str, Any]) -> bool:
-    attributes = _custom_attributes(conversation)
-    if attributes.get("reply_owner") == "human":
-        return False
+def _human_assigned(conversation: dict[str, Any]) -> bool:
     meta = conversation.get("meta") or {}
-    if meta.get("team") or (meta.get("assignee") and meta.get("assignee_type") != "AgentBot"):
-        return False
-    if conversation.get("status") in {"open", "resolved", "snoozed"}:
-        return False
-    return conversation.get("assignee_id") is None and conversation.get("assignee_team_id") is None
+    kind = meta.get("assignee_type") or conversation.get("assignee_type")
+    return kind != "AgentBot" and bool(meta.get("assignee") or conversation.get("assignee_id"))
+
+
+def _bot_owns(conversation: dict[str, Any]) -> bool:
+    return not (
+        _human_assigned(conversation) or conversation.get("status") in {"resolved", "snoozed"}
+    )
 
 
 def _history_after_epoch(
@@ -299,9 +351,9 @@ def _history_after_epoch(
 
 
 def _requires_human_handoff(seeded: _SeededConversation) -> bool:
-    if seeded.record.state == ConversationState.SAFETY_ESCALATION.value:
-        return True
-    return any(action[1] == "human_handoff" for action in seeded.store.actions)
+    return any(
+        action[1] in {"human_handoff", "safety_escalation"} for action in seeded.store.actions
+    )
 
 
 def _is_callback(content: str) -> bool:
