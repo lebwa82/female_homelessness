@@ -1,0 +1,10 @@
+[
+  {
+    "aid_id": "food_card",
+    "provider": "Озон",
+    "nominal_rubles": 300,
+    "activation_code": "<ACTIVATION_CODE>",
+    "activate_by": "03.09.2027",
+    "serial_number": "<SERIAL_NUMBER>"
+  }
+]
