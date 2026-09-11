@@ -287,6 +287,24 @@ identity, conversation, messages, agent/risk/action/escalation/event rows, ко�
 создать conversation заново. Provider audit сохраняет только allow-listed categories
 и counts, а не provider-controlled keys или raw text.
 
+## Электронные сертификаты
+
+`Карточка на продукты` и `Карточка на товары для детей` могут выдавать
+заранее загруженные bearer-сертификаты. Выдача атомарна: берётся ближайший по
+сроку годности непросроченный код. После выдачи код не возвращается на склад,
+не проверяется на использование и не перевыпускается. Follow-up для выданного кода не создаётся.
+
+Коды не коммитятся в Git. Скопируйте `certificates.example.json` в игнорируемый
+`certificates.local.json`,
+заполните его и загрузите:
+
+```bash
+uv run python scripts/import_certificates.py certificates.local.json
+```
+
+Импорт идемпотентен по коду активации и серийному номеру; выводится только количество,
+без самих кодов.
+
 ## Перед пилотом
 
 Замените демонстрационные статьи в `knowledge/verified_resources.json` реальными,

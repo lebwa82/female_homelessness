@@ -5,6 +5,7 @@ from app.db import (
     ActionExecution,
     AgentRun,
     AidRequest,
+    Certificate,
     ContactPoint,
     Conversation,
     ConversationMessage,
@@ -21,11 +22,15 @@ def test_new_operational_tables_have_expected_identity_and_audit_columns() -> No
     assert AgentRun.__tablename__ == "agent_runs"
     assert ActionExecution.__tablename__ == "action_executions"
     assert AidRequest.__tablename__ == "aid_requests"
+    assert Certificate.__tablename__ == "certificates"
     assert ContactPoint.__tablename__ == "contact_points"
     assert Escalation.__tablename__ == "escalations"
     assert FollowupJob.__tablename__ == "followup_jobs"
     assert "metadata" in AgentRun.__table__.c
     assert "request_key" in AidRequest.__table__.c
+    assert "activation_code" in Certificate.__table__.c
+    assert "issued_at" in Certificate.__table__.c
+    assert Certificate.__table__.c.aid_request_id.nullable is True
     assert "request_key" in Escalation.__table__.c
     assert "due_at" in FollowupJob.__table__.c
     assert db.InboundTextExecution.__table__.c.delivery_status.default.arg == "pending"

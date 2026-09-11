@@ -59,6 +59,34 @@ class StoredAidRequest:
     city: str | None = None
     district: str | None = None
     request_key: str | None = None
+    certificate: StoredCertificate | None = None
+
+
+@dataclass
+class StoredCertificate:
+    aid_id: str
+    provider: str
+    nominal_rubles: int
+    activation_code: str
+    expires_at: datetime
+    serial_number: str
+    issued_at: datetime | None = None
+    aid_request_id: int | None = None
+
+
+def _stored_certificate(row: db.Certificate | None) -> StoredCertificate | None:
+    if row is None:
+        return None
+    return StoredCertificate(
+        aid_id=row.aid_id,
+        provider=row.provider,
+        nominal_rubles=row.nominal_rubles,
+        activation_code=row.activation_code,
+        expires_at=row.expires_at,
+        serial_number=row.serial_number,
+        issued_at=row.issued_at,
+        aid_request_id=row.aid_request_id,
+    )
 
 
 @dataclass
@@ -125,6 +153,7 @@ class InMemoryConversationStore:
     conversations: dict[int, ConversationRecord] = field(default_factory=dict)
     messages: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
     aid_requests: list[StoredAidRequest] = field(default_factory=list)
+    certificates: list[StoredCertificate] = field(default_factory=list)
     escalations: list[StoredEscalation] = field(default_factory=list)
     followup_jobs: list[StoredFollowupJob] = field(default_factory=list)
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
@@ -233,7 +262,13 @@ class InMemoryConversationStore:
         return tuple(
             (
                 role,
-                "[CONTACT]" if audit.get("content_type") == "contact_value" else redact_for_model(content),
+                (
+                    "[SENSITIVE_DELIVERY]"
+                    if audit.get("content_type") == "certificate"
+                    else "[CONTACT]"
+                    if audit.get("content_type") == "contact_value"
+                    else redact_for_model(content)
+                ),
             )
             for conversation_id, role, content, audit in self.messages
             if conversation_id == record.id and audit.get("context_epoch", 0) == record.context_epoch
@@ -337,6 +372,16 @@ class InMemoryConversationStore:
             for request in self.aid_requests:
                 if request.request_key == request_key:
                     return request
+        certificate = next(
+            (
+                item
+                for item in sorted(self.certificates, key=lambda value: value.expires_at)
+                if item.aid_id == aid_id
+                and item.issued_at is None
+                and item.expires_at > datetime.now(UTC)
+            ),
+            None,
+        )
         request = StoredAidRequest(
             id=next(self._ids),
             conversation_id=record.id,
@@ -346,16 +391,21 @@ class InMemoryConversationStore:
             city=city,
             district=district,
             request_key=request_key,
+            certificate=certificate,
         )
         self.aid_requests.append(request)
-        self.followup_jobs.append(
-            StoredFollowupJob(
-                record.id,
-                request.id,
-                datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
-                conversation_generation=record.generation,
+        if certificate is not None:
+            certificate.issued_at = datetime.now(UTC)
+            certificate.aid_request_id = request.id
+        else:
+            self.followup_jobs.append(
+                StoredFollowupJob(
+                    record.id,
+                    request.id,
+                    datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
+                    conversation_generation=record.generation,
+                )
             )
-        )
         return request
 
     async def claim_text(
@@ -744,6 +794,9 @@ class PostgresConversationStore:
                     db.select(db.AidRequest).where(db.AidRequest.request_key == request_key)
                 )
                 request = existing.scalar_one()
+                certificate = await session.scalar(
+                    db.select(db.Certificate).where(db.Certificate.aid_request_id == request.id)
+                )
                 await db.finish_repository_write(session)
                 return StoredAidRequest(
                     id=request.id,
@@ -754,6 +807,7 @@ class PostgresConversationStore:
                     city=request.city,
                     district=request.district,
                     request_key=request_key,
+                    certificate=_stored_certificate(certificate),
                 )
             request = await session.get(db.AidRequest, request_id)
             if request is None:
@@ -767,15 +821,29 @@ class PostgresConversationStore:
                         expires_at=db.content_expiry_at(),
                     )
                 )
-            session.add(
-                db.FollowupJob(
-                    conversation_id=record.id,
-                    conversation_generation=record.generation,
-                    aid_request_id=request.id,
-                    kind="followup",
-                    due_at=datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
+            certificate = await session.scalar(
+                db.select(db.Certificate)
+                .where(
+                    db.Certificate.aid_id == aid_id,
+                    db.Certificate.issued_at.is_(None),
+                    db.Certificate.expires_at > datetime.now(UTC),
                 )
+                .order_by(db.Certificate.expires_at, db.Certificate.id)
+                .with_for_update(skip_locked=True)
             )
+            if certificate is not None:
+                certificate.aid_request_id = request.id
+                certificate.issued_at = datetime.now(UTC)
+            else:
+                session.add(
+                    db.FollowupJob(
+                        conversation_id=record.id,
+                        conversation_generation=record.generation,
+                        aid_request_id=request.id,
+                        kind="followup",
+                        due_at=datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
+                    )
+                )
             await db.finish_repository_write(session)
             return StoredAidRequest(
                 id=request.id,
@@ -786,6 +854,7 @@ class PostgresConversationStore:
                 city=city,
                 district=district,
                 request_key=request_key,
+                certificate=_stored_certificate(certificate),
             )
 
     async def delete_data(self, record: ConversationRecord) -> None:
@@ -825,6 +894,7 @@ class PostgresConversationStore:
                 "text": turn.text,
                 "choices": [choice.model_dump(mode="json") for choice in turn.choices],
                 "critical_delivery": turn.audit.get("critical_delivery") is True,
+                "sensitive_content": turn.audit.get("sensitive_content"),
                 "conversation_generation": record.generation,
                 "inbound_execution_kind": execution_key.kind.value,
             },
@@ -850,6 +920,7 @@ class PostgresConversationStore:
             if not isinstance(text, str) or not isinstance(choices, list):
                 raise TypeError
             critical_delivery = outcome.get("critical_delivery", False)
+            sensitive_content = outcome.get("sensitive_content")
             conversation_generation = outcome.get("conversation_generation", record.generation)
             inbound_execution_kind = outcome.get(
                 "inbound_execution_kind",
@@ -857,6 +928,7 @@ class PostgresConversationStore:
             )
             if (
                 not isinstance(critical_delivery, bool)
+                or sensitive_content not in {None, "certificate"}
                 or not isinstance(conversation_generation, int)
                 or inbound_execution_kind not in InboundExecutionKind
             ):
@@ -866,6 +938,7 @@ class PostgresConversationStore:
                 choices=tuple(Choice.model_validate(choice) for choice in choices),
                 audit={
                     "critical_delivery": critical_delivery,
+                    "sensitive_content": sensitive_content,
                     "conversation_id": record.id,
                     "conversation_generation": conversation_generation,
                     "inbound_execution_kind": inbound_execution_kind,

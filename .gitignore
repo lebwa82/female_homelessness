@@ -1,4 +1,5 @@
 .env
+certificates.local.json
 __pycache__/
 .pytest_cache/
 .runtime/

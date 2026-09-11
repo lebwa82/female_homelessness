@@ -14,6 +14,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -278,6 +279,36 @@ class AidRequest(Base):
     district: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Certificate(Base):
+    """A bearer certificate that leaves the inventory permanently when issued."""
+
+    __tablename__ = "certificates"
+    __table_args__ = (
+        Index(
+            "ix_certificates_available",
+            "aid_id",
+            "expires_at",
+            postgresql_where=text("issued_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    aid_id: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(120))
+    nominal_rubles: Mapped[int] = mapped_column(Integer)
+    activation_code: Mapped[str] = mapped_column(Text, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    serial_number: Mapped[str] = mapped_column(String(120), unique=True)
+    aid_request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("aid_requests.id", ondelete="SET NULL"),
+        unique=True,
+        nullable=True,
+        index=True,
+    )
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ContactPoint(Base):
@@ -724,7 +755,13 @@ async def load_model_history(conversation_id: int, context_epoch: int = 0) -> li
         return [
             (
                 item.role,
-                "[CONTACT]" if item.audit.get("content_type") == "contact_value" else (item.redacted_content or ""),
+                (
+                    "[SENSITIVE_DELIVERY]"
+                    if item.audit.get("content_type") == "certificate"
+                    else "[CONTACT]"
+                    if item.audit.get("content_type") == "contact_value"
+                    else (item.redacted_content or "")
+                ),
             )
             for item in result.scalars()
         ]

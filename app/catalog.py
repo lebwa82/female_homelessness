@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 from app.domain import NeedKind
 
 PSYCHOLOGIST_AID_ID = "psychologist_3_sessions"
+CERTIFICATE_AID_IDS = frozenset({"food_card", "children_card"})
 
 
 class AidItem(BaseModel):
@@ -14,6 +17,7 @@ class AidItem(BaseModel):
     label: str
     description: str
     needs_location: bool = False
+    fulfillment: Literal["coordinated", "certificate"] = "coordinated"
 
 
 AID_CATALOG = (
@@ -37,11 +41,13 @@ AID_CATALOG = (
         id="food_card",
         label="Карточка на продукты",
         description="Электронный сертификат на продукты.",
+        fulfillment="certificate",
     ),
     AidItem(
         id="children_card",
         label="Карточка на товары для детей",
         description="Электронный сертификат на детские товары.",
+        fulfillment="certificate",
     ),
     AidItem(
         id="transport_payment",
