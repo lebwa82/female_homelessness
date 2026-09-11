@@ -31,7 +31,7 @@ def _expiry(value: str) -> datetime:
 
 def _validated(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
-        raise ValueError("each certificate must be a JSON object")
+        raise TypeError("each certificate must be a JSON object")
     required = {
         "aid_id",
         "provider",
@@ -66,7 +66,7 @@ def _validated(raw: Any) -> dict[str, Any]:
 async def import_file(path: Path) -> tuple[int, int]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
-        raise ValueError("the JSON root must be a list")
+        raise TypeError("the JSON root must be a list")
     rows = [_validated(item) for item in payload]
     imported = 0
     duplicates = 0
