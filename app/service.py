@@ -5,6 +5,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
 from app.catalog import PSYCHOLOGIST_AID_ID, AidItem, available_aid_for_need, get_aid_item
@@ -32,7 +33,7 @@ from app.domain import (
 from app.knowledge import find_verified_articles, format_verified_context
 from app.navigation import back_update, checkpoint_update, previous_checkpoint
 from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, model_risk_assessment, resolve_turn
-from app.store import ConversationRecord, PostgresConversationStore
+from app.store import ConversationRecord, PostgresConversationStore, StoredCertificate
 from app.ui import (
     CONTACT_CHOICES,
     CONTINUE_CHOICES,
@@ -54,6 +55,7 @@ UNKNOWN_PROMPT = "Я здесь. Можно продолжить разгово�
 PERSISTENCE_UNAVAILABLE_PROMPT = (
     "Не получилось безопасно сохранить сообщение. Можно повторить позже или позвать человека."
 )
+MOSCOW_TIME = ZoneInfo("Europe/Moscow")
 
 
 class _CriticalTurnPersistenceFailure(Exception):
@@ -183,7 +185,14 @@ class ConversationService:
                     record,
                     "assistant",
                     turn.text,
-                    {"ui": {"choices": [choice.id for choice in turn.choices]}},
+                    {
+                        "ui": {"choices": [choice.id for choice in turn.choices]},
+                        **(
+                            {"content_type": "certificate"}
+                            if turn.audit.get("sensitive_content") == "certificate"
+                            else {}
+                        ),
+                    },
                 )
 
     async def record_delivery_ambiguity(self, incoming: IncomingMessage, turn: AgentTurn) -> None:
@@ -708,7 +717,7 @@ class ConversationService:
         if aid_id is None or get_aid_item(aid_id) is None:
             return await self._state_turn(record)
         contact_method = method.value if method else record.pending_contact_method
-        await self.store.create_aid_request(
+        request = await self.store.create_aid_request(
             record,
             aid_id,
             contact_method,
@@ -733,7 +742,23 @@ class ConversationService:
         )
         if decision is not None:
             return self._render_resolved_turn(decision)
+        if request.certificate is not None:
+            return self._certificate_turn(request.certificate)
         return self._turn("Хорошо, запрос сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
+
+    @staticmethod
+    def _certificate_turn(certificate: StoredCertificate) -> AgentTurn:
+        expires = certificate.expires_at.astimezone(MOSCOW_TIME).strftime("%d.%m.%Y")
+        return ConversationService._turn(
+            f"Готово — вот ваш электронный сертификат {certificate.provider}.\n\n"
+            f"Номинал: {certificate.nominal_rubles} руб.\n"
+            f"Код активации: {certificate.activation_code}\n"
+            f"Активировать по: {expires} (до 23:59 по МСК указанного дня).\n"
+            f"Серийный номер: {certificate.serial_number}\n\n"
+            "Сохраните это сообщение. Сертификат выдаётся один раз: "
+            "мы не проверяем его использование и не перевыпускаем.",
+            MORE_HELP_CHOICES,
+        ).model_copy(update={"audit": {"sensitive_content": "certificate"}})
 
     async def _execute_resolved_turn(
         self,

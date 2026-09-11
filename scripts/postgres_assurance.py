@@ -33,6 +33,10 @@ _REQUIRED_COLUMNS = {
     ("conversation_messages", "expires_at"), ("contact_points", "expires_at"),
     ("followup_jobs", "conversation_generation"), ("followup_jobs", "lease_token"),
     ("followup_jobs", "lease_expires_at"),
+    ("certificates", "aid_id"), ("certificates", "provider"),
+    ("certificates", "nominal_rubles"), ("certificates", "activation_code"),
+    ("certificates", "expires_at"), ("certificates", "serial_number"),
+    ("certificates", "aid_request_id"), ("certificates", "issued_at"),
 }
 
 
@@ -61,6 +65,9 @@ expected_indexes = {
     "ix_inbound_text_executions_delivery_lease_expires_at": IndexExpectation("inbound_text_executions", ("delivery_lease_expires_at",)),
     "uq_action_executions_effect_key": IndexExpectation("action_executions", ("effect_key",), True),
     "ix_followup_jobs_lease_expires_at": IndexExpectation("followup_jobs", ("lease_expires_at",)),
+    "ix_certificates_available": IndexExpectation(
+        "certificates", ("aid_id", "expires_at"), predicate="issued_at is null"
+    ),
 }
 _REQUIRED_INDEXES = frozenset(expected_indexes)
 
