@@ -155,17 +155,19 @@ async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytes
         repository_call("history")
         return []
 
-    async def seed_legacy(*_: object) -> int:
+    async def seed_legacy(*_: object) -> tuple[int, int]:
         repository_call("append")
         repository_call("legacy_seed")
-        return 51
+        return 51, 61
 
     async def assert_tombstone(*_: object) -> None:
         repository_call("tombstone")
 
     first_job = SimpleNamespace(id=61, lease_token="followup-first")
     second_job = SimpleNamespace(id=61, lease_token="followup-second")
-    job_claims = iter(([first_job], [second_job]))
+    unrelated_first = SimpleNamespace(id=60, lease_token="unrelated-first")
+    unrelated_second = SimpleNamespace(id=62, lease_token="unrelated-second")
+    job_claims = iter(([unrelated_first, first_job], [unrelated_second, second_job]))
 
     class JobRepository:
         async def claim_due_jobs(self, *_: object) -> list[object]:

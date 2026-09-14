@@ -124,7 +124,7 @@ async def _seed_legacy_followup_and_null_retention(
     conversation: db.Conversation,
     token: str,
     now: datetime,
-) -> int:
+) -> tuple[int, int]:
     """Create through production code, then shape legacy nullable fields."""
     record = ConversationRecord(
         id=conversation.id,
@@ -166,7 +166,7 @@ async def _seed_legacy_followup_and_null_retention(
         contact.expires_at = None
         stored_message.expires_at = None
         await db.finish_repository_write(session)
-    return request.id
+    return request.id, followup.id
 
 
 async def _assert_delete_tombstone(conversation: db.Conversation) -> None:
@@ -226,24 +226,24 @@ async def _exercise_production_repository() -> None:
     await db.acknowledge_text_execution_outcome(conversation.id, message_id)
 
     now = datetime.now(UTC)
-    request_id = await _seed_legacy_followup_and_null_retention(
+    request_id, followup_id = await _seed_legacy_followup_and_null_retention(
         conversation,
         token,
         now,
     )
     jobs = await PostgresJobRepository().claim_due_jobs(now)
-    if len(jobs) != 1 or jobs[0].lease_token is None:
+    first_job = next((job for job in jobs if job.id == followup_id), None)
+    if first_job is None or first_job.lease_token is None:
         raise AssuranceError("followup_null_lease_reclaim_failed")
-    first_job = jobs[0]
     await PostgresJobRepository().complete_job(first_job, False)
     reclaimed_jobs = await PostgresJobRepository().claim_due_jobs(now)
+    reclaimed_job = next((job for job in reclaimed_jobs if job.id == followup_id), None)
     if (
-        len(reclaimed_jobs) != 1
-        or reclaimed_jobs[0].id != first_job.id
-        or reclaimed_jobs[0].lease_token in {None, first_job.lease_token}
+        reclaimed_job is None
+        or reclaimed_job.lease_token in {None, first_job.lease_token}
     ):
         raise AssuranceError("followup_error_reclaim_failed")
-    await PostgresJobRepository().discard_job(reclaimed_jobs[0])
+    await PostgresJobRepository().discard_job(reclaimed_job)
 
     purged = await db.purge_expired_content(now)
     if purged < 2:
