@@ -36,6 +36,16 @@ def test_assurance_rejects_a_correctly_named_index_with_wrong_column() -> None:
     ) != expected
 
 
+def test_index_projection_accepts_postgres_wrapped_partial_index_predicate() -> None:
+    name = "ix_certificates_available"
+    expected = expected_indexes[name]
+
+    assert _index_projection(
+        f"CREATE INDEX {name} ON public.certificates USING btree "
+        "(aid_id, expires_at) WHERE (issued_at IS NULL)"
+    ) == expected
+
+
 @pytest.mark.asyncio
 async def test_assurance_uses_rollback_bound_repository_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []

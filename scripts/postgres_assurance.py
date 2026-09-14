@@ -77,7 +77,24 @@ def _identifier(value: str) -> str:
 
 
 def _predicate(value: str | None) -> str | None:
-    return None if value is None else (re.sub(r"\s+", " ", value.strip().rstrip(";")).casefold() or None)
+    if value is None:
+        return None
+    normalized = re.sub(r"\s+", " ", value.strip().rstrip(";")).casefold()
+    while normalized.startswith("(") and normalized.endswith(")"):
+        depth = 0
+        wraps_entire_predicate = True
+        for position, character in enumerate(normalized):
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0 and position != len(normalized) - 1:
+                    wraps_entire_predicate = False
+                    break
+        if not wraps_entire_predicate or depth != 0:
+            break
+        normalized = normalized[1:-1].strip()
+    return normalized or None
 
 
 def _index_projection(indexdef: str) -> IndexExpectation | None:
