@@ -40,6 +40,10 @@ _REQUIRED_COLUMNS = {
 }
 
 
+class AssuranceError(RuntimeError):
+    """A safe, non-secret diagnostic raised by a failed assurance assertion."""
+
+
 @dataclass(frozen=True)
 class IndexExpectation:
     table: str
@@ -77,7 +81,24 @@ def _identifier(value: str) -> str:
 
 
 def _predicate(value: str | None) -> str | None:
-    return None if value is None else (re.sub(r"\s+", " ", value.strip().rstrip(";")).casefold() or None)
+    if value is None:
+        return None
+    normalized = re.sub(r"\s+", " ", value.strip().rstrip(";")).casefold()
+    while normalized.startswith("(") and normalized.endswith(")"):
+        depth = 0
+        wraps_entire_predicate = True
+        for position, character in enumerate(normalized):
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0 and position != len(normalized) - 1:
+                    wraps_entire_predicate = False
+                    break
+        if not wraps_entire_predicate or depth != 0:
+            break
+        normalized = normalized[1:-1].strip()
+    return normalized or None
 
 
 def _index_projection(indexdef: str) -> IndexExpectation | None:
@@ -103,7 +124,7 @@ async def _seed_legacy_followup_and_null_retention(
     conversation: db.Conversation,
     token: str,
     now: datetime,
-) -> int:
+) -> tuple[int, int]:
     """Create through production code, then shape legacy nullable fields."""
     record = ConversationRecord(
         id=conversation.id,
@@ -135,7 +156,7 @@ async def _seed_legacy_followup_and_null_retention(
         ).scalar_one()
         stored_message = await session.get(db.ConversationMessage, message.id)
         if stored_message is None:
-            raise RuntimeError("retention_fixture_missing")
+            raise AssuranceError("retention_fixture_missing")
         # These are the exact pre-migration shapes the production queries must
         # reclaim/purge; setup is direct so the exercised operations are not.
         followup.due_at = now - timedelta(seconds=1)
@@ -145,7 +166,7 @@ async def _seed_legacy_followup_and_null_retention(
         contact.expires_at = None
         stored_message.expires_at = None
         await db.finish_repository_write(session)
-    return request.id
+    return request.id, followup.id
 
 
 async def _assert_delete_tombstone(conversation: db.Conversation) -> None:
@@ -160,9 +181,9 @@ async def _assert_delete_tombstone(conversation: db.Conversation) -> None:
             )
         )
         if remaining.scalar_one_or_none() is not None:
-            raise RuntimeError("comprehensive_delete_failed")
+            raise AssuranceError("comprehensive_delete_failed")
         if tombstone.scalar_one_or_none() != conversation.generation + 1:
-            raise RuntimeError("delete_tombstone_failed")
+            raise AssuranceError("delete_tombstone_failed")
 
 
 async def _exercise_production_repository() -> None:
@@ -179,10 +200,10 @@ async def _exercise_production_repository() -> None:
     )
     lease = await db.claim_text_execution(conversation.id, message_id)
     if lease is None or not await db.fail_text_execution(conversation.id, message_id, lease):
-        raise RuntimeError("outbox_initial_claim_failed")
+        raise AssuranceError("outbox_initial_claim_failed")
     reclaimed = await db.claim_text_execution(conversation.id, message_id)
     if reclaimed is None:
-        raise RuntimeError("outbox_reclaim_failed")
+        raise AssuranceError("outbox_reclaim_failed")
     payload = {
         "text": "assurance",
         "choices": [],
@@ -191,46 +212,46 @@ async def _exercise_production_repository() -> None:
         "inbound_execution_kind": "message",
     }
     if not await db.save_text_execution_outcome(conversation.id, message_id, reclaimed, payload):
-        raise RuntimeError("outbox_outcome_failed")
+        raise AssuranceError("outbox_outcome_failed")
     stored = await db.load_text_execution_outcome(conversation.id, message_id)
     if stored is None or stored[0] != payload:
-        raise RuntimeError("outbox_outcome_unreadable")
+        raise AssuranceError("outbox_outcome_unreadable")
     delivery_token = await db.claim_text_execution_delivery(conversation.id, message_id)
     if delivery_token is None:
-        raise RuntimeError("outbox_delivery_claim_failed")
+        raise AssuranceError("outbox_delivery_claim_failed")
     if not await db.mark_text_execution_delivery_ambiguous(conversation.id, message_id):
-        raise RuntimeError("outbox_delivery_ambiguity_unobservable")
+        raise AssuranceError("outbox_delivery_ambiguity_unobservable")
     if await db.claim_text_execution_delivery(conversation.id, message_id) is None:
-        raise RuntimeError("outbox_ambiguous_reclaim_failed")
+        raise AssuranceError("outbox_ambiguous_reclaim_failed")
     await db.acknowledge_text_execution_outcome(conversation.id, message_id)
 
     now = datetime.now(UTC)
-    request_id = await _seed_legacy_followup_and_null_retention(
+    request_id, followup_id = await _seed_legacy_followup_and_null_retention(
         conversation,
         token,
         now,
     )
     jobs = await PostgresJobRepository().claim_due_jobs(now)
-    if len(jobs) != 1 or jobs[0].lease_token is None:
-        raise RuntimeError("followup_null_lease_reclaim_failed")
-    first_job = jobs[0]
+    first_job = next((job for job in jobs if job.id == followup_id), None)
+    if first_job is None or first_job.lease_token is None:
+        raise AssuranceError("followup_null_lease_reclaim_failed")
     await PostgresJobRepository().complete_job(first_job, False)
     reclaimed_jobs = await PostgresJobRepository().claim_due_jobs(now)
+    reclaimed_job = next((job for job in reclaimed_jobs if job.id == followup_id), None)
     if (
-        len(reclaimed_jobs) != 1
-        or reclaimed_jobs[0].id != first_job.id
-        or reclaimed_jobs[0].lease_token in {None, first_job.lease_token}
+        reclaimed_job is None
+        or reclaimed_job.lease_token in {None, first_job.lease_token}
     ):
-        raise RuntimeError("followup_error_reclaim_failed")
-    await PostgresJobRepository().discard_job(reclaimed_jobs[0])
+        raise AssuranceError("followup_error_reclaim_failed")
+    await PostgresJobRepository().discard_job(reclaimed_job)
 
     purged = await db.purge_expired_content(now)
     if purged < 2:
-        raise RuntimeError("null_retention_purge_failed")
+        raise AssuranceError("null_retention_purge_failed")
     if await db.load_history(conversation.id):
-        raise RuntimeError("retention_purge_unreadable")
+        raise AssuranceError("retention_purge_unreadable")
     if await db.load_active_contact_points(request_id):
-        raise RuntimeError("contact_retention_purge_unreadable")
+        raise AssuranceError("contact_retention_purge_unreadable")
     await db.delete_conversation_data(conversation.id)
     await _assert_delete_tombstone(conversation)
 
@@ -257,7 +278,7 @@ async def assure() -> dict[str, object]:
                 if name in index_definitions and _index_projection(index_definitions[name]) != expected
             }
             if missing_columns or missing_indexes or wrong_index_definition:
-                raise RuntimeError("schema_assurance_failed")
+                raise AssuranceError("schema_assurance_failed")
             session = AsyncSession(bind=connection, expire_on_commit=False)
             try:
                 with db.bind_repository_session(session):
@@ -278,6 +299,9 @@ async def assure() -> dict[str, object]:
 async def main() -> int:
     try:
         result = await assure()
+    except AssuranceError as error:
+        print(f"postgres_assurance:failed:{type(error).__name__}:{error}")
+        return 1
     except Exception as error:  # noqa: BLE001 - never print connection data
         print(f"postgres_assurance:failed:{type(error).__name__}")
         return 1
