@@ -36,3 +36,21 @@ def test_chatwoot_activity_is_never_sent_to_model_as_assistant_speech():
         3,
     )
     assert history == (("user", "Hello"),)
+
+
+def test_certificate_message_is_masked_before_chatwoot_history_reaches_model():
+    history = _history_after_epoch(
+        (
+            {
+                "id": 1,
+                "message_type": 1,
+                "content": "Код активации: BEARER-SECRET",
+                "content_attributes": {"bot_sensitive_content": "certificate"},
+                "created_at": 1,
+            },
+        ),
+        0,
+        2,
+    )
+
+    assert history == (("assistant", "[SENSITIVE_DELIVERY]"),)

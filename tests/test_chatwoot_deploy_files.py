@@ -11,7 +11,7 @@ def test_test_stack_uses_latest_chatwoot_and_keeps_postgres_local() -> None:
     assert "redis:7.4.10-alpine3.21" in compose
 
 
-def test_agent_bot_has_no_database_dependency_or_persistent_volume() -> None:
+def test_agent_bot_uses_chatwoot_database_without_a_persistent_volume() -> None:
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
     agent_block = compose.split("  agent-bot:\n", 1)[1].split("\n  caddy:", 1)[0]
 
@@ -85,6 +85,7 @@ def test_justfile_and_readme_expose_chatwoot_operator_commands() -> None:
     assert "chatwoot-check" in justfile
     assert "chatwoot-bootstrap" in justfile
     assert "bootstrap_chatwoot_agent.sh" in justfile
+    assert "certificates-import" in justfile
     assert "Chatwoot" in readme
     assert "women-help-chatwoot-agent" in readme
 

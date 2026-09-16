@@ -50,7 +50,9 @@ WELCOME = (
 )
 PAUSE = "Хорошо. Если захотите вернуться — напишите в любое время. Этот чат никуда не денется."
 NEED_PROMPT = "Что сейчас важнее всего? Можно выбрать или написать своими словами."
-OTHER_PROMPT = "Расскажите немного — что сейчас происходит? Не обязательно в деталях, только если хотите."
+OTHER_PROMPT = (
+    "Расскажите немного — что сейчас происходит? Не обязательно в деталях, только если хотите."
+)
 UNKNOWN_PROMPT = "Я здесь. Можно продолжить разговор или позвать человека."
 PERSISTENCE_UNAVAILABLE_PROMPT = (
     "Не получилось безопасно сохранить сообщение. Можно повторить позже или позвать человека."
@@ -87,7 +89,9 @@ class ConversationService:
     async def clear(self, incoming: IncomingMessage) -> AgentTurn:
         async with self._lock_for(incoming):
             try:
-                return await self._bind_turn_to_current_record(incoming, await self._clear(incoming))
+                return await self._bind_turn_to_current_record(
+                    incoming, await self._clear(incoming)
+                )
             except Exception:  # noqa: BLE001 - a failed reset must not pretend to have completed
                 return self._persistence_unavailable_turn()
 
@@ -97,7 +101,9 @@ class ConversationService:
                 raise LookupError("conversation disappeared during clear")
             return await self._clear_serialized(record, incoming)
 
-    async def _clear_serialized(self, record: ConversationRecord, incoming: IncomingMessage) -> AgentTurn:
+    async def _clear_serialized(
+        self, record: ConversationRecord, incoming: IncomingMessage
+    ) -> AgentTurn:
         lease_token = await self.store.claim_text(record, incoming.message_id)
         if lease_token is None:
             outcome = await self._replay_text_outcome(record, incoming.message_id)
@@ -109,13 +115,18 @@ class ConversationService:
         outcome = await self._replay_text_outcome(record, incoming.message_id, lease_token)
         if outcome is not None:
             return outcome
-        await self.store.append_message(record, "user", "/clear", {"telegram_message_id": incoming.message_id})
+        await self.store.append_message(
+            record, "user", "/clear", {"telegram_message_id": incoming.message_id}
+        )
         clear_key = self._text_request_key(record, incoming.message_id, PolicyEffect.NONE)
         await self.store.record_action(
             record,
             "context_cleared",
             "completed",
-            {"from_context_epoch": record.context_epoch, "to_context_epoch": record.context_epoch + 1},
+            {
+                "from_context_epoch": record.context_epoch,
+                "to_context_epoch": record.context_epoch + 1,
+            },
             effect_key=self._effect_key(clear_key, "context_cleared"),
         )
         await self.store.update(
@@ -142,7 +153,9 @@ class ConversationService:
         except Exception:  # noqa: BLE001 - a failed inbound write must not pretend to have succeeded
             return self._persistence_unavailable_turn()
 
-    async def _start_serialized(self, record: ConversationRecord, incoming: IncomingMessage) -> AgentTurn:
+    async def _start_serialized(
+        self, record: ConversationRecord, incoming: IncomingMessage
+    ) -> AgentTurn:
         lease_token = await self.store.claim_text(record, incoming.message_id)
         if lease_token is None:
             outcome = await self._replay_text_outcome(record, incoming.message_id)
@@ -154,7 +167,9 @@ class ConversationService:
         outcome = await self._replay_text_outcome(record, incoming.message_id, lease_token)
         if outcome is not None:
             return outcome
-        await self.store.append_message(record, "user", "/start", {"telegram_message_id": incoming.message_id})
+        await self.store.append_message(
+            record, "user", "/start", {"telegram_message_id": incoming.message_id}
+        )
         start_key = self._text_request_key(record, incoming.message_id, PolicyEffect.NONE)
         await self.store.record_action(
             record,
@@ -198,10 +213,13 @@ class ConversationService:
     async def record_delivery_ambiguity(self, incoming: IncomingMessage, turn: AgentTurn) -> None:
         """Persist the finite post-send/pre-ack transport observation."""
         execution_key = self._execution_key_for_turn(incoming, turn)
-        async with self._lock_for(incoming), self.store.unit_of_work(
-            incoming,
-            create=False,
-        ) as record:
+        async with (
+            self._lock_for(incoming),
+            self.store.unit_of_work(
+                incoming,
+                create=False,
+            ) as record,
+        ):
             if record is None or not self._turn_matches_record(record, turn):
                 return
             await self.store.mark_delivery_ambiguous(record, execution_key)
@@ -264,10 +282,13 @@ class ConversationService:
         yielded = False
         execution_key = self._execution_key_for_turn(incoming, turn)
         try:
-            async with self._lock_for(incoming), self.store.unit_of_work(
-                incoming,
-                create=False,
-            ) as record:
+            async with (
+                self._lock_for(incoming),
+                self.store.unit_of_work(
+                    incoming,
+                    create=False,
+                ) as record,
+            ):
                 if record is None:
                     tombstone_generation = await self.store.tombstone_generation(incoming)
                     expected_generation = turn.audit.get("conversation_generation")
@@ -341,7 +362,9 @@ class ConversationService:
 
     async def handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         async with self._lock_for(incoming):
-            return await self._bind_turn_to_current_record(incoming, await self._handle_callback(incoming, callback_id))
+            return await self._bind_turn_to_current_record(
+                incoming, await self._handle_callback(incoming, callback_id)
+            )
 
     async def _handle_callback(self, incoming: IncomingMessage, callback_id: str) -> AgentTurn:
         async with self.store.unit_of_work(incoming) as record:
@@ -361,7 +384,9 @@ class ConversationService:
             outcome = await self._replay_text_outcome(record, outcome_key)
             if outcome is not None:
                 return outcome
-            return self._bind_execution_key(await self._replay_callback(record, callback_id), outcome_key)
+            return self._bind_execution_key(
+                await self._replay_callback(record, callback_id), outcome_key
+            )
         text_lease_token = await self.store.claim_text(record, outcome_key)
         if text_lease_token is None:
             outcome = await self._replay_text_outcome(record, outcome_key)
@@ -397,9 +422,14 @@ class ConversationService:
             if values is not None:
                 await self.store.update(record, **values)
             return await self._state_turn(record)
-        if callback_id.startswith("followup:") and record.state == ConversationState.FOLLOWUP_SENT.value:
+        if (
+            callback_id.startswith("followup:")
+            and record.state == ConversationState.FOLLOWUP_SENT.value
+        ):
             await self.store.cancel_pending_reminder(record)
-            record = await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
+            record = await self.store.update(
+                record, state=ConversationState.FOLLOWUP_ANSWERED.value
+            )
         if callback_id == "continue":
             if record.state != ConversationState.GREETING.value:
                 return await self._state_turn(record)
@@ -457,7 +487,9 @@ class ConversationService:
         if callback_id.startswith("aid:"):
             if record.state != ConversationState.CHOOSING_AID.value:
                 return await self._state_turn(record)
-            return await self._handle_aid_choice(record, callback_id.removeprefix("aid:"))
+            return await self._handle_aid_choice(
+                record, callback_id.removeprefix("aid:"), request_key=request_key
+            )
         if callback_id.startswith("contact:"):
             if record.state != ConversationState.COLLECTING_CONTACT_METHOD.value:
                 return await self._state_turn(record)
@@ -482,7 +514,10 @@ class ConversationService:
             if record.state != ConversationState.FOLLOWUP_ANSWERED.value:
                 return await self._state_turn(record)
             await self.store.update(record, state=ConversationState.AID_REQUESTED.value)
-            return self._turn("Понятно. Хотите попробовать что-то ещё из того, что можем предложить?", MORE_HELP_CHOICES)
+            return self._turn(
+                "Понятно. Хотите попробовать что-то ещё из того, что можем предложить?",
+                MORE_HELP_CHOICES,
+            )
         if callback_id == "followup:better":
             if record.state != ConversationState.FOLLOWUP_ANSWERED.value:
                 return await self._state_turn(record)
@@ -519,7 +554,9 @@ class ConversationService:
 
     async def handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         async with self._lock_for(incoming):
-            return await self._bind_turn_to_current_record(incoming, await self._handle_text(incoming))
+            return await self._bind_turn_to_current_record(
+                incoming, await self._handle_text(incoming)
+            )
 
     async def _handle_text(self, incoming: IncomingMessage) -> AgentTurn:
         try:
@@ -617,7 +654,9 @@ class ConversationService:
                     history=history,
                     state=record.state,
                     catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
-                    knowledge=(format_verified_context(verified_articles),) if verified_articles else (),
+                    knowledge=(format_verified_context(verified_articles),)
+                    if verified_articles
+                    else (),
                 )
             )
         except Exception as error:  # noqa: BLE001 - never include provider text or user input
@@ -638,7 +677,13 @@ class ConversationService:
             await self.store.complete_text(record, message_id, lease_token)
         if delivered:
             return turn.model_copy(
-                update={"audit": {**turn.audit, "skip_outbound_persistence": True, "suppress_delivery": True}}
+                update={
+                    "audit": {
+                        **turn.audit,
+                        "skip_outbound_persistence": True,
+                        "suppress_delivery": True,
+                    }
+                }
             )
         return turn
 
@@ -658,10 +703,15 @@ class ConversationService:
             return self._turn(OTHER_PROMPT)
         return self._offer_turn(need)
 
-    async def _handle_aid_choice(self, record: ConversationRecord, aid_id: str) -> AgentTurn:
+    async def _handle_aid_choice(
+        self, record: ConversationRecord, aid_id: str, request_key: str | None = None
+    ) -> AgentTurn:
         item = get_aid_item(aid_id)
         if item is None:
             return await self._state_turn(record)
+        if item.fulfillment == "certificate":
+            await self.store.update(record, pending_aid_id=aid_id)
+            return await self._complete_pending_request(record, None, request_key=request_key)
         if item.needs_location:
             await self.store.update(
                 record,
@@ -693,17 +743,27 @@ class ConversationService:
         except ValueError:
             return self._contact_turn()
         if method is ContactMethod.LATER:
-            return await self._complete_pending_request(record, None, method, request_key=request_key)
+            return await self._complete_pending_request(
+                record, None, method, request_key=request_key
+            )
         if method is ContactMethod.CURRENT_TELEGRAM:
             value = f"@{record.username}" if record.username else None
-            return await self._complete_pending_request(record, value, method, request_key=request_key)
+            return await self._complete_pending_request(
+                record, value, method, request_key=request_key
+            )
         await self.store.update(
             record,
             pending_contact_method=method.value,
             state=ConversationState.COLLECTING_CONTACT_VALUE.value,
         )
-        label = {ContactMethod.OTHER_TELEGRAM: "ник в Telegram", ContactMethod.PHONE: "номер телефона", ContactMethod.EMAIL: "email"}[method]
-        return self._turn(f"Можно написать {label}. Он нужен только для организации выбранной помощи.")
+        label = {
+            ContactMethod.OTHER_TELEGRAM: "ник в Telegram",
+            ContactMethod.PHONE: "номер телефона",
+            ContactMethod.EMAIL: "email",
+        }[method]
+        return self._turn(
+            f"Можно написать {label}. Он нужен только для организации выбранной помощи."
+        )
 
     async def _complete_pending_request(
         self,
@@ -771,7 +831,9 @@ class ConversationService:
         """Perform the side effects permitted by a policy-resolved turn."""
         for side_effect in decision.side_effects:
             if side_effect is PolicySideEffect.RECORD_SAFETY and assessment is not None:
-                await self.store.create_escalation(record, self._safety_escalation(assessment, request_key))
+                await self.store.create_escalation(
+                    record, self._safety_escalation(assessment, request_key)
+                )
             if side_effect is PolicySideEffect.COMPLETE_FOLLOWUP:
                 await self.store.cancel_pending_reminder(record)
                 await self.store.update(record, state=ConversationState.FOLLOWUP_ANSWERED.value)
@@ -1008,7 +1070,9 @@ class ConversationService:
         return await self._state_turn(record)
 
     @staticmethod
-    def _safety_escalation(assessment: RiskAssessment, request_key: str | None = None) -> EscalationRequest:
+    def _safety_escalation(
+        assessment: RiskAssessment, request_key: str | None = None
+    ) -> EscalationRequest:
         return EscalationRequest(
             cause=EscalationCause.SAFETY,
             level=assessment.level,
@@ -1018,7 +1082,9 @@ class ConversationService:
         )
 
     @staticmethod
-    def _text_request_key(record: ConversationRecord, message_id: int | None, _effect: PolicyEffect) -> str:
+    def _text_request_key(
+        record: ConversationRecord, message_id: int | None, _effect: PolicyEffect
+    ) -> str:
         source_message_id = str(message_id) if message_id is not None else "missing"
         # The update identity is fixed before policy evaluation.  A changed
         # risk result on replay must never create a second request/escalation.
@@ -1026,7 +1092,9 @@ class ConversationService:
         return f"text:{hashlib.sha256(origin).hexdigest()}"
 
     @staticmethod
-    def _callback_request_key(record: ConversationRecord, callback_id: str, message_id: int | None) -> str:
+    def _callback_request_key(
+        record: ConversationRecord, callback_id: str, message_id: int | None
+    ) -> str:
         source_message_id = str(message_id) if message_id is not None else "missing"
         origin = f"{record.id}:{callback_id}:{source_message_id}".encode()
         return f"callback:{hashlib.sha256(origin).hexdigest()}"
@@ -1064,7 +1132,9 @@ class ConversationService:
             asyncio.Lock(),
         )
 
-    async def _bind_turn_to_current_record(self, incoming: IncomingMessage, turn: AgentTurn) -> AgentTurn:
+    async def _bind_turn_to_current_record(
+        self, incoming: IncomingMessage, turn: AgentTurn
+    ) -> AgentTurn:
         """Bind a delivery audit to the original durable conversation identity.
 
         A delete followed by a new inbound update can create a new identity for
@@ -1118,10 +1188,16 @@ class ConversationService:
         if previous_checkpoint(record.navigation) is None:
             return turn
         choices = tuple(choice for choice in turn.choices if choice.id != "human")
-        return turn.model_copy(update={"choices": (
-            *choices,
-            Choice(id=f"back:{record.navigation['revision']}", label="Вернуться на шаг назад"),
-        )}).with_human_choice()
+        return turn.model_copy(
+            update={
+                "choices": (
+                    *choices,
+                    Choice(
+                        id=f"back:{record.navigation['revision']}", label="Вернуться на шаг назад"
+                    ),
+                )
+            }
+        ).with_human_choice()
 
     @staticmethod
     def _turn(text: str, choices: tuple[Choice, ...] = ()) -> AgentTurn:
@@ -1187,7 +1263,9 @@ class ConversationService:
                 (Choice(id="continue_bot", label="Продолжить здесь"),),
             )
         if record.state == ConversationState.AID_REQUESTED.value:
-            return ConversationService._turn("Запрос уже сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
+            return ConversationService._turn(
+                "Запрос уже сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES
+            )
         if record.state == ConversationState.DISCOVERING_NEED.value:
             return ConversationService._turn(NEED_PROMPT, NEED_CHOICES)
         if record.state == ConversationState.CHOOSING_AID.value and record.need:
@@ -1216,10 +1294,14 @@ class ConversationService:
                 ContactMethod.EMAIL: "email",
             }.get(method)
             if label:
-                return self._turn(f"Можно написать {label}. Он нужен только для организации выбранной помощи.")
+                return self._turn(
+                    f"Можно написать {label}. Он нужен только для организации выбранной помощи."
+                )
             return self._contact_turn()
         return self._turn(UNKNOWN_PROMPT)
 
 
 def available_catalog() -> tuple[AidItem, ...]:
-    return tuple({item.id: item for need in NeedKind for item in available_aid_for_need(need)}.values())
+    return tuple(
+        {item.id: item for need in NeedKind for item in available_aid_for_need(need)}.values()
+    )

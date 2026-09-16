@@ -85,6 +85,10 @@ deploy-chatwoot-test host="":
 chatwoot-check host="":
     bash scripts/chatwoot_test_status.sh "{{host}}"
 
+# Securely import bearer certificates into the active Chatwoot inventory.
+certificates-import json_file host="":
+    bash scripts/import_chatwoot_certificates_prod.sh "{{json_file}}" "{{host}}"
+
 # Create/reuse the duty team and Agent Bot after the dashboard inbox is created.
 chatwoot-bootstrap host="":
     bash scripts/bootstrap_chatwoot_agent.sh "{{host}}"

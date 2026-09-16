@@ -5,6 +5,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from app.chatwoot.app import create_application
+from app.chatwoot.certificates import CertificateInventory, database_url
 from app.chatwoot.client import ChatwootClient
 from app.chatwoot.service import ChatwootAgentService
 from app.config import settings
@@ -13,6 +14,9 @@ from app.config import settings
 def main() -> None:
     if error := settings.chatwoot_configuration_error():
         raise SystemExit(error)
+    if not settings.certificate_database_password:
+        raise SystemExit("missing CERTIFICATE_DATABASE_PASSWORD")
+    inventory = CertificateInventory(database_url(settings.certificate_database_password))
     client = ChatwootClient(
         base_url=settings.chatwoot_base_url,
         account_id=settings.chatwoot_account_id,
@@ -22,13 +26,24 @@ def main() -> None:
     service = ChatwootAgentService(
         client,
         duty_team_id=settings.chatwoot_duty_team_id,
+        certificate_claim=inventory.claim,
     )
+    application = create_application(
+        service,
+        route_secret=settings.chatwoot_webhook_secret,
+        signature_secret=settings.chatwoot_webhook_hmac_secret,
+    )
+
+    async def on_startup(_app: web.Application) -> None:
+        await inventory.initialize()
+
+    async def on_cleanup(_app: web.Application) -> None:
+        await inventory.close()
+
+    application.on_startup.append(on_startup)
+    application.on_cleanup.append(on_cleanup)
     web.run_app(
-        create_application(
-            service,
-            route_secret=settings.chatwoot_webhook_secret,
-            signature_secret=settings.chatwoot_webhook_hmac_secret,
-        ),
+        application,
         host=settings.chatwoot_listen_host,
         port=settings.chatwoot_listen_port,
     )
