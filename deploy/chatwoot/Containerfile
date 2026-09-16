@@ -11,7 +11,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY app ./app
-COPY scripts/__init__.py scripts/import_certificates.py scripts/import_chatwoot_certificates.py ./scripts/
+COPY scripts/import_certificates.py scripts/import_chatwoot_certificates.py ./scripts/
 COPY deploy ./deploy
 COPY knowledge ./knowledge
 COPY skills ./skills
