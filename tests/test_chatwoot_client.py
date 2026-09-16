@@ -58,10 +58,12 @@ async def test_reads_conversation_and_messages_with_read_identity() -> None:
 
 
 async def test_catalog_members_and_return_use_correct_api_identities():
-    transport = RecordingTransport(responses={
-        ("GET", "/api/v1/accounts/12/teams"): [{"id": 9, "name": "Duty"}],
-        ("GET", "/api/v1/accounts/12/teams/9/team_members"): [{"id": 4}, {"id": 5}],
-    })
+    transport = RecordingTransport(
+        responses={
+            ("GET", "/api/v1/accounts/12/teams"): [{"id": 9, "name": "Duty"}],
+            ("GET", "/api/v1/accounts/12/teams/9/team_members"): [{"id": 4}, {"id": 5}],
+        }
+    )
     api = client(transport)
     assert (await api.get_teams())[0]["id"] == 9
     assert await api.get_team_members(9) == (4, 5)
@@ -128,6 +130,26 @@ async def test_mutations_use_agent_bot_identity() -> None:
         ("POST", "/api/v1/accounts/12/conversations/23/assignments"),
         ("POST", "/api/v1/accounts/12/conversations/23/messages"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_certificate_reply_is_marked_as_sensitive_chatwoot_content() -> None:
+    transport = RecordingTransport()
+
+    await client(transport).send_reply(
+        23,
+        text="Code: TEST-CODE",
+        choices=(),
+        turn_key="message:42",
+        sensitive_content="certificate",
+    )
+
+    payload = transport.calls[0][3]
+    assert payload is not None
+    assert payload["content_attributes"] == {
+        "bot_turn_key": "message:42",
+        "bot_sensitive_content": "certificate",
+    }
 
 
 @pytest.mark.asyncio

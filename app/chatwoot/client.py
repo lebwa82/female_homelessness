@@ -116,8 +116,10 @@ class ChatwootClient:
 
     async def unassign_human(self, conversation_id: int) -> None:
         await self._transport.request(
-            "POST", self._path(f"/conversations/{conversation_id}/assignments"),
-            self._bot_token, {"assignee_id": None},
+            "POST",
+            self._path(f"/conversations/{conversation_id}/assignments"),
+            self._bot_token,
+            {"assignee_id": None},
         )
 
     async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]:
@@ -187,8 +189,11 @@ class ChatwootClient:
         text: str,
         choices: tuple[Choice, ...],
         turn_key: str,
+        sensitive_content: str | None = None,
     ) -> None:
         content_attributes: dict[str, Any] = {"bot_turn_key": turn_key}
+        if sensitive_content:
+            content_attributes["bot_sensitive_content"] = sensitive_content
         payload: dict[str, Any] = {
             "content": text,
             "message_type": "outgoing",

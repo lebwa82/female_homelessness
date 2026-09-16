@@ -21,7 +21,7 @@ def back(turn: AgentTurn) -> str:
 async def begin(service: ConversationService) -> AgentTurn:
     await service.start(incoming(1))
     await service.handle_callback(incoming(2), "continue")
-    return await service.handle_callback(incoming(3), "need:food_money")
+    return await service.handle_callback(incoming(3), "need:legal")
 
 
 @pytest.mark.asyncio
@@ -29,7 +29,7 @@ async def test_back_restores_previous_states_and_keeps_message_history() -> None
     store = InMemoryConversationStore()
     service = ConversationService(store)
     await begin(service)
-    contact = await service.handle_callback(incoming(4), "aid:food_card")
+    contact = await service.handle_callback(incoming(4), "aid:legal_consultation")
     history = copy.deepcopy(store.messages)
 
     # Recreating the service must not lose navigation.
@@ -38,8 +38,8 @@ async def test_back_restores_previous_states_and_keeps_message_history() -> None
     record = store.conversations[901]
     assert record.state == "choosing_aid"
     assert record.pending_aid_id is None
-    assert any(choice.id == "aid:food_card" for choice in aid.choices)
-    assert store.messages[:len(history)] == history
+    assert any(choice.id == "aid:legal_consultation" for choice in aid.choices)
+    assert store.messages[: len(history)] == history
 
     needs = await service.handle_callback(incoming(6), back(aid))
     assert record.state == "discovering_need"
@@ -54,7 +54,7 @@ async def test_duplicate_or_stale_back_cannot_skip_another_state() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store)
     await begin(service)
-    contact = await service.handle_callback(incoming(4), "aid:food_card")
+    contact = await service.handle_callback(incoming(4), "aid:legal_consultation")
     callback = back(contact)
     first = await service.handle_callback(incoming(5), callback)
     await service.handle_callback(incoming(5), callback)
@@ -70,14 +70,16 @@ async def test_back_after_submission_preserves_request_followup_and_audit() -> N
     store = InMemoryConversationStore()
     service = ConversationService(store)
     await begin(service)
-    await service.handle_callback(incoming(4), "aid:food_card")
+    await service.handle_callback(incoming(4), "aid:legal_consultation")
     done = await service.handle_callback(incoming(5), "contact:later")
-    retained = copy.deepcopy((store.aid_requests, store.followup_jobs, store.actions, store.escalations))
+    retained = copy.deepcopy(
+        (store.aid_requests, store.followup_jobs, store.actions, store.escalations)
+    )
 
     contact = await service.handle_callback(incoming(6), back(done))
 
     assert store.conversations[901].state == "collecting_contact_method"
-    assert store.conversations[901].pending_aid_id == "food_card"
+    assert store.conversations[901].pending_aid_id == "legal_consultation"
     assert any(choice.id == "contact:email" for choice in contact.choices)
     assert (store.aid_requests, store.followup_jobs, store.actions, store.escalations) == retained
 
@@ -127,7 +129,7 @@ async def test_back_restores_contact_value_step_with_its_selected_method() -> No
     store = InMemoryConversationStore()
     service = ConversationService(store)
     await begin(service)
-    await service.handle_callback(incoming(4), "aid:food_card")
+    await service.handle_callback(incoming(4), "aid:legal_consultation")
     await service.handle_callback(incoming(5), "contact:email")
     handoff = await service.handle_callback(incoming(6), "human")
     alerts = copy.deepcopy(store.escalations)
@@ -139,12 +141,17 @@ async def test_back_restores_contact_value_step_with_its_selected_method() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("state", "callback"), [
-    ("followup_sent", "followup:better"),
-    ("followup_answered", "level2:details"),
-    ("safety_escalation", "continue_bot"),
-])
-async def test_back_restores_non_catalog_states_with_working_controls(state: str, callback: str) -> None:
+@pytest.mark.parametrize(
+    ("state", "callback"),
+    [
+        ("followup_sent", "followup:better"),
+        ("followup_answered", "level2:details"),
+        ("safety_escalation", "continue_bot"),
+    ],
+)
+async def test_back_restores_non_catalog_states_with_working_controls(
+    state: str, callback: str
+) -> None:
     store = InMemoryConversationStore()
     record = await store.ensure(incoming(1))
     await store.update(record, state=state)
@@ -160,7 +167,7 @@ async def test_old_back_after_background_transition_refreshes_before_navigating(
     store = InMemoryConversationStore()
     service = ConversationService(store)
     await begin(service)
-    await service.handle_callback(incoming(4), "aid:food_card")
+    await service.handle_callback(incoming(4), "aid:legal_consultation")
     done = await service.handle_callback(incoming(5), "contact:later")
     record = store.conversations[901]
     # The follow-up worker writes this state directly in its own transaction.

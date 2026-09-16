@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     chatwoot_duty_team_id: int = Field(default=0, ge=0)
     chatwoot_listen_host: str = "0.0.0.0"
     chatwoot_listen_port: int = Field(default=8080, ge=1, le=65535)
+    certificate_database_password: str = ""
 
     @field_validator("yandex_cloud_folder_id", mode="before")
     @classmethod

@@ -78,7 +78,7 @@ fi
 agent_env_tmp="$(sudo mktemp /etc/.women-help-agent.env.XXXXXX)"
 if [[ -s "$AGENT_ENV" ]]; then
   sudo /usr/bin/awk -F= \
-    '$1 != "CHATWOOT_WEBHOOK_SECRET" && $1 != "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
+    '$1 != "CHATWOOT_WEBHOOK_SECRET" && $1 != "CHATWOOT_WEBHOOK_HMAC_SECRET" && $1 != "CERTIFICATE_DATABASE_PASSWORD" {print $0}' \
     "$AGENT_ENV" | sudo /usr/bin/tee "$agent_env_tmp" >/dev/null
 elif [[ -s /etc/women-help-bot.env ]]; then
   sudo /usr/bin/awk -F= '/^(YANDEX_AI_API_KEY|APP_ENV|BUILD_VERSION|TELEGRAM_PROXY_URL)=/ {print $0}' \
@@ -88,6 +88,9 @@ else
 fi
 sudo /usr/bin/awk -F= \
   '$1 == "CHATWOOT_WEBHOOK_SECRET" || $1 == "CHATWOOT_WEBHOOK_HMAC_SECRET" {print $0}' \
+  "$CHATWOOT_ENV" | sudo /usr/bin/tee -a "$agent_env_tmp" >/dev/null
+sudo /usr/bin/awk -F= \
+  '$1 == "POSTGRES_PASSWORD" {print "CERTIFICATE_DATABASE_PASSWORD=" $2}' \
   "$CHATWOOT_ENV" | sudo /usr/bin/tee -a "$agent_env_tmp" >/dev/null
 sudo chmod 0600 "$agent_env_tmp"
 sudo chown root:root "$agent_env_tmp"

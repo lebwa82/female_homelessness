@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from app import db
+from app.catalog import get_aid_item
 from app.config import settings
 from app.domain import (
     DELIVERY_AMBIGUOUS_CATEGORY,
@@ -154,6 +155,7 @@ class InMemoryConversationStore:
     messages: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
     aid_requests: list[StoredAidRequest] = field(default_factory=list)
     certificates: list[StoredCertificate] = field(default_factory=list)
+    certificate_claim: Callable[[str, str], Awaitable[StoredCertificate | None]] | None = None
     escalations: list[StoredEscalation] = field(default_factory=list)
     followup_jobs: list[StoredFollowupJob] = field(default_factory=list)
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
@@ -177,7 +179,9 @@ class InMemoryConversationStore:
                 platform_user_id=incoming.platform_user_id,
                 chat_id=incoming.chat_id,
                 username=incoming.username,
-                generation=self.tombstone_generations.get((incoming.channel, incoming.platform_user_id), 0),
+                generation=self.tombstone_generations.get(
+                    (incoming.channel, incoming.platform_user_id), 0
+                ),
             )
             self.conversations[incoming.platform_user_id] = record
         else:
@@ -199,11 +203,12 @@ class InMemoryConversationStore:
         create: bool = True,
     ) -> AsyncIterator[ConversationRecord | None]:
         """Serialize an identity and roll every durable mutation back together."""
-        lock = self._identity_locks.setdefault((incoming.channel, incoming.platform_user_id), asyncio.Lock())
+        lock = self._identity_locks.setdefault(
+            (incoming.channel, incoming.platform_user_id), asyncio.Lock()
+        )
         async with lock:
             record_values = {
-                key: copy.deepcopy(record.__dict__)
-                for key, record in self.conversations.items()
+                key: copy.deepcopy(record.__dict__) for key, record in self.conversations.items()
             }
             snapshots = {
                 name: copy.deepcopy(getattr(self, name))
@@ -251,12 +256,22 @@ class InMemoryConversationStore:
         return record
 
     async def append_message(
-        self, record: ConversationRecord, role: str, content: str, audit: dict[str, Any] | None = None
+        self,
+        record: ConversationRecord,
+        role: str,
+        content: str,
+        audit: dict[str, Any] | None = None,
     ) -> None:
-        self.messages.append((record.id, role, content, {**(audit or {}), "context_epoch": record.context_epoch}))
+        self.messages.append(
+            (record.id, role, content, {**(audit or {}), "context_epoch": record.context_epoch})
+        )
 
     async def history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
-        return tuple((role, content) for conversation_id, role, content, _ in self.messages if conversation_id == record.id)
+        return tuple(
+            (role, content)
+            for conversation_id, role, content, _ in self.messages
+            if conversation_id == record.id
+        )
 
     async def model_history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
         return tuple(
@@ -271,10 +286,13 @@ class InMemoryConversationStore:
                 ),
             )
             for conversation_id, role, content, audit in self.messages
-            if conversation_id == record.id and audit.get("context_epoch", 0) == record.context_epoch
+            if conversation_id == record.id
+            and audit.get("context_epoch", 0) == record.context_epoch
         )
 
-    async def record_agent_run(self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]) -> None:
+    async def record_agent_run(
+        self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]
+    ) -> None:
         self.agent_runs.append((record.id, agent_name, db.sanitize_agent_audit(audit)))
 
     async def record_risk(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
@@ -349,7 +367,9 @@ class InMemoryConversationStore:
             claim.lease_token = None
             claim.lease_expires_at = None
 
-    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> StoredEscalation:
+    async def create_escalation(
+        self, record: ConversationRecord, request: EscalationRequest
+    ) -> StoredEscalation:
         if request.request_key is not None:
             for escalation in self.escalations:
                 if escalation.request.request_key == request.request_key:
@@ -382,6 +402,15 @@ class InMemoryConversationStore:
             ),
             None,
         )
+        catalog_item = get_aid_item(aid_id)
+        if (
+            certificate is None
+            and catalog_item is not None
+            and catalog_item.fulfillment == "certificate"
+            and self.certificate_claim is not None
+            and request_key is not None
+        ):
+            certificate = await self.certificate_claim(aid_id, request_key)
         request = StoredAidRequest(
             id=next(self._ids),
             conversation_id=record.id,
@@ -536,7 +565,11 @@ class InMemoryConversationStore:
     ) -> None:
         key = (record.id, _execution_key(message_id).storage_key)
         outcome = self.text_outcomes.get(key)
-        if outcome is not None and outcome.delivery_token == delivery_token and not outcome.delivered:
+        if (
+            outcome is not None
+            and outcome.delivery_token == delivery_token
+            and not outcome.delivered
+        ):
             outcome.delivery_token = None
             outcome.delivery_lease_expires_at = None
 
@@ -552,7 +585,10 @@ class InMemoryConversationStore:
             ):
                 continue
             record = records_by_id.get(conversation_id)
-            if record is None or outcome.turn.audit.get("conversation_generation") != record.generation:
+            if (
+                record is None
+                or outcome.turn.audit.get("conversation_generation") != record.generation
+            ):
                 continue
             execution_key = InboundExecutionKey.from_storage_key(source_message_id)
             pending.append(
@@ -586,14 +622,26 @@ class InMemoryConversationStore:
             claim.lease_expires_at = None
 
     async def delete_data(self, record: ConversationRecord) -> None:
-        self.tombstone_generations[(record.channel, record.platform_user_id)] = record.generation + 1
+        self.tombstone_generations[(record.channel, record.platform_user_id)] = (
+            record.generation + 1
+        )
         self.messages = [item for item in self.messages if item[0] != record.id]
         request_ids = {item.id for item in self.aid_requests if item.conversation_id == record.id}
-        self.aid_requests = [item for item in self.aid_requests if item.conversation_id != record.id]
-        self.followup_jobs = [item for item in self.followup_jobs if item.aid_request_id not in request_ids]
-        self.callback_claims = {key: claim for key, claim in self.callback_claims.items() if key[0] != record.id}
-        self.text_claims = {key: claim for key, claim in self.text_claims.items() if key[0] != record.id}
-        self.text_outcomes = {key: outcome for key, outcome in self.text_outcomes.items() if key[0] != record.id}
+        self.aid_requests = [
+            item for item in self.aid_requests if item.conversation_id != record.id
+        ]
+        self.followup_jobs = [
+            item for item in self.followup_jobs if item.aid_request_id not in request_ids
+        ]
+        self.callback_claims = {
+            key: claim for key, claim in self.callback_claims.items() if key[0] != record.id
+        }
+        self.text_claims = {
+            key: claim for key, claim in self.text_claims.items() if key[0] != record.id
+        }
+        self.text_outcomes = {
+            key: outcome for key, outcome in self.text_outcomes.items() if key[0] != record.id
+        }
         self.agent_runs = [item for item in self.agent_runs if item[0] != record.id]
         self.risk_assessments = [item for item in self.risk_assessments if item[0] != record.id]
         self.actions = [item for item in self.actions if item[0] != record.id]
@@ -684,9 +732,7 @@ class PostgresConversationStore:
         values = checkpoint_update(record, values)
         async with db.repository_session() as session:
             result = await session.execute(
-                db.select(db.Conversation)
-                .where(db.Conversation.id == record.id)
-                .with_for_update()
+                db.select(db.Conversation).where(db.Conversation.id == record.id).with_for_update()
             )
             row = result.scalar_one_or_none()
             if row is None:
@@ -706,7 +752,11 @@ class PostgresConversationStore:
             return record
 
     async def append_message(
-        self, record: ConversationRecord, role: str, content: str, audit: dict[str, Any] | None = None
+        self,
+        record: ConversationRecord,
+        role: str,
+        content: str,
+        audit: dict[str, Any] | None = None,
     ) -> None:
         await db.append_message(record.id, role, content, audit, context_epoch=record.context_epoch)
 
@@ -716,7 +766,9 @@ class PostgresConversationStore:
     async def model_history(self, record: ConversationRecord) -> tuple[tuple[str, str], ...]:
         return tuple(await db.load_model_history(record.id, record.context_epoch))
 
-    async def record_agent_run(self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]) -> None:
+    async def record_agent_run(
+        self, record: ConversationRecord, agent_name: str, audit: dict[str, Any]
+    ) -> None:
         await db.record_agent_run(record.id, agent_name, audit)
 
     async def record_risk(self, record: ConversationRecord, assessment: RiskAssessment) -> None:
@@ -761,7 +813,9 @@ class PostgresConversationStore:
     ) -> None:
         await db.fail_callback_execution(record.id, callback_id, message_id, lease_token)
 
-    async def create_escalation(self, record: ConversationRecord, request: EscalationRequest) -> Any:
+    async def create_escalation(
+        self, record: ConversationRecord, request: EscalationRequest
+    ) -> Any:
         return await db.create_escalation(record.id, request)
 
     async def create_aid_request(
@@ -841,7 +895,8 @@ class PostgresConversationStore:
                         conversation_generation=record.generation,
                         aid_request_id=request.id,
                         kind="followup",
-                        due_at=datetime.now(UTC) + timedelta(seconds=settings.followup_delay_seconds),
+                        due_at=datetime.now(UTC)
+                        + timedelta(seconds=settings.followup_delay_seconds),
                     )
                 )
             await db.finish_repository_write(session)
@@ -944,7 +999,7 @@ class PostgresConversationStore:
                     "inbound_execution_kind": inbound_execution_kind,
                 },
             )
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             raise RuntimeError("text_outcome_invalid") from None
         return turn
 
@@ -982,7 +1037,9 @@ class PostgresConversationStore:
         async with db.repository_session() as session:
             result = await session.execute(
                 db.select(db.InboundTextExecution, db.Conversation)
-                .join(db.Conversation, db.Conversation.id == db.InboundTextExecution.conversation_id)
+                .join(
+                    db.Conversation, db.Conversation.id == db.InboundTextExecution.conversation_id
+                )
                 .where(
                     db.InboundTextExecution.status == "completed",
                     db.InboundTextExecution.outcome.is_not(None),

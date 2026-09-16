@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from app.domain import (
     SupportDiagnostic,
     SupportIntent,
 )
+from app.store import StoredCertificate
 
 
 @dataclass
@@ -102,8 +104,16 @@ class FakeChatwoot:
         text: str,
         choices: tuple[object, ...],
         turn_key: str,
+        sensitive_content: str | None = None,
     ) -> None:
-        self.replies.append({"text": text, "choices": choices, "turn_key": turn_key})
+        self.replies.append(
+            {
+                "text": text,
+                "choices": choices,
+                "turn_key": turn_key,
+                "sensitive_content": sensitive_content,
+            }
+        )
 
 
 def event(content: str = "test input", message_id: int = 41) -> IncomingChatwootMessage:
@@ -191,6 +201,38 @@ async def test_bot_owned_conversation_replies_through_chatwoot_with_human_button
     assert gateway.calls == 1
     assert api.replies[0]["turn_key"] == "message:41"
     assert [choice.id for choice in api.replies[0]["choices"]][-1] == "human"
+
+
+@pytest.mark.asyncio
+async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() -> None:
+    api = FakeChatwoot()
+    api.conversation["custom_attributes"].update(
+        workflow_state="choosing_aid", workflow_need="food_money"
+    )
+    claimed: list[tuple[str, str]] = []
+
+    async def claim(aid_id: str, issuance_key: str) -> StoredCertificate:
+        claimed.append((aid_id, issuance_key))
+        return StoredCertificate(
+            aid_id=aid_id,
+            provider="Test provider",
+            nominal_rubles=300,
+            activation_code="TEST-CODE",
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+            serial_number="TEST-SERIAL",
+        )
+
+    handled = await ChatwootAgentService(api, certificate_claim=claim).process(
+        event("aid:food_card")
+    )
+
+    assert handled is True
+    assert len(claimed) == 1
+    assert claimed[0][0] == "food_card"
+    assert "TEST-CODE" in api.replies[0]["text"]
+    assert api.replies[0]["sensitive_content"] == "certificate"
+    assert api.conversation["custom_attributes"]["workflow_state"] == "aid_requested"
+    assert "contact=not_provided:not_provided" in api.notes[0]
 
 
 @pytest.mark.asyncio

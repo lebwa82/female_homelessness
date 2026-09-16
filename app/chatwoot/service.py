@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -15,7 +16,7 @@ from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
 from app.release_info import active_release_info
 from app.service import ConversationService
-from app.store import ConversationRecord, InMemoryConversationStore
+from app.store import ConversationRecord, InMemoryConversationStore, StoredCertificate
 from app.ui import HUMAN_CHOICE
 
 _CONTEXT_MARKER_PREFIX = "[women-help/context-epoch:"
@@ -65,6 +66,7 @@ class ChatwootConversationApi(Protocol):
         text: str,
         choices: tuple[Any, ...],
         turn_key: str,
+        sensitive_content: str | None = None,
     ) -> None: ...
 
 
@@ -85,12 +87,14 @@ class ChatwootAgentService:
         gateway: YandexAgentGateway | None = None,
         duty_team_id: int | None = None,
         queue_router: QueueRouter | None = None,
+        certificate_claim: Callable[[str, str], Awaitable[StoredCertificate | None]] | None = None,
     ) -> None:
         self._api = api
         self._gateway = gateway or YandexAgentGateway()
         self._duty_team_id = duty_team_id
         self._queues = QueueCoordinator(api, duty_team_id, queue_router)
         self._locks: dict[int, asyncio.Lock] = {}
+        self._certificate_claim = certificate_claim
 
     async def process(
         self, event: IncomingChatwootMessage | ConversationChanged | StaffMessage
@@ -121,7 +125,7 @@ class ChatwootAgentService:
             return False
 
         messages = await self._api.get_messages(event.conversation_id)
-        seeded = _seed_conversation(event, conversation, messages)
+        seeded = _seed_conversation(event, conversation, messages, self._certificate_claim)
         legacy_service = ConversationService(store=seeded.store, gateway=self._gateway)
         if event.content == "/system_info":
             release = active_release_info()
@@ -183,6 +187,7 @@ class ChatwootAgentService:
             text=turn.text,
             choices=turn.choices,
             turn_key=turn_key,
+            sensitive_content=turn.audit.get("sensitive_content"),
         )
         return True
 
@@ -232,14 +237,18 @@ class ChatwootAgentService:
             # Keep history, queue, requests and workflow; change only ownership.
             await self._api.unassign_human(event.conversation_id)
             await self._api.set_status(event.conversation_id, "pending")
-        await self._api.set_custom_attributes(event.conversation_id, {
-            "reply_owner": "bot" if event.return_to_bot else "human",
-            "ownership_version": 2,
-            "ownership_last_staff_message_id": event.message_id,
-        })
+        await self._api.set_custom_attributes(
+            event.conversation_id,
+            {
+                "reply_owner": "bot" if event.return_to_bot else "human",
+                "ownership_version": 2,
+                "ownership_last_staff_message_id": event.message_id,
+            },
+        )
         if event.return_to_bot:
             await self._api.add_private_note(
-                event.conversation_id, "Бот снова включён явным действием сотрудницы.",
+                event.conversation_id,
+                "Бот снова включён явным действием сотрудницы.",
                 event_key=f"return-to-bot:{event.message_id}",
             )
 
@@ -291,7 +300,9 @@ class ChatwootAgentService:
         messages = await self._api.get_messages(event.conversation_id)
         history = _history_after_epoch(messages, seeded.record.context_epoch, event.message_id)
         selected = await self._queues.route(
-            conversation, (*history, ("user", event.content)), event.message_id,
+            conversation,
+            (*history, ("user", event.content)),
+            event.message_id,
             urgent=any(a[1] == "safety_escalation" for a in seeded.store.actions),
             can_route=_bot_owns,
         )
@@ -319,6 +330,7 @@ class ChatwootAgentService:
             await self._api.add_private_note(
                 conversation_id,
                 f"Women-help aid request: {request.aid_id}; contact={method}:{contact}; location={location}.",
+                event_key=f"aid-request:{request.request_key}" if request.request_key else None,
             )
 
 
@@ -326,6 +338,7 @@ def _seed_conversation(
     event: IncomingChatwootMessage,
     conversation: dict[str, Any],
     messages: tuple[dict[str, Any], ...],
+    certificate_claim: Callable[[str, str], Awaitable[StoredCertificate | None]] | None = None,
 ) -> _SeededConversation:
     attributes = _custom_attributes(conversation)
     incoming = IncomingMessage(
@@ -351,7 +364,9 @@ def _seed_conversation(
         context_epoch=_epoch(attributes.get("context_epoch")),
         navigation=attributes.get("workflow_navigation") or {},
     )
-    store = InMemoryConversationStore(conversations={event.contact_id: record})
+    store = InMemoryConversationStore(
+        conversations={event.contact_id: record}, certificate_claim=certificate_claim
+    )
     for role, content in _history_after_epoch(messages, record.context_epoch, event.message_id):
         store.messages.append((record.id, role, content, {"context_epoch": record.context_epoch}))
     return _SeededConversation(incoming=incoming, store=store, record=record)
@@ -399,6 +414,12 @@ def _history_after_epoch(
         if not isinstance(content, str) or not content.strip():
             continue
         role = "user" if message.get("message_type") in {"incoming", 0} else "assistant"
+        attributes = message.get("content_attributes")
+        if (
+            isinstance(attributes, dict)
+            and attributes.get("bot_sensitive_content") == "certificate"
+        ):
+            content = "[SENSITIVE_DELIVERY]"
         history.append((role, content.strip()))
     return tuple(history)
 

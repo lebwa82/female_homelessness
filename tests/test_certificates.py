@@ -37,13 +37,13 @@ async def test_certificate_is_issued_directly_once_and_never_scheduled_for_usage
     await service.start(incoming(1))
     await service.handle_callback(incoming(2), "continue")
     await service.handle_callback(incoming(3), "need:food_money")
-    await service.handle_callback(incoming(4), "aid:food_card")
-    first = await service.handle_callback(incoming(5), "contact:current_telegram")
-    replay = await service.handle_callback(incoming(5), "contact:current_telegram")
+    first = await service.handle_callback(incoming(4), "aid:food_card")
+    replay = await service.handle_callback(incoming(4), "aid:food_card")
 
     assert "Код активации: FIRST" in first.text
     assert replay.text == first.text
     assert len(store.aid_requests) == 1
+    assert store.aid_requests[0].contact_method is None
     assert store.certificates[0].issued_at is not None
     assert store.certificates[1].issued_at is None
     assert store.followup_jobs == []
@@ -57,9 +57,8 @@ async def test_certificate_delivery_is_hidden_from_future_model_context() -> Non
     await service.start(incoming(11))
     await service.handle_callback(incoming(12), "continue")
     await service.handle_callback(incoming(13), "need:food_money")
-    await service.handle_callback(incoming(14), "aid:food_card")
-    turn = await service.handle_callback(incoming(15), "contact:current_telegram")
-    await service.record_outbound(incoming(15), turn)
+    turn = await service.handle_callback(incoming(14), "aid:food_card")
+    await service.record_outbound(incoming(14), turn)
 
     assert store.messages[-1][3]["content_type"] == "certificate"
     isolated = InMemoryConversationStore()
@@ -83,8 +82,7 @@ async def test_expired_certificate_is_not_issued_and_request_uses_existing_fallb
     await service.start(incoming(21))
     await service.handle_callback(incoming(22), "continue")
     await service.handle_callback(incoming(23), "need:food_money")
-    await service.handle_callback(incoming(24), "aid:food_card")
-    turn = await service.handle_callback(incoming(25), "contact:current_telegram")
+    turn = await service.handle_callback(incoming(24), "aid:food_card")
 
     assert "запрос сохранён" in turn.text
     assert store.certificates[0].issued_at is None
