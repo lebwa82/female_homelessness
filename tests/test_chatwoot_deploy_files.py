@@ -11,6 +11,14 @@ def test_test_stack_uses_latest_chatwoot_and_keeps_postgres_local() -> None:
     assert "redis:7.4.10-alpine3.21" in compose
 
 
+def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
+    containerfile = (ROOT / "deploy/chatwoot/Containerfile").read_text(encoding="utf-8")
+
+    assert "scripts/import_certificates.py" in containerfile
+    assert "scripts/import_chatwoot_certificates.py" in containerfile
+    assert "scripts/__init__.py" not in containerfile
+
+
 def test_agent_bot_uses_chatwoot_database_without_a_persistent_volume() -> None:
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
     agent_block = compose.split("  agent-bot:\n", 1)[1].split("\n  caddy:", 1)[0]
