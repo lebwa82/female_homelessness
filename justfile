@@ -98,8 +98,8 @@ chatwoot-logs host="" service="women-help-chatwoot":
     host="{{host}}"; if [ -z "$host" ]; then host="$(uv run python -m scripts.resolve_prod_host --ip-only)"; fi; ssh -o StrictHostKeyChecking=accept-new -l lebwa82 "$host" "sudo journalctl -u {{service}} -n 100 -f"
 
 # Resolve the current VM IP, refresh generated HTTPS names and check the panel.
-chatwoot-refresh-address:
-    bash scripts/refresh_chatwoot_address.sh
+chatwoot-refresh-address host="":
+    bash scripts/refresh_chatwoot_address.sh "{{host}}"
 
 # Включить приём Telegram через прокси (Chatwoot сохраняет всю переписку).
 chatwoot-enable-polling:

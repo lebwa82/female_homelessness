@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Query the cloud on each invocation and repair generated test hostnames.
 set -euo pipefail
-host="$(uv run python -m scripts.resolve_prod_host --ip-only)"
+host="${1:-}"
+if [[ -z "$host" ]]; then host="$(uv run python -m scripts.resolve_prod_host --ip-only)"; fi
+if ! [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  echo "The production host must be an IPv4 address." >&2
+  exit 2
+fi
 uv run python -m scripts.resolve_prod_host --verify-ssh "$host" >/dev/null
 result="$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
   -l lebwa82 "$host" "sudo python3 - '$host'" < scripts/update_chatwoot_address.py)"
