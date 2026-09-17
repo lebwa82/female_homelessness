@@ -48,6 +48,10 @@ def test_refresh_routes_does_not_report_success_after_failure(monkeypatch, capsy
 
 def test_shell_refresh_checks_routes_even_if_env_hosts_did_not_change():
     script = Path("scripts/refresh_chatwoot_address.sh").read_text()
+    justfile = Path("justfile").read_text()
+    assert 'host="${1:-}"' in script
+    assert 'resolve_prod_host --verify-ssh "$host"' in script
+    assert 'chatwoot-refresh-address host=""' in justfile
     assert "'sudo python3 - refresh_routes' < deploy/chatwoot/activate.py" in script
     assert script.index("ready=0") > script.index('if [[ "$changed" == "changed" ]]')
     assert script.index("refresh_routes") > script.index("HTTPS check failed")
