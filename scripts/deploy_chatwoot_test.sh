@@ -92,6 +92,11 @@ sudo /usr/bin/awk -F= \
 sudo /usr/bin/awk -F= \
   '$1 == "POSTGRES_PASSWORD" {print "CERTIFICATE_DATABASE_PASSWORD=" $2}' \
   "$CHATWOOT_ENV" | sudo /usr/bin/tee -a "$agent_env_tmp" >/dev/null
+if ! sudo /usr/bin/grep -q '^CERTIFICATE_IDENTITY_KEY=' "$agent_env_tmp"; then
+  identity_key="$(openssl rand -hex 32)"
+  printf 'CERTIFICATE_IDENTITY_KEY=%s\n' "$identity_key" | \
+    sudo /usr/bin/tee -a "$agent_env_tmp" >/dev/null
+fi
 sudo chmod 0600 "$agent_env_tmp"
 sudo chown root:root "$agent_env_tmp"
 sudo mv -f "$agent_env_tmp" "$AGENT_ENV"

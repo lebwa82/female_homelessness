@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from app import db
@@ -61,6 +61,7 @@ class StoredAidRequest:
     district: str | None = None
     request_key: str | None = None
     certificate: StoredCertificate | None = None
+    certificate_status: Literal["issued", "already_issued", "unavailable", "review_required"] | None = None
 
 
 @dataclass
@@ -73,6 +74,13 @@ class StoredCertificate:
     serial_number: str
     issued_at: datetime | None = None
     aid_request_id: int | None = None
+    issued_to: int | None = None
+
+
+@dataclass(frozen=True)
+class CertificateClaimResult:
+    status: Literal["issued", "already_issued", "unavailable", "review_required"]
+    certificate: StoredCertificate | None = None
 
 
 def _stored_certificate(row: db.Certificate | None) -> StoredCertificate | None:
@@ -155,7 +163,7 @@ class InMemoryConversationStore:
     messages: list[tuple[int, str, str, dict[str, Any]]] = field(default_factory=list)
     aid_requests: list[StoredAidRequest] = field(default_factory=list)
     certificates: list[StoredCertificate] = field(default_factory=list)
-    certificate_claim: Callable[[str, str], Awaitable[StoredCertificate | None]] | None = None
+    certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None
     escalations: list[StoredEscalation] = field(default_factory=list)
     followup_jobs: list[StoredFollowupJob] = field(default_factory=list)
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
@@ -392,25 +400,32 @@ class InMemoryConversationStore:
             for request in self.aid_requests:
                 if request.request_key == request_key:
                     return request
-        certificate = next(
-            (
-                item
-                for item in sorted(self.certificates, key=lambda value: value.expires_at)
-                if item.aid_id == aid_id
-                and item.issued_at is None
-                and item.expires_at > datetime.now(UTC)
-            ),
-            None,
-        )
         catalog_item = get_aid_item(aid_id)
-        if (
-            certificate is None
-            and catalog_item is not None
-            and catalog_item.fulfillment == "certificate"
-            and self.certificate_claim is not None
-            and request_key is not None
-        ):
-            certificate = await self.certificate_claim(aid_id, request_key)
+        certificate = None
+        certificate_status = None
+        if catalog_item is not None and catalog_item.fulfillment == "certificate":
+            if self.certificate_claim is not None and request_key is not None:
+                result = await self.certificate_claim(aid_id, request_key, record.platform_user_id)
+            elif any(item.issued_to == record.platform_user_id for item in self.certificates):
+                result = CertificateClaimResult("already_issued")
+            else:
+                certificate = next(
+                    (
+                        item for item in sorted(self.certificates, key=lambda value: value.expires_at)
+                        if item.aid_id == aid_id and item.issued_at is None
+                        and item.expires_at > datetime.now(UTC)
+                    ), None,
+                )
+                result = CertificateClaimResult(
+                    "issued" if certificate is not None else "unavailable", certificate
+                )
+            certificate_status, certificate = result.status, result.certificate
+            if certificate_status != "issued":
+                return StoredAidRequest(
+                    id=0, conversation_id=record.id, aid_id=aid_id,
+                    contact_method=None, contact_value=None,
+                    request_key=request_key, certificate_status=certificate_status,
+                )
         request = StoredAidRequest(
             id=next(self._ids),
             conversation_id=record.id,
@@ -421,11 +436,13 @@ class InMemoryConversationStore:
             district=district,
             request_key=request_key,
             certificate=certificate,
+            certificate_status=certificate_status,
         )
         self.aid_requests.append(request)
         if certificate is not None:
             certificate.issued_at = datetime.now(UTC)
             certificate.aid_request_id = request.id
+            certificate.issued_to = record.platform_user_id
         else:
             self.followup_jobs.append(
                 StoredFollowupJob(
@@ -830,6 +847,62 @@ class PostgresConversationStore:
     ) -> StoredAidRequest:
         request_key = request_key or uuid4().hex
         async with db.repository_session() as session:
+            catalog_item = get_aid_item(aid_id)
+            is_certificate = catalog_item is not None and catalog_item.fulfillment == "certificate"
+            if is_certificate:
+                # Serialize decisions for this identity even when two different
+                # certificate buttons are pressed at the same time.
+                await session.scalar(
+                    db.select(db.Conversation.id)
+                    .where(db.Conversation.id == record.id)
+                    .with_for_update()
+                )
+                previous = await session.scalar(
+                    db.select(db.AidRequest).where(db.AidRequest.request_key == request_key)
+                )
+                if previous is not None:
+                    previous_certificate = await session.scalar(
+                        db.select(db.Certificate).where(
+                            db.Certificate.aid_request_id == previous.id
+                        )
+                    )
+                    await db.finish_repository_write(session)
+                    return StoredAidRequest(
+                        id=previous.id, conversation_id=record.id, aid_id=previous.aid_id,
+                        contact_method=None, contact_value=None, request_key=request_key,
+                        certificate=_stored_certificate(previous_certificate),
+                        certificate_status="issued" if previous_certificate else "unavailable",
+                    )
+                prior_certificate = await session.scalar(
+                    db.select(db.Certificate.id)
+                    .join(db.AidRequest, db.Certificate.aid_request_id == db.AidRequest.id)
+                    .where(db.AidRequest.conversation_id == record.id)
+                    .limit(1)
+                )
+                if prior_certificate is not None:
+                    await db.finish_repository_write(session)
+                    return StoredAidRequest(
+                        id=0, conversation_id=record.id, aid_id=aid_id,
+                        contact_method=None, contact_value=None, request_key=request_key,
+                        certificate_status="already_issued",
+                    )
+                certificate = await session.scalar(
+                    db.select(db.Certificate)
+                    .where(
+                        db.Certificate.aid_id == aid_id,
+                        db.Certificate.issued_at.is_(None),
+                        db.Certificate.expires_at > datetime.now(UTC),
+                    )
+                    .order_by(db.Certificate.expires_at, db.Certificate.id)
+                    .with_for_update(skip_locked=True)
+                )
+                if certificate is None:
+                    await db.finish_repository_write(session)
+                    return StoredAidRequest(
+                        id=0, conversation_id=record.id, aid_id=aid_id,
+                        contact_method=None, contact_value=None, request_key=request_key,
+                        certificate_status="unavailable",
+                    )
             result = await session.execute(
                 db.postgres_insert(db.AidRequest)
                 .values(
@@ -862,6 +935,7 @@ class PostgresConversationStore:
                     district=request.district,
                     request_key=request_key,
                     certificate=_stored_certificate(certificate),
+                    certificate_status="issued" if is_certificate and certificate else None,
                 )
             request = await session.get(db.AidRequest, request_id)
             if request is None:
@@ -875,16 +949,8 @@ class PostgresConversationStore:
                         expires_at=db.content_expiry_at(),
                     )
                 )
-            certificate = await session.scalar(
-                db.select(db.Certificate)
-                .where(
-                    db.Certificate.aid_id == aid_id,
-                    db.Certificate.issued_at.is_(None),
-                    db.Certificate.expires_at > datetime.now(UTC),
-                )
-                .order_by(db.Certificate.expires_at, db.Certificate.id)
-                .with_for_update(skip_locked=True)
-            )
+            if not is_certificate:
+                certificate = None
             if certificate is not None:
                 certificate.aid_request_id = request.id
                 certificate.issued_at = datetime.now(UTC)
@@ -910,6 +976,7 @@ class PostgresConversationStore:
                 district=district,
                 request_key=request_key,
                 certificate=_stored_certificate(certificate),
+                certificate_status="issued" if is_certificate else None,
             )
 
     async def delete_data(self, record: ConversationRecord) -> None:

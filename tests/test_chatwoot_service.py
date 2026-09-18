@@ -17,7 +17,7 @@ from app.domain import (
     SupportDiagnostic,
     SupportIntent,
 )
-from app.store import StoredCertificate
+from app.store import CertificateClaimResult, StoredCertificate
 
 
 @dataclass
@@ -211,9 +211,10 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
     )
     claimed: list[tuple[str, str]] = []
 
-    async def claim(aid_id: str, issuance_key: str) -> StoredCertificate:
+    async def claim(aid_id: str, issuance_key: str, recipient_id: int) -> CertificateClaimResult:
         claimed.append((aid_id, issuance_key))
-        return StoredCertificate(
+        assert recipient_id == 7
+        certificate = StoredCertificate(
             aid_id=aid_id,
             provider="Test provider",
             nominal_rubles=300,
@@ -221,18 +222,57 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
             expires_at=datetime.now(UTC) + timedelta(days=30),
             serial_number="TEST-SERIAL",
         )
+        return CertificateClaimResult("issued", certificate)
 
-    handled = await ChatwootAgentService(api, certificate_claim=claim).process(
-        event("aid:food_card")
+    service = ChatwootAgentService(api, certificate_claim=claim)
+    preview = await service.process(event("aid:food_card"))
+    assert preview is True
+    assert len(claimed) == 0
+    handled = await service.process(
+        event("certificate:confirm", 42)
     )
 
     assert handled is True
     assert len(claimed) == 1
     assert claimed[0][0] == "food_card"
-    assert "TEST-CODE" in api.replies[0]["text"]
-    assert api.replies[0]["sensitive_content"] == "certificate"
+    assert "TEST-CODE" in api.replies[-1]["text"]
+    assert api.replies[-1]["sensitive_content"] == "certificate"
     assert api.conversation["custom_attributes"]["workflow_state"] == "aid_requested"
     assert "contact=not_provided:not_provided" in api.notes[0]
+
+
+@pytest.mark.asyncio
+async def test_chatwoot_certificate_limit_survives_clear_and_allows_legal_help() -> None:
+    api = FakeChatwoot()
+    api.conversation["custom_attributes"].update(
+        workflow_state="choosing_aid", workflow_need="food_money"
+    )
+    recipients: set[int] = set()
+
+    async def claim(aid_id: str, _key: str, recipient_id: int) -> CertificateClaimResult:
+        if recipient_id in recipients:
+            return CertificateClaimResult("already_issued")
+        recipients.add(recipient_id)
+        return CertificateClaimResult("issued", StoredCertificate(
+            aid_id=aid_id, provider="Test", nominal_rubles=300,
+            activation_code="TEST-FIRST", expires_at=datetime.now(UTC) + timedelta(days=30),
+            serial_number="TEST-SERIAL",
+        ))
+
+    service = ChatwootAgentService(api, certificate_claim=claim)
+    await service.process(event("aid:food_card", 50))
+    await service.process(event("certificate:confirm", 51))
+    await service.process(event("/clear", 52))
+    await service.process(event("continue", 53))
+    await service.process(event("need:food_money", 54))
+    await service.process(event("aid:medicine_card", 55))
+    await service.process(event("certificate:confirm", 56))
+
+    assert len(recipients) == 1
+    assert "уже получили сертификат" in api.replies[-1]["text"]
+    assert "TEST-FIRST" not in api.replies[-1]["text"]
+    await service.process(event("extra:legal", 57))
+    assert api.conversation["custom_attributes"]["workflow_state"] == "collecting_contact_method"
 
 
 @pytest.mark.asyncio

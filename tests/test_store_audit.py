@@ -109,21 +109,21 @@ async def test_in_memory_aid_request_reuses_callback_request_key_without_followu
 
     first = await store.create_aid_request(
         record,
-        "food_card",
+        "legal_consultation",
         "current_telegram",
         "@helper_test",
         request_key="callback:contact:303",
     )
     duplicate = await store.create_aid_request(
         record,
-        "food_card",
+        "legal_consultation",
         "current_telegram",
         "@helper_test",
         request_key="callback:contact:303",
     )
     later = await store.create_aid_request(
         record,
-        "food_card",
+        "legal_consultation",
         "current_telegram",
         "@helper_test",
         request_key="callback:contact:304",

@@ -91,8 +91,8 @@ async def run_scenarios() -> None:
 
     await service.start(incoming(message_id=11))
     await service.handle_callback(incoming(message_id=12), "continue")
-    await service.handle_callback(incoming(message_id=13), "need:food_money")
-    await service.handle_callback(incoming(message_id=14), "aid:food_card")
+    await service.handle_callback(incoming(message_id=13), "need:legal")
+    await service.handle_callback(incoming(message_id=14), "aid:legal_consultation")
     await service.handle_callback(incoming(message_id=15), "contact:current_telegram")
     assert len(store.aid_requests) == 1
     assert len(store.followup_jobs) == 1

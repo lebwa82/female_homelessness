@@ -16,7 +16,7 @@ from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
 from app.release_info import active_release_info
 from app.service import ConversationService
-from app.store import ConversationRecord, InMemoryConversationStore, StoredCertificate
+from app.store import CertificateClaimResult, ConversationRecord, InMemoryConversationStore
 from app.ui import HUMAN_CHOICE
 
 _CONTEXT_MARKER_PREFIX = "[women-help/context-epoch:"
@@ -87,7 +87,7 @@ class ChatwootAgentService:
         gateway: YandexAgentGateway | None = None,
         duty_team_id: int | None = None,
         queue_router: QueueRouter | None = None,
-        certificate_claim: Callable[[str, str], Awaitable[StoredCertificate | None]] | None = None,
+        certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
     ) -> None:
         self._api = api
         self._gateway = gateway or YandexAgentGateway()
@@ -338,7 +338,7 @@ def _seed_conversation(
     event: IncomingChatwootMessage,
     conversation: dict[str, Any],
     messages: tuple[dict[str, Any], ...],
-    certificate_claim: Callable[[str, str], Awaitable[StoredCertificate | None]] | None = None,
+    certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
 ) -> _SeededConversation:
     attributes = _custom_attributes(conversation)
     incoming = IncomingMessage(
@@ -446,7 +446,8 @@ def _is_callback(content: str) -> bool:
         "level2:details",
         "level2:later",
         "support:psychologist",
-    } or content.startswith(("need:", "aid:", "contact:", "back:"))
+        "restart",
+    } or content.startswith(("need:", "aid:", "contact:", "back:", "certificate:", "extra:"))
 
 
 def _context_marker(epoch: int) -> str:

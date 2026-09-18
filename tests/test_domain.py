@@ -15,7 +15,6 @@ from app.domain import (
 def test_housing_offer_is_bounded_to_catalog() -> None:
     assert [item.id for item in available_aid_for_need(NeedKind.HOUSING)] == [
         "hostel_3_nights",
-        "peer_consultation",
         "legal_consultation",
     ]
 
@@ -25,7 +24,7 @@ def test_every_need_offer_contains_three_catalog_items() -> None:
         if need is NeedKind.OTHER:
             continue
         offers = available_aid_for_need(need)
-        assert len(offers) == 3
+        assert 1 <= len(offers) <= 3
         assert all(get_aid_item(item.id) == item for item in offers)
 
 

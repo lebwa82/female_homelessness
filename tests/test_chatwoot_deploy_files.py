@@ -16,7 +16,15 @@ def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
 
     assert "scripts/import_certificates.py" in containerfile
     assert "scripts/import_chatwoot_certificates.py" in containerfile
+    assert "scripts/link_legacy_certificates.py" in containerfile
     assert "scripts/__init__.py" not in containerfile
+
+
+def test_certificate_identity_key_is_kept_in_root_only_agent_environment() -> None:
+    deploy_script = (ROOT / "scripts/deploy_chatwoot_test.sh").read_text(encoding="utf-8")
+    assert "CERTIFICATE_IDENTITY_KEY" in deploy_script
+    assert "openssl rand -hex 32" in deploy_script
+    assert 'sudo chmod 0600 "$agent_env_tmp"' in deploy_script
 
 
 def test_agent_bot_uses_chatwoot_database_without_a_persistent_volume() -> None:
@@ -94,6 +102,7 @@ def test_justfile_and_readme_expose_chatwoot_operator_commands() -> None:
     assert "chatwoot-bootstrap" in justfile
     assert "bootstrap_chatwoot_agent.sh" in justfile
     assert "certificates-import" in justfile
+    assert "certificates-link-legacy" in justfile
     assert "Chatwoot" in readme
     assert "women-help-chatwoot-agent" in readme
 
