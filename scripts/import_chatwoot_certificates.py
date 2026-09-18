@@ -19,7 +19,11 @@ async def import_file(path: Path) -> tuple[int, int]:
     if not settings.certificate_database_password:
         raise RuntimeError("CERTIFICATE_DATABASE_PASSWORD is required")
     rows = [_validated(item) for item in payload]
-    inventory = CertificateInventory(database_url(settings.certificate_database_password))
+    inventory = CertificateInventory(
+        database_url(settings.certificate_database_password),
+        identity_key=settings.certificate_identity_key or "import-only",
+        account_id=settings.chatwoot_account_id,
+    )
     try:
         await inventory.initialize()
         return await inventory.import_rows(rows)

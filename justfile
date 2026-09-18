@@ -89,6 +89,10 @@ chatwoot-check host="":
 certificates-import json_file host="":
     bash scripts/import_chatwoot_certificates_prod.sh "{{json_file}}" "{{host}}"
 
+# Reconcile certificates issued before per-contact tracking; requires verified mapping.
+certificates-link-legacy json_file host="":
+    bash scripts/import_chatwoot_certificates_prod.sh "{{json_file}}" "{{host}}" link
+
 # Create/reuse the duty team and Agent Bot after the dashboard inbox is created.
 chatwoot-bootstrap host="":
     bash scripts/bootstrap_chatwoot_agent.sh "{{host}}"

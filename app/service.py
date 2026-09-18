@@ -58,6 +58,28 @@ PERSISTENCE_UNAVAILABLE_PROMPT = (
     "Не получилось безопасно сохранить сообщение. Можно повторить позже или позвать человека."
 )
 MOSCOW_TIME = ZoneInfo("Europe/Moscow")
+CERTIFICATE_PREVIEWS = {
+    "food_card": "Можно получить электронный сертификат на продукты. Вы сами решаете, что купить; чеки и объяснения не нужны.",
+    "medicine_card": "Можно получить электронный сертификат на лекарства и аптечные товары. Вы сами решаете, что купить; отчёт не нужен.",
+    "hostel_3_nights": "Можно получить электронный сертификат на проживание. Вы сами выбираете место и даты; сообщать нам адрес не нужно.",
+    "children_card": "Можно получить электронный сертификат на товары для детей. Вы сами выбираете нужные товары; отчёт не нужен.",
+}
+CERTIFICATE_RULE = (
+    "Сертификат выдаётся только один — на продукты, лекарства, проживание "
+    "или товары для детей. Консультации психолога и юриста доступны отдельно."
+)
+CERTIFICATE_INSTRUCTIONS = {
+    "food_card": "Выберите продукты у указанного продавца и предъявите или введите код по его правилам.",
+    "medicine_card": "Выберите нужные товары в аптеке и предъявите или введите код по её правилам.",
+    "hostel_3_nights": "Выберите город, даты и место размещения у указанного сервиса. Введите код при оплате по его правилам. При заселении место проживания может попросить документ; фонду он не нужен.",
+    "children_card": "Выберите детские товары у указанного продавца и предъявите или введите код по его правилам.",
+}
+CERTIFICATE_EXTRA_CHOICES = (
+    Choice(id="extra:psychologist", label="Поговорить с психологом"),
+    Choice(id="extra:legal", label="Задать вопрос юристу"),
+    Choice(id="finish", label="Завершить"),
+    Choice(id="restart", label="Вернуться в начало"),
+)
 
 
 class _CriticalTurnPersistenceFailure(Exception):
@@ -490,6 +512,22 @@ class ConversationService:
             return await self._handle_aid_choice(
                 record, callback_id.removeprefix("aid:"), request_key=request_key
             )
+        if callback_id == "certificate:confirm":
+            if record.state != ConversationState.CERTIFICATE_PREVIEW.value:
+                return await self._state_turn(record)
+            return await self._complete_pending_request(record, None, request_key=request_key)
+        if callback_id == "certificate:request":
+            if record.state != ConversationState.CERTIFICATE_UNAVAILABLE.value:
+                return await self._state_turn(record)
+            return await self._human_turn(record, "certificate_unavailable", request_key=request_key)
+        if callback_id.startswith("extra:"):
+            if record.state != ConversationState.AID_REQUESTED.value:
+                return await self._state_turn(record)
+            aid_id = {
+                "extra:psychologist": PSYCHOLOGIST_AID_ID,
+                "extra:legal": "legal_consultation",
+            }.get(callback_id)
+            return await self._handle_aid_choice(record, aid_id) if aid_id else await self._state_turn(record)
         if callback_id.startswith("contact:"):
             if record.state != ConversationState.COLLECTING_CONTACT_METHOD.value:
                 return await self._state_turn(record)
@@ -502,6 +540,11 @@ class ConversationService:
             if record.state != ConversationState.AID_REQUESTED.value:
                 return await self._state_turn(record)
             return await self._enter_need_discovery(record)
+        if callback_id == "restart":
+            if record.state != ConversationState.AID_REQUESTED.value:
+                return await self._state_turn(record)
+            await self._reset_entry_workflow(record)
+            return self._turn(WELCOME, CONTINUE_CHOICES)
         if callback_id == "finish":
             if record.state not in {
                 ConversationState.AID_REQUESTED.value,
@@ -710,8 +753,10 @@ class ConversationService:
         if item is None:
             return await self._state_turn(record)
         if item.fulfillment == "certificate":
-            await self.store.update(record, pending_aid_id=aid_id)
-            return await self._complete_pending_request(record, None, request_key=request_key)
+            await self.store.update(
+                record, pending_aid_id=aid_id, state=ConversationState.CERTIFICATE_PREVIEW.value
+            )
+            return self._certificate_preview(aid_id)
         if item.needs_location:
             await self.store.update(
                 record,
@@ -786,6 +831,28 @@ class ConversationService:
             district=record.pending_district,
             request_key=request_key,
         )
+        if request.certificate_status == "already_issued":
+            await self.store.update(
+                record, state=ConversationState.AID_REQUESTED.value, pending_aid_id=None
+            )
+            return self._turn(
+                "Вы уже получили сертификат. Повторно выдать его не сможем. "
+                "Консультации психолога и юриста по-прежнему доступны.",
+                CERTIFICATE_EXTRA_CHOICES,
+            )
+        if request.certificate_status == "unavailable":
+            await self.store.update(record, state=ConversationState.CERTIFICATE_UNAVAILABLE.value)
+            return self._turn(
+                "Сейчас свободных сертификатов этого вида нет. "
+                "Могу передать ваш запрос человеку из команды, чтобы вам написали, когда они появятся.",
+                (Choice(id="certificate:request", label="Передать запрос"),),
+            )
+        if request.certificate_status == "review_required":
+            await self.store.update(record, state=ConversationState.CERTIFICATE_UNAVAILABLE.value)
+            return self._turn(
+                "Выдача сертификатов временно недоступна. Могу передать ваш запрос человеку из команды.",
+                (Choice(id="certificate:request", label="Передать запрос"),),
+            )
         await self.store.update(
             record,
             state=ConversationState.AID_REQUESTED.value,
@@ -807,6 +874,15 @@ class ConversationService:
         return self._turn("Хорошо, запрос сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
 
     @staticmethod
+    def _certificate_preview(aid_id: str) -> AgentTurn:
+        return ConversationService._turn(
+            f"{CERTIFICATE_PREVIEWS[aid_id]}\n\n"
+            "Сертификат придёт прямо в этот чат.\n\n"
+            f"{CERTIFICATE_RULE}",
+            (Choice(id="certificate:confirm", label="Выбрать сертификат"),),
+        )
+
+    @staticmethod
     def _certificate_turn(certificate: StoredCertificate) -> AgentTurn:
         expires = certificate.expires_at.astimezone(MOSCOW_TIME).strftime("%d.%m.%Y")
         return ConversationService._turn(
@@ -815,9 +891,11 @@ class ConversationService:
             f"Код активации: {certificate.activation_code}\n"
             f"Активировать по: {expires} (до 23:59 по МСК указанного дня).\n"
             f"Серийный номер: {certificate.serial_number}\n\n"
+            f"Как воспользоваться: {CERTIFICATE_INSTRUCTIONS.get(certificate.aid_id, 'Следуйте правилам указанного сервиса.')}\n\n"
             "Сохраните это сообщение. Сертификат выдаётся один раз: "
-            "мы не проверяем его использование и не перевыпускаем.",
-            MORE_HELP_CHOICES,
+            "мы не проверяем его использование и не перевыпускаем. "
+            "Дополнительно можно бесплатно обратиться к психологу или юристу.",
+            CERTIFICATE_EXTRA_CHOICES,
         ).model_copy(update={"audit": {"sensitive_content": "certificate"}})
 
     async def _execute_resolved_turn(
@@ -1265,6 +1343,13 @@ class ConversationService:
         if record.state == ConversationState.AID_REQUESTED.value:
             return ConversationService._turn(
                 "Запрос уже сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES
+            )
+        if record.state == ConversationState.CERTIFICATE_PREVIEW.value and record.pending_aid_id:
+            return self._certificate_preview(record.pending_aid_id)
+        if record.state == ConversationState.CERTIFICATE_UNAVAILABLE.value:
+            return self._turn(
+                "Свободных сертификатов этого вида сейчас нет.",
+                (Choice(id="certificate:request", label="Передать запрос"),),
             )
         if record.state == ConversationState.DISCOVERING_NEED.value:
             return ConversationService._turn(NEED_PROMPT, NEED_CHOICES)

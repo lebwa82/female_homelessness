@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from app.domain import NeedKind
 
 PSYCHOLOGIST_AID_ID = "psychologist_3_sessions"
-CERTIFICATE_AID_IDS = frozenset({"food_card", "children_card"})
+CERTIFICATE_AID_IDS = frozenset({"food_card", "medicine_card", "hostel_3_nights", "children_card"})
 
 
 class AidItem(BaseModel):
@@ -23,9 +23,9 @@ class AidItem(BaseModel):
 AID_CATALOG = (
     AidItem(
         id="hostel_3_nights",
-        label="Три ночи в хостеле",
-        description="Бронирование трёх ночей через фонд.",
-        needs_location=True,
+        label="Сертификат на несколько ночей в хостеле",
+        description="Электронный сертификат на проживание.",
+        fulfillment="certificate",
     ),
     AidItem(
         id="legal_consultation",
@@ -39,13 +39,19 @@ AID_CATALOG = (
     ),
     AidItem(
         id="food_card",
-        label="Карточка на продукты",
+        label="Сертификат на продукты",
         description="Электронный сертификат на продукты.",
         fulfillment="certificate",
     ),
     AidItem(
+        id="medicine_card",
+        label="Сертификат на лекарства",
+        description="Электронный сертификат на лекарства и аптечные товары.",
+        fulfillment="certificate",
+    ),
+    AidItem(
         id="children_card",
-        label="Карточка на товары для детей",
+        label="Сертификат на товары для детей",
         description="Электронный сертификат на детские товары.",
         fulfillment="certificate",
     ),
@@ -69,8 +75,8 @@ AID_CATALOG = (
 
 _BY_ID = {item.id: item for item in AID_CATALOG}
 _BY_NEED = {
-    NeedKind.HOUSING: ("hostel_3_nights", "peer_consultation", "legal_consultation"),
-    NeedKind.FOOD_MONEY: ("food_card", "children_card", "transport_payment"),
+    NeedKind.HOUSING: ("hostel_3_nights", "legal_consultation"),
+    NeedKind.FOOD_MONEY: ("food_card", "medicine_card"),
     NeedKind.LEGAL: ("legal_consultation", "peer_consultation", "psychologist_3_sessions"),
     NeedKind.SUPPORT: (
         "peer_consultation",

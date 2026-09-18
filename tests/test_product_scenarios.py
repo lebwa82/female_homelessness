@@ -85,7 +85,7 @@ async def test_clear_preserves_audit_records_and_replays_the_same_update() -> No
         pending_offer=SupportOffer.PSYCHOLOGIST.value,
     )
     await store.append_message(record, "user", "before-reset")
-    await store.create_aid_request(record, "food_card", "current_telegram", "@helper_test")
+    await store.create_aid_request(record, "legal_consultation", "current_telegram", "@helper_test")
 
     first = await service.clear(incoming)
 
@@ -616,31 +616,28 @@ async def test_callback_food_workflow_creates_one_request_and_followup() -> None
     await service.start(identity(message_id=501))
     await service.handle_callback(identity(message_id=502), "continue")
     await service.handle_callback(identity(message_id=503), "need:food_money")
-    done = await service.handle_callback(identity(message_id=504), "aid:food_card")
+    preview = await service.handle_callback(identity(message_id=504), "aid:food_card")
+    done = await service.handle_callback(identity(message_id=505), "certificate:confirm")
 
-    assert any(choice.id == "more_help" for choice in done.choices)
-    assert [
-        (item.aid_id, item.contact_method, item.contact_value) for item in store.aid_requests
-    ] == [("food_card", None, None)]
-    assert len(store.followup_jobs) == 1
+    assert any(choice.id == "certificate:confirm" for choice in preview.choices)
+    assert any(choice.id == "certificate:request" for choice in done.choices)
+    assert store.aid_requests == []
+    assert store.followup_jobs == []
 
 
 @pytest.mark.asyncio
-async def test_physical_aid_location_and_contact_workflow_preserves_city_without_address() -> None:
+async def test_housing_certificate_does_not_collect_city_or_address() -> None:
     store = InMemoryConversationStore()
     service = ConversationService(store=store, gateway=FixedGateway(diagnostic_evaluation()))
 
     await service.start(identity(message_id=510))
     await service.handle_callback(identity(message_id=511), "continue")
     await service.handle_callback(identity(message_id=512), "need:housing")
-    location = await service.handle_callback(identity(message_id=513), "aid:hostel_3_nights")
-    contact = await service.handle_text(identity("Москва", message_id=514))
-    await service.handle_callback(identity(message_id=515), "contact:later")
+    preview = await service.handle_callback(identity(message_id=513), "aid:hostel_3_nights")
 
-    assert "город" in location.text.lower()
-    assert "адрес куда" not in location.text.lower()
-    assert any(choice.id == "contact:later" for choice in contact.choices)
-    assert store.aid_requests[0].city == "Москва"
+    assert "адрес не нужно" in preview.text.lower()
+    assert any(choice.id == "certificate:confirm" for choice in preview.choices)
+    assert store.conversations[101].pending_city is None
 
 
 @pytest.mark.asyncio
@@ -688,10 +685,12 @@ async def test_replayed_contact_callback_cannot_create_a_second_aid_request() ->
     await service.handle_callback(identity(message_id=542), "need:food_money")
     incoming = identity(message_id=543)
     await service.handle_callback(incoming, "aid:food_card")
-    replay = await service.handle_callback(incoming, "aid:food_card")
+    confirm = identity(message_id=544)
+    await service.handle_callback(confirm, "certificate:confirm")
+    replay = await service.handle_callback(confirm, "certificate:confirm")
 
-    assert len(store.aid_requests) == 1
-    assert any(choice.id == "more_help" for choice in replay.choices)
+    assert store.aid_requests == []
+    assert any(choice.id == "certificate:request" for choice in replay.choices)
 
 
 @pytest.mark.asyncio

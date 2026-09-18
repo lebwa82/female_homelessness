@@ -16,7 +16,13 @@ def main() -> None:
         raise SystemExit(error)
     if not settings.certificate_database_password:
         raise SystemExit("missing CERTIFICATE_DATABASE_PASSWORD")
-    inventory = CertificateInventory(database_url(settings.certificate_database_password))
+    if not settings.certificate_identity_key:
+        raise SystemExit("missing CERTIFICATE_IDENTITY_KEY")
+    inventory = CertificateInventory(
+        database_url(settings.certificate_database_password),
+        identity_key=settings.certificate_identity_key,
+        account_id=settings.chatwoot_account_id,
+    )
     client = ChatwootClient(
         base_url=settings.chatwoot_base_url,
         account_id=settings.chatwoot_account_id,

@@ -14,6 +14,8 @@ class ConversationState(str, Enum):
     GREETING = "greeting"
     DISCOVERING_NEED = "discovering_need"
     CHOOSING_AID = "choosing_aid"
+    CERTIFICATE_PREVIEW = "certificate_preview"
+    CERTIFICATE_UNAVAILABLE = "certificate_unavailable"
     COLLECTING_LOCATION = "collecting_location"
     COLLECTING_CONTACT_METHOD = "collecting_contact_method"
     COLLECTING_CONTACT_VALUE = "collecting_contact_value"

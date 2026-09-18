@@ -66,7 +66,7 @@ def test_catalog_choice_set_keeps_only_known_catalog_items() -> None:
     )
 
     assert [(choice.id, choice.label) for choice in choices] == [
-        ("aid:food_card", "Карточка на продукты"),
+        ("aid:food_card", "Сертификат на продукты"),
         ("aid:legal_consultation", "Юрист или адвокат"),
         ("human", "Поговорить с живым человеком"),
     ]
