@@ -85,13 +85,21 @@ deploy-chatwoot-test host="":
 chatwoot-check host="":
     bash scripts/chatwoot_test_status.sh "{{host}}"
 
-# Securely import bearer certificates into the active Chatwoot inventory.
-certificates-import json_file host="":
-    bash scripts/import_chatwoot_certificates_prod.sh "{{json_file}}" "{{host}}"
+# Generate 15+15 neutral invalid PDF certificates locally.
+certificates-generate-test output="output/test-certificates":
+    uv run python -m scripts.generate_test_certificate_pdfs "{{output}}" --count 15
 
-# Reconcile certificates issued before per-contact tracking; requires verified mapping.
-certificates-link-legacy json_file host="":
-    bash scripts/import_chatwoot_certificates_prod.sh "{{json_file}}" "{{host}}" link
+# Securely upload and import a directory of PDF certificates.
+certificates-import-pdf directory host="":
+    bash scripts/import_chatwoot_certificate_pdfs_prod.sh "{{directory}}" "{{host}}"
+
+# Return only test certificates to the available pool.
+certificates-reset-test host="":
+    bash scripts/manage_chatwoot_test_certificates_prod.sh reset "{{host}}"
+
+# Permanently remove all test certificate rows and their private S3 objects.
+certificates-purge-test host="":
+    bash scripts/manage_chatwoot_test_certificates_prod.sh purge "{{host}}"
 
 # Create/reuse the duty team and Agent Bot after the dashboard inbox is created.
 chatwoot-bootstrap host="":

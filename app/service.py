@@ -11,6 +11,7 @@ from app.agents import AgentContext, AgentEvaluation, YandexAgentGateway
 from app.catalog import PSYCHOLOGIST_AID_ID, AidItem, available_aid_for_need, get_aid_item
 from app.domain import (
     AgentTurn,
+    CertificateAttachment,
     Choice,
     ChoiceSet,
     ContactMethod,
@@ -885,7 +886,7 @@ class ConversationService:
     @staticmethod
     def _certificate_turn(certificate: StoredCertificate) -> AgentTurn:
         expires = certificate.expires_at.astimezone(MOSCOW_TIME).strftime("%d.%m.%Y")
-        return ConversationService._turn(
+        turn = ConversationService._turn(
             f"Готово — вот ваш электронный сертификат {certificate.provider}.\n\n"
             f"Номинал: {certificate.nominal_rubles} руб.\n"
             f"Код активации: {certificate.activation_code}\n"
@@ -897,6 +898,30 @@ class ConversationService:
             "Дополнительно можно бесплатно обратиться к психологу или юристу.",
             CERTIFICATE_EXTRA_CHOICES,
         ).model_copy(update={"audit": {"sensitive_content": "certificate"}})
+        if not all(
+            (
+                certificate.pdf_bucket,
+                certificate.pdf_object_key,
+                certificate.pdf_sha256,
+                certificate.pdf_size,
+                certificate.pdf_filename,
+                certificate.issuance_key,
+            )
+        ):
+            return turn
+        return turn.model_copy(
+            update={
+                "attachment": CertificateAttachment(
+                    bucket=certificate.pdf_bucket,
+                    key=certificate.pdf_object_key,
+                    version_id=certificate.pdf_version_id,
+                    sha256=certificate.pdf_sha256,
+                    size=certificate.pdf_size,
+                    filename=certificate.pdf_filename,
+                    issuance_key=certificate.issuance_key,
+                )
+            }
+        )
 
     async def _execute_resolved_turn(
         self,

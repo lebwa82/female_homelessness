@@ -14,10 +14,11 @@ def test_test_stack_uses_latest_chatwoot_and_keeps_postgres_local() -> None:
 def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
     containerfile = (ROOT / "deploy/chatwoot/Containerfile").read_text(encoding="utf-8")
 
-    assert "scripts/import_certificates.py" in containerfile
-    assert "scripts/import_chatwoot_certificates.py" in containerfile
-    assert "scripts/link_legacy_certificates.py" in containerfile
-    assert "scripts/__init__.py" not in containerfile
+    assert "scripts/import_chatwoot_certificate_pdfs.py" in containerfile
+    assert "scripts/certificate_pdf_runtime.py" in containerfile
+    assert "scripts/reset_test_certificates.py" in containerfile
+    assert "scripts/purge_test_certificates.py" in containerfile
+    assert "scripts/__init__.py" in containerfile
 
 
 def test_certificate_identity_key_is_kept_in_root_only_agent_environment() -> None:
@@ -101,8 +102,9 @@ def test_justfile_and_readme_expose_chatwoot_operator_commands() -> None:
     assert "chatwoot-check" in justfile
     assert "chatwoot-bootstrap" in justfile
     assert "bootstrap_chatwoot_agent.sh" in justfile
-    assert "certificates-import" in justfile
-    assert "certificates-link-legacy" in justfile
+    assert "certificates-import-pdf" in justfile
+    assert "certificates-reset-test" in justfile
+    assert "certificates-purge-test" in justfile
     assert "Chatwoot" in readme
     assert "women-help-chatwoot-agent" in readme
 

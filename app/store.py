@@ -75,6 +75,15 @@ class StoredCertificate:
     issued_at: datetime | None = None
     aid_request_id: int | None = None
     issued_to: int | None = None
+    valid_from: datetime | None = None
+    issuance_key: str | None = None
+    pdf_bucket: str | None = None
+    pdf_object_key: str | None = None
+    pdf_version_id: str | None = None
+    pdf_sha256: str | None = None
+    pdf_size: int | None = None
+    pdf_filename: str | None = None
+    is_test: bool = False
 
 
 @dataclass(frozen=True)

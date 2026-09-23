@@ -6,7 +6,12 @@ from time import time
 
 import pytest
 
-from app.chatwoot.contracts import IncomingChatwootMessage, parse_message_created
+from app.chatwoot.contracts import (
+    IncomingChatwootMessage,
+    MessageDeliveryChanged,
+    parse_message_created,
+    parse_message_delivery_changed,
+)
 from app.chatwoot.webhook import InvalidWebhookSignature, verify_webhook_signature
 
 
@@ -50,6 +55,18 @@ def test_parses_only_public_incoming_message_created_event() -> None:
 )
 def test_ignores_non_user_events(event: dict[str, object]) -> None:
     assert parse_message_created(event) is None
+
+
+def test_parses_outgoing_message_delivery_status_without_message_content() -> None:
+    payload = {
+        "event": "message_updated",
+        "id": 91,
+        "message_type": "outgoing",
+        "status": "delivered",
+        "conversation": {"id": 23},
+    }
+
+    assert parse_message_delivery_changed(payload) == MessageDeliveryChanged(91, 23, "delivered")
 
 
 def test_accepts_current_constant_time_hmac_signature() -> None:

@@ -275,47 +275,59 @@ inbox Chatwoot. При эскалации Agent Bot уведомляет ком�
 юриста доступны дополнительно. Бот не проверяет использование сертификата и
 не перевыпускает код; сам код не возвращается в контекст модели.
 
-Подготовьте вне репозитория JSON-массив следующего вида и импортируйте его только
-после деплоя кода:
+PDF является исходным документом сертификата. При импорте Agent Bot проверяет
+провайдера, номинал, срок, код/номер и QR, загружает исходный PDF в закрытый
+S3-compatible bucket и сохраняет метаданные в PostgreSQL. Пользователь получает
+одним сообщением текстовые реквизиты и сам PDF. Для «Пятёрочки» допустимы категории
+`food_card` и `children_card`; для Ozon — `medicine_card` и `hostel_3_nights`.
 
-```json
-[
-  {
-    "aid_id": "food_card",
-    "provider": "Провайдер",
-    "nominal_rubles": 300,
-    "activation_code": "REPLACE-WITH-REAL-CODE",
-    "activate_by": "31.12.2027",
-    "serial_number": "REPLACE-WITH-SERIAL"
-  }
-]
+Перед запуском задайте в root-only `/etc/women-help-agent.env`:
+
+```dotenv
+CERTIFICATE_S3_ENDPOINT=https://storage.yandexcloud.net
+CERTIFICATE_S3_REGION=ru-central1
+CERTIFICATE_S3_BUCKET=replace-with-private-bucket
+CERTIFICATE_S3_ACCESS_KEY_ID=replace-with-service-account-key-id
+CERTIFICATE_S3_SECRET_ACCESS_KEY=replace-with-service-account-secret
 ```
+
+Bucket должен быть приватным, а сервисному аккаунту достаточно прав на чтение,
+запись и удаление объектов только этого bucket. Имена объектов случайные и не
+содержат кодов/серийных номеров. Реквизиты и содержимое PDF не выводятся в логи.
+
+Импортируйте каталог PDF только после деплоя кода:
 
 ```bash
-just certificates-import /absolute/path/to/certificates.json
+just certificates-import-pdf /absolute/path/to/pdf-directory 158.160.16.252
 ```
 
-Файл временно копируется в Agent Bot, удаляется после импорта и не должен
-попадать в git или логи. Повторный импорт идентичного набора безопасен.
-`aid_id` может быть `food_card`, `medicine_card`, `hostel_3_nights` или
-`children_card`.
-
-Перед пилотом сверьте ранее выданные сертификаты с Chatwoot-контактами.
-Создайте вне репозитория JSON-файл с подтверждёнными соответствиями:
-
-```json
-[{"serial_number": "SERIAL-OF-ISSUED-CERTIFICATE", "contact_id": 123}]
-```
-
-Затем выполните `just certificates-link-legacy /absolute/path/to/mapping.json`.
-Команда привяжет исторические выдачи к контактам и покажет число оставшихся
-непривязанных записей, не печатая серийные номера. Пока хотя бы одна такая
-запись остаётся, автоматическая выдача закрыта: иначе один и тот же человек
-мог бы получить второй сертификат после `/clear`. Нельзя угадывать контакт:
-если соответствие не подтверждено, выясните его вручную перед запуском выдачи.
+Каталог временно передаётся на VM и в контейнер, затем удаляется. Конфликтующий
+повторный импорт отклоняется целиком, а загруженные в этой попытке объекты удаляются.
 `CERTIFICATE_IDENTITY_KEY` создаётся в root-only конфигурации
 Agent Bot и должен сохраняться при каждом обновлении: его замена нарушит
 распознавание прежних получателей.
+
+Для сквозного теста можно создать 15 Ozon и 15 «Пятёрочка» нейтральных PDF:
+
+```bash
+just certificates-generate-test
+just certificates-import-pdf output/test-certificates 158.160.16.252
+```
+
+Повторить выдачи можно без повторной загрузки файлов:
+
+```bash
+just certificates-reset-test 158.160.16.252
+```
+
+Команда сбрасывает только записи `is_test=true` и не удаляет уже отправленные
+сообщения Telegram. Полное удаление тестовых записей и их S3-объектов:
+
+```bash
+just certificates-purge-test 158.160.16.252
+```
+
+Старая JSON-таблица содержит только тестовые данные и удаляется этой командой.
 
 Актуальная референсная схема разговора сохранена в
 [`docs/nevidimy-bot-scenario-final.html`](docs/nevidimy-bot-scenario-final.html).
@@ -340,25 +352,6 @@ identity, conversation, messages, agent/risk/action/escalation/event rows, ко�
 заявки, callbacks и follow-ups; confirmation deliberately не сохраняется, чтобы не
 создать conversation заново. Provider audit сохраняет только allow-listed categories
 и counts, а не provider-controlled keys или raw text.
-
-## Электронные сертификаты
-
-Исторический standalone-контур также умеет хранить bearer-сертификаты. В
-активном Chatwoot-контуре используйте только описанный выше
-`just certificates-import`. Выдача атомарна: берётся ближайший по сроку
-годности непросроченный код. После выдачи код не возвращается на склад и не
-перевыпускается.
-
-Коды не коммитятся в Git. Скопируйте `certificates.example.json` в игнорируемый
-`certificates.local.json`,
-заполните его и загрузите:
-
-```bash
-uv run python scripts/import_certificates.py certificates.local.json
-```
-
-Импорт идемпотентен по коду активации и серийному номеру; выводится только количество,
-без самих кодов.
 
 ## Перед пилотом
 

@@ -17,6 +17,11 @@ dependencies = [
   "sqlalchemy",
   "pproxy>=2.7.9",
   "redis>=7.0.0",
+  "boto3>=1.43.100",
+  "pypdf>=6.19.0",
+  "pymupdf>=1.28.2",
+  "zxing-cpp>=3.1.1",
+  "numpy>=2.4.6",
 ]
 
 [dependency-groups]
@@ -25,6 +30,7 @@ dev = [
   "pytest",
   "pytest-asyncio",
   "ruff",
+  "reportlab>=5.0.1",
 ]
 
 [tool.pytest.ini_options]

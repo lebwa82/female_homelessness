@@ -7,7 +7,14 @@ from typing import Any
 import pytest
 
 from app.agents import AgentEvaluation
-from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage, StaffMessage
+from app.certificate_documents import CertificateObjectRef
+from app.chatwoot.client import BinaryAttachment
+from app.chatwoot.contracts import (
+    ConversationChanged,
+    IncomingChatwootMessage,
+    MessageDeliveryChanged,
+    StaffMessage,
+)
 from app.chatwoot.service import ChatwootAgentService
 from app.domain import (
     DiagnosticStatus,
@@ -73,7 +80,11 @@ class FakeChatwoot:
         return self.messages
 
     async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool:
-        return self.reply_exists
+        return self.reply_exists or any(reply["turn_key"] == turn_key for reply in self.replies)
+
+    async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None:
+        reply = next((item for item in self.replies if item["turn_key"] == turn_key), None)
+        return reply["message_id"] if reply else None
 
     async def set_custom_attributes(self, conversation_id: int, attributes: dict[str, Any]) -> None:
         self.attributes.append(attributes)
@@ -105,15 +116,20 @@ class FakeChatwoot:
         choices: tuple[object, ...],
         turn_key: str,
         sensitive_content: str | None = None,
-    ) -> None:
+        attachment: BinaryAttachment | None = None,
+    ) -> int:
+        message_id = 100 + len(self.replies)
         self.replies.append(
             {
+                "message_id": message_id,
                 "text": text,
                 "choices": choices,
                 "turn_key": turn_key,
                 "sensitive_content": sensitive_content,
+                "attachment": attachment,
             }
         )
+        return message_id
 
 
 def event(content: str = "test input", message_id: int = 41) -> IncomingChatwootMessage:
@@ -239,6 +255,73 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
     assert api.replies[-1]["sensitive_content"] == "certificate"
     assert api.conversation["custom_attributes"]["workflow_state"] == "aid_requested"
     assert "contact=not_provided:not_provided" in api.notes[0]
+
+
+@pytest.mark.asyncio
+async def test_pdf_certificate_is_sent_once_and_marked_submitted() -> None:
+    api = FakeChatwoot()
+    api.conversation["custom_attributes"].update(
+        workflow_state="choosing_aid", workflow_need="food_money"
+    )
+    payload = b"%PDF-1.7 test"
+
+    class Store:
+        async def download(self, ref: CertificateObjectRef) -> bytes:
+            assert ref.key == "test/object.pdf"
+            return payload
+
+        async def upload(self, parsed):  # pragma: no cover - protocol completeness
+            raise AssertionError
+
+        async def delete(self, ref):  # pragma: no cover - protocol completeness
+            raise AssertionError
+
+    async def claim(aid_id: str, issuance_key: str, recipient_id: int):
+        return CertificateClaimResult("issued", StoredCertificate(
+            aid_id=aid_id, provider="Пятёрочка", nominal_rubles=250,
+            activation_code="TEST-NUMBER", serial_number="TEST-NUMBER",
+            expires_at=datetime.now(UTC) + timedelta(days=30), issuance_key=issuance_key,
+            pdf_bucket="private", pdf_object_key="test/object.pdf", pdf_sha256="a" * 64,
+            pdf_size=len(payload), pdf_filename="certificate-pyaterochka.pdf", is_test=True,
+        ))
+
+    submitted: list[tuple[str, int]] = []
+    service = ChatwootAgentService(
+        api,
+        certificate_claim=claim,
+        certificate_store=Store(),
+        certificate_mark_submitted=lambda key, message_id: _append(submitted, key, message_id),
+    )
+    await service.process(event("aid:food_card", 41))
+    api.replies.clear()
+    await service.process(event("certificate:confirm", 42))
+
+    assert len(api.replies) == 2
+    assert api.replies[0]["turn_key"] == "message:42:certificate"
+    assert api.replies[0]["attachment"].data == payload
+    assert api.replies[1]["turn_key"] == "message:42"
+    assert len(submitted) == 1
+    assert submitted[0][0]
+    assert submitted[0][1] == 100
+
+
+async def _append(target: list[tuple[str, int]], key: str, message_id: int) -> None:
+    target.append((key, message_id))
+
+
+@pytest.mark.asyncio
+async def test_certificate_delivery_webhook_updates_only_by_message_id() -> None:
+    delivered: list[int] = []
+
+    async def mark(message_id: int) -> None:
+        delivered.append(message_id)
+
+    handled = await ChatwootAgentService(
+        FakeChatwoot(), certificate_mark_delivered=mark
+    ).process(MessageDeliveryChanged(91, 23, "delivered"))
+
+    assert handled is False
+    assert delivered == [91]
 
 
 @pytest.mark.asyncio

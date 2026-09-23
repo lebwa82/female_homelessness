@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.agents import YandexAgentGateway
-from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage, StaffMessage
+from app.certificate_documents import CertificateObjectRef, CertificateObjectStore
+from app.chatwoot.client import BinaryAttachment
+from app.chatwoot.contracts import (
+    ConversationChanged,
+    IncomingChatwootMessage,
+    MessageDeliveryChanged,
+    StaffMessage,
+)
 from app.chatwoot.queues import QueueCoordinator
 from app.chatwoot.routing import QueueRouter
 from app.config import settings
@@ -41,6 +48,8 @@ class ChatwootConversationApi(Protocol):
 
     async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool: ...
 
+    async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None: ...
+
     async def set_custom_attributes(
         self, conversation_id: int, attributes: dict[str, Any]
     ) -> None: ...
@@ -67,7 +76,8 @@ class ChatwootConversationApi(Protocol):
         choices: tuple[Any, ...],
         turn_key: str,
         sensitive_content: str | None = None,
-    ) -> None: ...
+        attachment: BinaryAttachment | None = None,
+    ) -> int | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +98,11 @@ class ChatwootAgentService:
         duty_team_id: int | None = None,
         queue_router: QueueRouter | None = None,
         certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
+        certificate_store: CertificateObjectStore | None = None,
+        certificate_mark_submitted: Callable[[str, int], Awaitable[None]] | None = None,
+        certificate_mark_failed: Callable[[str], Awaitable[None]] | None = None,
+        certificate_mark_delivered: Callable[[int], Awaitable[None]] | None = None,
+        certificate_mark_delivery_failed: Callable[[int], Awaitable[None]] | None = None,
     ) -> None:
         self._api = api
         self._gateway = gateway or YandexAgentGateway()
@@ -95,13 +110,26 @@ class ChatwootAgentService:
         self._queues = QueueCoordinator(api, duty_team_id, queue_router)
         self._locks: dict[int, asyncio.Lock] = {}
         self._certificate_claim = certificate_claim
+        self._certificate_store = certificate_store
+        self._certificate_mark_submitted = certificate_mark_submitted
+        self._certificate_mark_failed = certificate_mark_failed
+        self._certificate_mark_delivered = certificate_mark_delivered
+        self._certificate_mark_delivery_failed = certificate_mark_delivery_failed
 
     async def process(
-        self, event: IncomingChatwootMessage | ConversationChanged | StaffMessage
+        self,
+        event: IncomingChatwootMessage | ConversationChanged | StaffMessage | MessageDeliveryChanged,
     ) -> bool:
         """Process one trusted inbound event; ``False`` means intentionally silent."""
         lock = self._locks.setdefault(event.conversation_id, asyncio.Lock())
         async with lock:
+            if isinstance(event, MessageDeliveryChanged):
+                if event.status in {"delivered", "read"}:
+                    if self._certificate_mark_delivered is not None:
+                        await self._certificate_mark_delivered(event.message_id)
+                elif event.status == "failed" and self._certificate_mark_delivery_failed is not None:
+                    await self._certificate_mark_delivery_failed(event.message_id)
+                return False
             if isinstance(event, StaffMessage):
                 await self._staff_message(event)
                 return False
@@ -182,14 +210,65 @@ class ChatwootAgentService:
                 return False
         if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
             return False
+        if turn.attachment is not None:
+            await self._send_certificate(event.conversation_id, turn_key, turn)
+        else:
+            await self._api.send_reply(
+                event.conversation_id,
+                text=turn.text,
+                choices=turn.choices,
+                turn_key=turn_key,
+                sensitive_content=turn.audit.get("sensitive_content"),
+            )
+        return True
+
+    async def _send_certificate(
+        self, conversation_id: int, turn_key: str, turn: AgentTurn
+    ) -> None:
+        attachment = turn.attachment
+        if attachment is None or self._certificate_store is None:
+            raise RuntimeError("certificate attachment store is not configured")
+        attachment_turn_key = f"{turn_key}:certificate"
+        message_id = await self._api.reply_id_for_turn(conversation_id, attachment_turn_key)
+        try:
+            if message_id is None:
+                payload = await self._certificate_store.download(CertificateObjectRef(
+                    bucket=attachment.bucket,
+                    key=attachment.key,
+                    version_id=attachment.version_id,
+                    sha256=attachment.sha256,
+                    size=attachment.size,
+                ))
+                message_id = await self._api.send_reply(
+                    conversation_id,
+                    text=turn.text,
+                    choices=(),
+                    turn_key=attachment_turn_key,
+                    sensitive_content="certificate",
+                    attachment=BinaryAttachment(
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        data=payload,
+                    ),
+                )
+                if message_id is None:
+                    message_id = await self._api.reply_id_for_turn(
+                        conversation_id, attachment_turn_key
+                    )
+            if message_id is None:
+                raise RuntimeError("chatwoot did not return a certificate message id")
+            if self._certificate_mark_submitted is not None:
+                await self._certificate_mark_submitted(attachment.issuance_key, message_id)
+        except Exception:
+            if self._certificate_mark_failed is not None:
+                await self._certificate_mark_failed(attachment.issuance_key)
+            raise
         await self._api.send_reply(
-            event.conversation_id,
-            text=turn.text,
+            conversation_id,
+            text="Что можно сделать дальше?",
             choices=turn.choices,
             turn_key=turn_key,
-            sensitive_content=turn.audit.get("sensitive_content"),
         )
-        return True
 
     async def _persist_workflow(
         self,

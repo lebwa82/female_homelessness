@@ -12,6 +12,7 @@ from aiohttp import web
 from app.chatwoot.contracts import (
     parse_conversation_changed,
     parse_message_created,
+    parse_message_delivery_changed,
     parse_staff_message,
 )
 from app.chatwoot.webhook import InvalidWebhookSignature, verify_webhook_signature
@@ -67,6 +68,7 @@ class AgentBotWebhook:
             return web.Response(status=204)
         event = (
             parse_message_created(payload) or parse_staff_message(payload)
+            or parse_message_delivery_changed(payload)
             or parse_conversation_changed(payload)
         )
         if event is None:

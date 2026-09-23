@@ -283,12 +283,28 @@ class PolicyContext(BaseModel):
     need: str | None = None
 
 
+class CertificateAttachment(BaseModel):
+    """Opaque reference to a private certificate document."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    bucket: str
+    key: str
+    version_id: str | None = None
+    sha256: str
+    size: int = Field(gt=0)
+    filename: str
+    content_type: str = "application/pdf"
+    issuance_key: str
+
+
 class AgentTurn(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     text: str = Field(min_length=1, max_length=4096)
     choices: tuple[Choice, ...] = ()
     audit: dict = Field(default_factory=dict)
+    attachment: CertificateAttachment | None = None
 
     def with_human_choice(self) -> AgentTurn:
         if any(choice.id == "human" for choice in self.choices):

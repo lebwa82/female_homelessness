@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.chatwoot.client import AiohttpChatwootTransport, ChatwootClient
+from app.chatwoot.client import AiohttpChatwootTransport, BinaryAttachment, ChatwootClient
 from app.domain import Choice
 
 
@@ -13,6 +13,9 @@ from app.domain import Choice
 class RecordingTransport:
     responses: dict[tuple[str, str], Any] = field(default_factory=dict)
     calls: list[tuple[str, str, str, dict[str, Any] | None]] = field(default_factory=list)
+    multipart_calls: list[tuple[str, str, str, dict[str, str], BinaryAttachment]] = field(
+        default_factory=list
+    )
 
     async def request(
         self,
@@ -22,6 +25,12 @@ class RecordingTransport:
         payload: dict[str, Any] | None = None,
     ) -> Any:
         self.calls.append((method, path, token, payload))
+        return self.responses.get((method, path), {})
+
+    async def request_multipart(
+        self, method, path, token, fields, attachment
+    ) -> Any:
+        self.multipart_calls.append((method, path, token, fields, attachment))
         return self.responses.get((method, path), {})
 
 
@@ -150,6 +159,30 @@ async def test_certificate_reply_is_marked_as_sensitive_chatwoot_content() -> No
         "bot_turn_key": "message:42",
         "bot_sensitive_content": "certificate",
     }
+
+
+@pytest.mark.asyncio
+async def test_pdf_certificate_uses_private_multipart_attachment_and_returns_message_id() -> None:
+    path = "/api/v1/accounts/12/conversations/23/messages"
+    transport = RecordingTransport(responses={("POST", path): {"id": 91}})
+
+    message_id = await client(transport).send_reply(
+        23,
+        text="Certificate details",
+        choices=(),
+        turn_key="message:42:certificate",
+        sensitive_content="certificate",
+        attachment=BinaryAttachment(
+            filename="certificate.pdf", content_type="application/pdf", data=b"%PDF-test"
+        ),
+    )
+
+    assert message_id == 91
+    assert transport.calls == []
+    _, _, token, fields, attachment = transport.multipart_calls[0]
+    assert token == "bot-token"
+    assert attachment.filename == "certificate.pdf"
+    assert "bot_sensitive_content" in fields["content_attributes"]
 
 
 @pytest.mark.asyncio

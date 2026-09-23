@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import aiohttp
@@ -18,6 +20,13 @@ class ChatwootApiError(RuntimeError):
         self.status = status
 
 
+@dataclass(frozen=True, slots=True)
+class BinaryAttachment:
+    filename: str
+    content_type: str
+    data: bytes
+
+
 class ChatwootTransport(Protocol):
     async def request(
         self,
@@ -25,6 +34,15 @@ class ChatwootTransport(Protocol):
         path: str,
         token: str,
         payload: dict[str, Any] | None = None,
+    ) -> Any: ...
+
+    async def request_multipart(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        fields: dict[str, str],
+        attachment: BinaryAttachment,
     ) -> Any: ...
 
 
@@ -67,6 +85,41 @@ class AiohttpChatwootTransport:
                     raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
                 if response.status == 204:
                     return {}
+                return await response.json(content_type=None)
+        except ChatwootApiError:
+            raise
+        except aiohttp.ClientError as error:
+            raise ChatwootApiError(path.rsplit("/", 1)[-1], 0) from error
+
+    async def request_multipart(
+        self,
+        method: str,
+        path: str,
+        token: str,
+        fields: dict[str, str],
+        attachment: BinaryAttachment,
+    ) -> Any:
+        form = aiohttp.FormData()
+        for name, value in fields.items():
+            form.add_field(name, value)
+        form.add_field(
+            "attachments[]",
+            attachment.data,
+            filename=attachment.filename,
+            content_type=attachment.content_type,
+        )
+        try:
+            async with (
+                aiohttp.ClientSession(timeout=self._timeout) as session,
+                session.request(
+                    method,
+                    f"{self._base_url}{path}",
+                    headers=self.request_headers(token),
+                    data=form,
+                ) as response,
+            ):
+                if response.status >= 400:
+                    raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
                 return await response.json(content_type=None)
         except ChatwootApiError:
             raise
@@ -190,7 +243,8 @@ class ChatwootClient:
         choices: tuple[Choice, ...],
         turn_key: str,
         sensitive_content: str | None = None,
-    ) -> None:
+        attachment: BinaryAttachment | None = None,
+    ) -> int | None:
         content_attributes: dict[str, Any] = {"bot_turn_key": turn_key}
         if sensitive_content:
             content_attributes["bot_sensitive_content"] = sensitive_content
@@ -205,12 +259,20 @@ class ChatwootClient:
                 {"title": choice.label, "value": choice.id} for choice in choices
             ]
             payload["content_type"] = "input_select"
-        await self._transport.request(
-            "POST",
-            self._path(f"/conversations/{conversation_id}/messages"),
-            self._bot_token,
-            payload,
-        )
+        path = self._path(f"/conversations/{conversation_id}/messages")
+        if attachment is None:
+            response = await self._transport.request("POST", path, self._bot_token, payload)
+        else:
+            fields = {
+                "content": text,
+                "message_type": "outgoing",
+                "private": "false",
+                "content_attributes": json.dumps(content_attributes, ensure_ascii=False),
+            }
+            response = await self._transport.request_multipart(
+                "POST", path, self._bot_token, fields, attachment
+            )
+        return _message_id(response)
 
     async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool:
         messages = await self.get_messages(conversation_id)
@@ -219,6 +281,16 @@ class ChatwootClient:
             and message["content_attributes"].get("bot_turn_key") == turn_key
             for message in messages
         )
+
+    async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None:
+        messages = await self.get_messages(conversation_id)
+        match = next((
+            message
+            for message in messages
+            if isinstance(message.get("content_attributes"), dict)
+            and message["content_attributes"].get("bot_turn_key") == turn_key
+        ), None)
+        return _message_id(match)
 
 
 def _as_object(payload: Any) -> dict[str, Any]:
@@ -235,3 +307,9 @@ def _messages_from_payload(payload: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(candidates, list):
         raise ChatwootApiError("invalid_messages_payload", 200)
     return tuple(item for item in candidates if isinstance(item, dict))
+
+
+def _message_id(payload: Any) -> int | None:
+    if isinstance(payload, dict) and type(payload.get("id")) is int:
+        return payload["id"]
+    return None

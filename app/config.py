@@ -40,6 +40,22 @@ class Settings(BaseSettings):
     chatwoot_listen_port: int = Field(default=8080, ge=1, le=65535)
     certificate_database_password: str = ""
     certificate_identity_key: str = ""
+    certificate_s3_endpoint: str = "https://storage.yandexcloud.net"
+    certificate_s3_region: str = "ru-central1"
+    certificate_s3_bucket: str = ""
+    certificate_s3_access_key_id: str = ""
+    certificate_s3_secret_access_key: str = ""
+
+    def certificate_s3_configuration_error(self) -> str | None:
+        required = {
+            "CERTIFICATE_S3_ENDPOINT": self.certificate_s3_endpoint,
+            "CERTIFICATE_S3_REGION": self.certificate_s3_region,
+            "CERTIFICATE_S3_BUCKET": self.certificate_s3_bucket,
+            "CERTIFICATE_S3_ACCESS_KEY_ID": self.certificate_s3_access_key_id,
+            "CERTIFICATE_S3_SECRET_ACCESS_KEY": self.certificate_s3_secret_access_key,
+        }
+        missing = [name for name, value in required.items() if not value]
+        return f"missing certificate S3 configuration: {', '.join(missing)}" if missing else None
 
     @field_validator("yandex_cloud_folder_id", mode="before")
     @classmethod

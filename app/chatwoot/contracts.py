@@ -33,6 +33,31 @@ class StaffMessage:
     return_to_bot: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class MessageDeliveryChanged:
+    message_id: int
+    conversation_id: int
+    status: str
+
+
+def parse_message_delivery_changed(payload: object) -> MessageDeliveryChanged | None:
+    if not isinstance(payload, dict) or payload.get("event") != "message_updated":
+        return None
+    if payload.get("message_type") != "outgoing":
+        return None
+    status = payload.get("status")
+    conversation = payload.get("conversation")
+    if status not in {"sent", "delivered", "read", "failed"} or not isinstance(
+        conversation, dict
+    ):
+        return None
+    message_id = _positive_int(payload.get("id"))
+    conversation_id = _positive_int(conversation.get("id"))
+    if message_id is None or conversation_id is None:
+        return None
+    return MessageDeliveryChanged(message_id, conversation_id, status)
+
+
 def parse_staff_message(payload: object) -> StaffMessage | None:
     """Only authenticated Chatwoot User messages may control bot ownership."""
     if not isinstance(payload, dict) or payload.get("event") != "message_created":
