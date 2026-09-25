@@ -292,6 +292,15 @@ class ChatwootClient:
         ), None)
         return _message_id(match)
 
+    async def message_is_certificate(self, conversation_id: int, message_id: int) -> bool:
+        messages = await self.get_messages(conversation_id)
+        return any(
+            message.get("id") == message_id
+            and isinstance(message.get("content_attributes"), dict)
+            and message["content_attributes"].get("bot_sensitive_content") == "certificate"
+            for message in messages
+        )
+
 
 def _as_object(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):

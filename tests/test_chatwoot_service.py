@@ -86,6 +86,13 @@ class FakeChatwoot:
         reply = next((item for item in self.replies if item["turn_key"] == turn_key), None)
         return reply["message_id"] if reply else None
 
+    async def message_is_certificate(self, conversation_id: int, message_id: int) -> bool:
+        return any(
+            reply["message_id"] == message_id
+            and reply["sensitive_content"] == "certificate"
+            for reply in self.replies
+        )
+
     async def set_custom_attributes(self, conversation_id: int, attributes: dict[str, Any]) -> None:
         self.attributes.append(attributes)
         self.conversation["custom_attributes"] = {
@@ -296,13 +303,20 @@ async def test_pdf_certificate_is_sent_once_and_marked_submitted() -> None:
     api.replies.clear()
     await service.process(event("certificate:confirm", 42))
 
-    assert len(api.replies) == 2
+    assert len(api.replies) == 1
     assert api.replies[0]["turn_key"] == "message:42:certificate"
     assert api.replies[0]["attachment"].data == payload
-    assert api.replies[1]["turn_key"] == "message:42"
     assert len(submitted) == 1
     assert submitted[0][0]
     assert submitted[0][1] == 100
+
+    await service.process(MessageDeliveryChanged(100, 23, "sent"))
+    await service.process(MessageDeliveryChanged(100, 23, "delivered"))
+
+    assert len(api.replies) == 2
+    assert api.replies[1]["turn_key"] == "certificate-followup:100"
+    assert api.replies[1]["text"] == "Что можно сделать дальше?"
+    assert api.replies[1]["attachment"] is None
 
 
 async def _append(target: list[tuple[str, int]], key: str, message_id: int) -> None:
