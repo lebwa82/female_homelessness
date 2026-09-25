@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.certificate_documents import parse_certificate_pdf
@@ -15,5 +16,8 @@ def test_generated_pdf_batch_is_unique_parseable_and_has_expected_pool_mapping(
     assert all(item.is_test for item in parsed)
     assert len({item.activation_code for item in parsed}) == 4
     assert len({item.serial_number for item in parsed}) == 4
+    reference_time = datetime(2026, 9, 25, tzinfo=UTC)
+    assert all(item.valid_from is None or item.valid_from <= reference_time for item in parsed)
+    assert all(item.expires_at > reference_time for item in parsed)
     assert POOL_AIDS["pyaterochka"][1] == ("food_card", "children_card")
     assert POOL_AIDS["ozon"][1] == ("medicine_card", "hostel_3_nights")

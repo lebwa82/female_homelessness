@@ -129,7 +129,7 @@ def _pyaterochka(path: Path, number: str, nominal: int) -> None:
     _label(c, "НОМЕР И QR-PAYLOAD", 108 * mm, PAGE_H - 150 * mm, 9, muted, bold=True)
     _paragraph(c, number, 108 * mm, PAGE_H - 158 * mm, 76 * mm, 15, ink, 19)
     _label(c, "СРОК ДЕЙСТВИЯ", 108 * mm, PAGE_H - 185 * mm, 9, muted, bold=True)
-    _paragraph(c, "01.10.2026 - 30.09.2027", 108 * mm, PAGE_H - 193 * mm, 76 * mm, 12, ink, 16)
+    _paragraph(c, "01.01.2025 - 31.12.2030", 108 * mm, PAGE_H - 193 * mm, 76 * mm, 12, ink, 16)
     _label(c, "Как проверить сценарий", 18 * mm, PAGE_H - 232 * mm, 17, plum, bold=True)
     _paragraph(c, "1. Добавьте тестовые товары в чек.<br/>2. Выберите оплату подарочным сертификатом.<br/>3. Покажите QR-код на экране или откройте этот PDF.<br/>4. QR содержит тот же тестовый номер, который напечатан рядом.", 18 * mm, PAGE_H - 240 * mm, PAGE_W - 36 * mm, 10.5, ink, 15.5)
     _label(c, "Создано для тестирования выдачи PDF. Не является платёжным средством.", 18 * mm, 13 * mm, 8.5, muted)
