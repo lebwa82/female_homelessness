@@ -18,7 +18,7 @@ def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
     assert "scripts/certificate_pdf_runtime.py" in containerfile
     assert "scripts/reset_test_certificates.py" in containerfile
     assert "scripts/purge_test_certificates.py" in containerfile
-    assert "scripts/__init__.py" in containerfile
+    assert "scripts/__init__.py" not in containerfile
 
 
 def test_certificate_identity_key_is_kept_in_root_only_agent_environment() -> None:
