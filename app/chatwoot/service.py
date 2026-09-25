@@ -22,7 +22,7 @@ from app.chatwoot.routing import QueueRouter
 from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
 from app.release_info import active_release_info
-from app.service import CERTIFICATE_EXTRA_CHOICES, ConversationService
+from app.service import ConversationService
 from app.store import CertificateClaimResult, ConversationRecord, InMemoryConversationStore
 from app.ui import HUMAN_CHOICE
 
@@ -49,8 +49,6 @@ class ChatwootConversationApi(Protocol):
     async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool: ...
 
     async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None: ...
-
-    async def message_is_certificate(self, conversation_id: int, message_id: int) -> bool: ...
 
     async def set_custom_attributes(
         self, conversation_id: int, attributes: dict[str, Any]
@@ -131,22 +129,6 @@ class ChatwootAgentService:
                         await self._certificate_mark_delivered(event.message_id)
                 elif event.status == "failed" and self._certificate_mark_delivery_failed is not None:
                     await self._certificate_mark_delivery_failed(event.message_id)
-                if (
-                    event.status in {"sent", "delivered", "read"}
-                    and await self._api.message_is_certificate(
-                        event.conversation_id, event.message_id
-                    )
-                ):
-                    followup_key = f"certificate-followup:{event.message_id}"
-                    if not await self._api.has_reply_for_turn(
-                        event.conversation_id, followup_key
-                    ):
-                        await self._api.send_reply(
-                            event.conversation_id,
-                            text="Что можно сделать дальше?",
-                            choices=CERTIFICATE_EXTRA_CHOICES,
-                            turn_key=followup_key,
-                        )
                 return False
             if isinstance(event, StaffMessage):
                 await self._staff_message(event)
@@ -281,6 +263,16 @@ class ChatwootAgentService:
             if self._certificate_mark_failed is not None:
                 await self._certificate_mark_failed(attachment.issuance_key)
             raise
+        # Chatwoot dispatches attachments asynchronously. Give the document
+        # job a head start before creating the lightweight follow-up message,
+        # otherwise Telegram may display the latter first.
+        await asyncio.sleep(2)
+        await self._api.send_reply(
+            conversation_id,
+            text="Что можно сделать дальше?",
+            choices=turn.choices,
+            turn_key=turn_key,
+        )
 
     async def _persist_workflow(
         self,
