@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from scripts.import_chatwoot_certificate_pdfs import _certificate_paths
+
 ROOT = Path(__file__).parent.parent
 
 
@@ -19,6 +21,14 @@ def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
     assert "scripts/reset_test_certificates.py" in containerfile
     assert "scripts/purge_test_certificates.py" in containerfile
     assert "scripts/__init__.py" not in containerfile
+
+
+def test_certificate_import_ignores_macos_metadata_files(tmp_path: Path) -> None:
+    certificate = tmp_path / "certificate.pdf"
+    certificate.touch()
+    (tmp_path / "._certificate.pdf").touch()
+
+    assert _certificate_paths(tmp_path) == [certificate]
 
 
 def test_certificate_identity_key_is_kept_in_root_only_agent_environment() -> None:

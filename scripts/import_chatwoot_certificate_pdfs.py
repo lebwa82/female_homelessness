@@ -10,8 +10,12 @@ from app.certificate_documents import CertificateObjectRef, parse_certificate_pd
 from scripts.certificate_pdf_runtime import services
 
 
+def _certificate_paths(directory: Path) -> list[Path]:
+    return sorted(path for path in directory.glob("*.pdf") if not path.name.startswith("."))
+
+
 async def run(directory: Path) -> None:
-    paths = sorted(directory.glob("*.pdf"))
+    paths = _certificate_paths(directory)
     if not paths:
         raise ValueError("no PDF certificates found")
     parsed = [parse_certificate_pdf(path.read_bytes(), path.name) for path in paths]
