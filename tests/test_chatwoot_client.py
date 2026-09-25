@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -199,6 +200,31 @@ async def test_detects_previously_sent_turn_key_before_retrying() -> None:
     )
 
     assert await client(transport).has_reply_for_turn(23, "message:41") is True
+
+
+@pytest.mark.asyncio
+async def test_waits_for_telegram_source_id_before_followup(monkeypatch) -> None:
+    path = "/api/v1/accounts/12/conversations/23/messages"
+
+    @dataclass
+    class DeliveryTransport(RecordingTransport):
+        reads: int = 0
+
+        async def request(self, method, request_path, token, payload=None):
+            if method == "GET" and request_path == path:
+                self.reads += 1
+                source_id = None if self.reads == 1 else "telegram-message-91"
+                return {"payload": [{"id": 91, "status": "sent", "source_id": source_id}]}
+            return await super().request(method, request_path, token, payload)
+
+    delay = AsyncMock()
+    monkeypatch.setattr("app.chatwoot.client.asyncio.sleep", delay)
+    transport = DeliveryTransport()
+
+    await client(transport).wait_for_external_delivery(23, 91)
+
+    assert transport.reads == 2
+    delay.assert_awaited_once_with(0.25)
 
 
 @pytest.mark.asyncio

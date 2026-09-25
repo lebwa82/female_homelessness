@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -62,6 +61,7 @@ class FakeChatwoot:
     notes: list[str] = field(default_factory=list)
     reply_exists: bool = False
     note_keys: set[str] = field(default_factory=set)
+    external_delivery_waits: list[tuple[int, int]] = field(default_factory=list)
 
     async def get_teams(self):
         return ({"id": 9, "name": "Дежурные", "description": "Общая очередь"},)
@@ -86,6 +86,13 @@ class FakeChatwoot:
     async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None:
         reply = next((item for item in self.replies if item["turn_key"] == turn_key), None)
         return reply["message_id"] if reply else None
+
+    async def wait_for_external_delivery(self, conversation_id: int, message_id: int) -> None:
+        assert any(
+            reply["message_id"] == message_id and reply["attachment"] is not None
+            for reply in self.replies
+        )
+        self.external_delivery_waits.append((conversation_id, message_id))
 
     async def set_custom_attributes(self, conversation_id: int, attributes: dict[str, Any]) -> None:
         self.attributes.append(attributes)
@@ -260,7 +267,6 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
 
 @pytest.mark.asyncio
 async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = FakeChatwoot()
     api.conversation["custom_attributes"].update(
@@ -289,8 +295,6 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
         ))
 
     submitted: list[tuple[str, int]] = []
-    delay = AsyncMock()
-    monkeypatch.setattr("app.chatwoot.service.asyncio.sleep", delay)
     service = ChatwootAgentService(
         api,
         certificate_claim=claim,
@@ -307,7 +311,7 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
     assert api.replies[1]["turn_key"] == "message:42"
     assert api.replies[1]["text"] == "Что можно сделать дальше?"
     assert api.replies[1]["attachment"] is None
-    delay.assert_awaited_once_with(2)
+    assert api.external_delivery_waits == [(23, 100)]
     assert len(submitted) == 1
     assert submitted[0][0]
     assert submitted[0][1] == 100

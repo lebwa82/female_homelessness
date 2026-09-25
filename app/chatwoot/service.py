@@ -50,6 +50,10 @@ class ChatwootConversationApi(Protocol):
 
     async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None: ...
 
+    async def wait_for_external_delivery(
+        self, conversation_id: int, message_id: int
+    ) -> None: ...
+
     async def set_custom_attributes(
         self, conversation_id: int, attributes: dict[str, Any]
     ) -> None: ...
@@ -263,10 +267,9 @@ class ChatwootAgentService:
             if self._certificate_mark_failed is not None:
                 await self._certificate_mark_failed(attachment.issuance_key)
             raise
-        # Chatwoot dispatches attachments asynchronously. Give the document
-        # job a head start before creating the lightweight follow-up message,
-        # otherwise Telegram may display the latter first.
-        await asyncio.sleep(2)
+        # Chatwoot stores Telegram's external message ID only after sendDocument
+        # returns, so this is an exact delivery-order barrier rather than a delay.
+        await self._api.wait_for_external_delivery(conversation_id, message_id)
         await self._api.send_reply(
             conversation_id,
             text="Что можно сделать дальше?",

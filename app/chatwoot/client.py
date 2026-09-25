@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -291,6 +292,34 @@ class ChatwootClient:
             and message["content_attributes"].get("bot_turn_key") == turn_key
         ), None)
         return _message_id(match)
+
+    async def wait_for_external_delivery(
+        self,
+        conversation_id: int,
+        message_id: int,
+        *,
+        timeout_seconds: float = 60,
+        poll_interval_seconds: float = 0.25,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            message = next(
+                (
+                    item
+                    for item in await self.get_messages(conversation_id)
+                    if item.get("id") == message_id
+                ),
+                None,
+            )
+            if message is not None:
+                if message.get("status") == "failed":
+                    raise ChatwootApiError("external_delivery", 502)
+                if message.get("source_id") not in {None, ""}:
+                    return
+            if loop.time() >= deadline:
+                raise ChatwootApiError("external_delivery", 504)
+            await asyncio.sleep(poll_interval_seconds)
 
 def _as_object(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
