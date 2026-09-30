@@ -23,6 +23,21 @@ def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
     assert "scripts/__init__.py" not in containerfile
 
 
+def test_certificate_admin_bot_is_a_separate_service_using_the_agent_image() -> None:
+    compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
+    unit = (ROOT / "deploy/chatwoot/women-help-certificate-admin.service").read_text(
+        encoding="utf-8"
+    )
+
+    block = compose.split("  certificate-admin-bot:\n", 1)[1].split(
+        "\n  telegram-proxy:", 1
+    )[0]
+    assert "localhost/women-help-chatwoot-agent:current" in block
+    assert "app.certificate_admin_bot" in block
+    assert "CERTIFICATE_ADMIN_BOT_TOKEN" not in compose
+    assert "up -d certificate-admin-bot" in unit
+
+
 def test_certificate_import_ignores_macos_metadata_files(tmp_path: Path) -> None:
     certificate = tmp_path / "certificate.pdf"
     certificate.touch()

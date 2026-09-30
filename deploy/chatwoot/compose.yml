@@ -99,6 +99,16 @@ services:
     profiles: ["agent"]
     restart: unless-stopped
 
+  certificate-admin-bot:
+    image: localhost/women-help-chatwoot-agent:current
+    env_file:
+      - /etc/women-help-agent.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command: ["/app/.venv/bin/python", "-m", "app.certificate_admin_bot"]
+    profiles: ["certificate-admin"]
+    restart: unless-stopped
+
   telegram-proxy:
     image: localhost/women-help-chatwoot-agent:current
     env_file:

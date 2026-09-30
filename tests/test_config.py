@@ -41,3 +41,19 @@ def test_chatwoot_requires_a_url_safe_webhook_secret() -> None:
     )
 
     assert configured.chatwoot_configuration_error() == "invalid CHATWOOT_WEBHOOK_SECRET"
+
+
+def test_certificate_admin_owner_ids_are_positive_unique_numbers() -> None:
+    configured = Settings(CERTIFICATE_ADMIN_BOOTSTRAP_OWNER_IDS="123, 456,123")
+
+    assert configured.certificate_admin_owner_ids() == (123, 456)
+
+
+def test_certificate_admin_keeps_the_existing_fifteen_file_target() -> None:
+    assert Settings(_env_file=None).certificate_admin_target_batch_size == 15
+
+
+def test_certificate_admin_bootstrap_username_is_normalized() -> None:
+    configured = Settings(CERTIFICATE_ADMIN_BOOTSTRAP_USERNAME="@Wiggeren")
+
+    assert configured.certificate_admin_username() == "wiggeren"

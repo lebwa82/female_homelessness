@@ -119,6 +119,11 @@ sudo podman build \
 sudo podman pull docker.io/chatwoot/chatwoot:latest </dev/null
 agent_was_active=0
 ingress_was_active=0
+certificate_admin_was_active=0
+if sudo systemctl is-active --quiet women-help-certificate-admin.service; then
+  certificate_admin_was_active=1
+  sudo systemctl stop women-help-certificate-admin.service </dev/null
+fi
 if sudo systemctl is-active --quiet women-help-telegram-ingress.service; then
   ingress_was_active=1
   sudo systemctl stop women-help-telegram-ingress.service </dev/null
@@ -142,6 +147,8 @@ sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-chatwoot-agent.serv
   /etc/systemd/system/women-help-chatwoot-agent.service
 sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-telegram-ingress.service" \
   /etc/systemd/system/women-help-telegram-ingress.service
+sudo install -m 0644 "$TARGET_DIR/deploy/chatwoot/women-help-certificate-admin.service" \
+  /etc/systemd/system/women-help-certificate-admin.service
 sudo systemctl daemon-reload
 
 cd "$TARGET_DIR"
@@ -155,6 +162,9 @@ if [[ "$agent_was_active" == 1 ]]; then
 fi
 if [[ "$ingress_was_active" == 1 ]]; then
   sudo systemctl start women-help-telegram-ingress.service </dev/null
+fi
+if [[ "$certificate_admin_was_active" == 1 ]]; then
+  sudo systemctl start women-help-certificate-admin.service </dev/null
 fi
 
 chatwoot_hostname="$(sudo /usr/bin/awk -F= '$1 == "CHATWOOT_HOSTNAME" {print $2}' "$CHATWOOT_ENV")"

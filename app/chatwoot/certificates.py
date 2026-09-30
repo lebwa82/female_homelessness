@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -18,6 +20,15 @@ POOL_AIDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "ozon": ("Ozon", ("medicine_card", "hostel_3_nights")),
     "pyaterochka": ("Пятёрочка", ("food_card", "children_card")),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class CertificatePoolStock:
+    slug: str
+    provider: str
+    available: int
+    total: int
+    nearest_expiry: datetime | None
 
 
 def database_url(password: str) -> str:
@@ -228,6 +239,103 @@ class CertificateInventory:
                 else:
                     raise ValueError("certificate already exists or conflicts with inventory")
         return imported, duplicates
+
+    async def import_admin_batch(
+        self,
+        documents: Iterable[tuple[ParsedCertificatePdf, CertificateObjectRef]],
+        *,
+        batch_id: int,
+        admin_id: int,
+    ) -> int:
+        """Commit inventory rows and their durable admin-batch receipt together."""
+        imported = 0
+        async with self._engine.begin() as connection:
+            batch = (await connection.execute(text("""
+                SELECT 1 FROM women_help_certificate_import_batches
+                WHERE id = :batch_id AND admin_id = :admin_id
+                  AND status = 'awaiting_confirmation' AND expires_at > now()
+                FOR UPDATE
+            """), {"batch_id": batch_id, "admin_id": admin_id})).first()
+            if batch is None:
+                raise ValueError("certificate import batch is not confirmable")
+            for parsed, ref in documents:
+                result = await connection.execute(text("""
+                    INSERT INTO women_help_pdf_certificates
+                        (pool_id, nominal_rubles, activation_code, serial_number,
+                         valid_from, expires_at, pdf_bucket, pdf_object_key,
+                         pdf_version_id, pdf_sha256, pdf_size, pdf_filename, is_test)
+                    SELECT id, :nominal_rubles, :activation_code, :serial_number,
+                           :valid_from, :expires_at, :pdf_bucket, :pdf_object_key,
+                           :pdf_version_id, :pdf_sha256, :pdf_size, :pdf_filename, :is_test
+                    FROM women_help_certificate_pools WHERE slug = :provider_slug
+                    ON CONFLICT DO NOTHING RETURNING id
+                """), {
+                    "provider_slug": parsed.provider_slug,
+                    "nominal_rubles": parsed.nominal_rubles,
+                    "activation_code": parsed.activation_code,
+                    "serial_number": parsed.serial_number,
+                    "valid_from": parsed.valid_from,
+                    "expires_at": parsed.expires_at,
+                    "pdf_bucket": ref.bucket,
+                    "pdf_object_key": ref.key,
+                    "pdf_version_id": ref.version_id,
+                    "pdf_sha256": ref.sha256,
+                    "pdf_size": ref.size,
+                    "pdf_filename": parsed.filename,
+                    "is_test": parsed.is_test,
+                })
+                if result.first() is None:
+                    raise ValueError("certificate already exists or conflicts with inventory")
+                imported += 1
+            await connection.execute(text("""
+                UPDATE women_help_certificate_import_batches
+                SET status = 'imported', confirmed_at = now(), updated_at = now()
+                WHERE id = :batch_id
+            """), {"batch_id": batch_id})
+            await connection.execute(text("""
+                UPDATE women_help_certificate_import_items
+                SET status = 'imported', activation_code = NULL, serial_number = NULL,
+                    pdf_bucket = NULL, pdf_object_key = NULL, pdf_version_id = NULL
+                WHERE batch_id = :batch_id AND status = 'ready'
+            """), {"batch_id": batch_id})
+        return imported
+
+    async def contains_document(self, parsed: ParsedCertificatePdf) -> bool:
+        """Check all inventory identities without exposing any bearer value."""
+        async with self._engine.connect() as connection:
+            row = (await connection.execute(text("""
+                SELECT 1 FROM women_help_pdf_certificates
+                WHERE activation_code = :activation_code
+                   OR serial_number = :serial_number
+                   OR pdf_sha256 = :pdf_sha256
+                LIMIT 1
+            """), {
+                "activation_code": parsed.activation_code,
+                "serial_number": parsed.serial_number,
+                "pdf_sha256": parsed.pdf_sha256,
+            })).first()
+            return row is not None
+
+    async def stock(self) -> tuple[CertificatePoolStock, ...]:
+        async with self._engine.connect() as connection:
+            rows = (await connection.execute(text("""
+                SELECT p.slug, p.provider,
+                    count(c.id) FILTER (
+                        WHERE c.status = 'available'
+                          AND (c.valid_from IS NULL OR c.valid_from <= now())
+                          AND c.expires_at > now()
+                    )::int AS available,
+                    count(c.id)::int AS total,
+                    min(c.expires_at) FILTER (
+                        WHERE c.status = 'available'
+                          AND (c.valid_from IS NULL OR c.valid_from <= now())
+                          AND c.expires_at > now()
+                    ) AS nearest_expiry
+                FROM women_help_certificate_pools p
+                LEFT JOIN women_help_pdf_certificates c ON c.pool_id = p.id
+                GROUP BY p.id, p.slug, p.provider ORDER BY p.slug
+            """))).mappings()
+            return tuple(CertificatePoolStock(**row) for row in rows)
 
     async def reset_test(self) -> int:
         async with self._engine.begin() as connection:

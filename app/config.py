@@ -45,6 +45,31 @@ class Settings(BaseSettings):
     certificate_s3_bucket: str = ""
     certificate_s3_access_key_id: str = ""
     certificate_s3_secret_access_key: str = ""
+    certificate_admin_bot_token: str = ""
+    certificate_admin_bootstrap_owner_ids: str = ""
+    certificate_admin_bootstrap_username: str = ""
+    certificate_admin_invite_ttl_hours: int = Field(default=24, ge=1, le=168)
+    certificate_admin_batch_ttl_hours: int = Field(default=24, ge=1, le=168)
+    certificate_admin_target_batch_size: int = Field(default=15, ge=1, le=100)
+
+    def certificate_admin_owner_ids(self) -> tuple[int, ...]:
+        values: list[int] = []
+        for raw in self.certificate_admin_bootstrap_owner_ids.split(","):
+            value = raw.strip()
+            if not value:
+                continue
+            if not value.isascii() or not value.isdigit() or int(value) <= 0:
+                raise ValueError("CERTIFICATE_ADMIN_BOOTSTRAP_OWNER_IDS must contain positive IDs")
+            values.append(int(value))
+        return tuple(dict.fromkeys(values))
+
+    def certificate_admin_username(self) -> str | None:
+        value = self.certificate_admin_bootstrap_username.strip().removeprefix("@").lower()
+        if not value:
+            return None
+        if not re.fullmatch(r"[a-z0-9_]{5,32}", value):
+            raise ValueError("CERTIFICATE_ADMIN_BOOTSTRAP_USERNAME is invalid")
+        return value
 
     def certificate_s3_configuration_error(self) -> str | None:
         required = {
