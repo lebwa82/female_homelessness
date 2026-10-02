@@ -50,7 +50,6 @@ class Settings(BaseSettings):
     certificate_admin_bootstrap_username: str = ""
     certificate_admin_invite_ttl_hours: int = Field(default=24, ge=1, le=168)
     certificate_admin_batch_ttl_hours: int = Field(default=24, ge=1, le=168)
-    certificate_admin_target_batch_size: int = Field(default=15, ge=1, le=100)
 
     def certificate_admin_owner_ids(self) -> tuple[int, ...]:
         values: list[int] = []

@@ -341,7 +341,6 @@ just certificates-purge-test 158.160.16.252
 ```dotenv
 CERTIFICATE_ADMIN_BOT_TOKEN=replace-with-separate-telegram-bot-token
 CERTIFICATE_ADMIN_BOOTSTRAP_USERNAME=wiggeren
-CERTIFICATE_ADMIN_TARGET_BATCH_SIZE=15
 ```
 
 При первом `/start` бот сверяет bootstrap username, получает официальный числовой
@@ -358,9 +357,10 @@ sudo systemctl enable --now women-help-certificate-admin.service
 
 При загрузке сотрудник выбирает Ozon или «Пятёрочку», а фактический провайдер всё
 равно проверяется по PDF. Ozon попадает в общий пул лекарств и хостела,
-«Пятёрочка» — в общий пул продуктов и детских товаров. Пачка по умолчанию ожидает
-15 файлов, но это ориентир, а не жёсткий лимит. Полные коды не выводятся в
-предпросмотр и журналы.
+«Пятёрочка» — в общий пул продуктов и детских товаров. Одна пачка принимает
+любое количество файлов до нажатия «Завершить загрузку». Массовая отправка
+объединяется в один итоговый статус, даже если Telegram разделил PDF на несколько
+сообщений. Полные коды не выводятся в предпросмотр и журналы.
 
 Актуальная референсная схема разговора сохранена в
 [`docs/nevidimy-bot-scenario-final.html`](docs/nevidimy-bot-scenario-final.html).

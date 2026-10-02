@@ -5,11 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from dataclasses import dataclass
+from time import monotonic
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 from app.certificate_admin import (
     BatchSummary,
@@ -28,6 +38,9 @@ from scripts.certificate_pdf_runtime import services
 
 logger = logging.getLogger(__name__)
 CLEANUP_INTERVAL_SECONDS = 10 * 60
+UPLOAD_DEBOUNCE_SECONDS = 2.0
+UPLOAD_PROGRESS_INTERVAL_SECONDS = 5.0
+UPLOAD_CONCURRENCY = 4
 
 POOL_LABELS = {"ozon": "Ozon", "pyaterochka": "Пятёрочка"}
 AID_LABELS = {
@@ -45,24 +58,151 @@ def _keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     ])
 
 
-def _main_keyboard(admin: CertificateAdmin) -> InlineKeyboardMarkup:
-    rows = [
-        [("Загрузить сертификаты", "menu:upload")],
-        [("Остатки", "menu:stock")],
-    ]
+def _reply_keyboard(rows: list[list[str]]) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=label) for label in row] for row in rows],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def _main_keyboard(admin: CertificateAdmin) -> ReplyKeyboardMarkup:
+    rows = [["Загрузить сертификаты"], ["Остатки"]]
     if admin.role == "owner":
-        rows.append([("Администраторы", "menu:admins")])
-    return _keyboard(rows)
+        rows.append(["Администраторы"])
+    return _reply_keyboard(rows)
+
+
+def _batch_keyboard() -> ReplyKeyboardMarkup:
+    return _reply_keyboard([["Завершить загрузку", "Отменить загрузку"], ["Меню"]])
+
+
+def _confirmation_keyboard() -> ReplyKeyboardMarkup:
+    return _reply_keyboard([["Импортировать сертификаты", "Отменить загрузку"], ["Меню"]])
 
 
 def _batch_text(summary: BatchSummary) -> str:
     provider, aids = POOL_AIDS[summary.pool_slug]
     categories = ", ".join(AID_LABELS[aid] for aid in aids)
     return (
-        f"{provider}: получено {summary.received} из ожидаемых {summary.target_count}.\n"
-        f"Готово: {summary.ready}; дубликаты: {summary.duplicates}; "
+        f"{provider}\n\nПолучено: {summary.received}\n"
+        f"Готово к импорту: {summary.ready}; дубликаты: {summary.duplicates}; "
         f"ошибки: {summary.invalid}.\nКатегории: {categories}."
     )
+
+
+@dataclass(slots=True)
+class _UploadState:
+    pending: int = 0
+    generation: int = 0
+    progress_message_id: int | None = None
+    next_progress_at: float = 0.0
+    final_task: asyncio.Task[None] | None = None
+
+
+class UploadProgressCoordinator:
+    """Collapse many Telegram document updates into one batch status message."""
+
+    def __init__(self, repository: CertificateAdminRepository) -> None:
+        self._repository = repository
+        self._states: dict[tuple[int, int], _UploadState] = {}
+        self._lock = asyncio.Lock()
+
+    async def begin(self, bot: Bot, admin_id: int, batch_id: int) -> None:
+        key = (admin_id, batch_id)
+        async with self._lock:
+            state = self._states.setdefault(key, _UploadState())
+            if state.final_task is not None:
+                state.final_task.cancel()
+                state.final_task = None
+            if state.progress_message_id is None:
+                try:
+                    sent = await bot.send_message(
+                        admin_id,
+                        "Получаю и проверяю сертификаты…",
+                        reply_markup=_batch_keyboard(),
+                    )
+                    state.progress_message_id = sent.message_id
+                except Exception as error:  # noqa: BLE001 - Telegram errors may contain payloads
+                    logger.warning(
+                        "Certificate upload progress notification failed kind=%s",
+                        type(error).__name__,
+                    )
+                state.next_progress_at = monotonic() + UPLOAD_PROGRESS_INTERVAL_SECONDS
+            state.pending += 1
+            state.generation += 1
+
+    async def complete(self, bot: Bot, admin_id: int, batch_id: int) -> None:
+        key = (admin_id, batch_id)
+        update_progress = False
+        progress_message_id: int | None = None
+        async with self._lock:
+            state = self._states.get(key)
+            if state is None:
+                return
+            state.pending = max(0, state.pending - 1)
+            state.generation += 1
+            generation = state.generation
+            if state.pending == 0:
+                state.final_task = asyncio.create_task(
+                    self._send_final_after_pause(bot, admin_id, batch_id, generation)
+                )
+            elif monotonic() >= state.next_progress_at:
+                update_progress = True
+                progress_message_id = state.progress_message_id
+                state.next_progress_at = monotonic() + UPLOAD_PROGRESS_INTERVAL_SECONDS
+        if update_progress and progress_message_id is not None:
+            summary = await self._repository.summary(admin_id, batch_id)
+            if summary is not None:
+                with suppress(Exception):
+                    await bot.edit_message_text(
+                        _batch_text(summary) + "\n\nОбработка продолжается…",
+                        chat_id=admin_id,
+                        message_id=progress_message_id,
+                    )
+
+    async def pending(self, admin_id: int, batch_id: int) -> int:
+        async with self._lock:
+            state = self._states.get((admin_id, batch_id))
+            return state.pending if state is not None else 0
+
+    async def forget(self, admin_id: int, batch_id: int) -> None:
+        async with self._lock:
+            state = self._states.pop((admin_id, batch_id), None)
+            if state is not None and state.final_task is not None:
+                state.final_task.cancel()
+
+    async def _send_final_after_pause(
+        self, bot: Bot, admin_id: int, batch_id: int, generation: int
+    ) -> None:
+        try:
+            await asyncio.sleep(UPLOAD_DEBOUNCE_SECONDS)
+            async with self._lock:
+                state = self._states.get((admin_id, batch_id))
+                if state is None or state.pending != 0 or state.generation != generation:
+                    return
+            summary = await self._repository.summary(admin_id, batch_id)
+            if summary is not None and summary.status == "collecting":
+                await bot.send_message(
+                    admin_id,
+                    _batch_text(summary),
+                    reply_markup=_batch_keyboard(),
+                )
+            async with self._lock:
+                state = self._states.get((admin_id, batch_id))
+                if state is not None and state.pending == 0 and state.generation == generation:
+                    self._states.pop((admin_id, batch_id), None)
+        except asyncio.CancelledError:
+            return
+        except Exception as error:  # noqa: BLE001 - Telegram errors may contain payloads
+            logger.warning(
+                "Certificate upload final notification failed kind=%s",
+                type(error).__name__,
+            )
+            async with self._lock:
+                state = self._states.get((admin_id, batch_id))
+                if state is not None and state.pending == 0 and state.generation == generation:
+                    self._states.pop((admin_id, batch_id), None)
 
 
 async def _delete_refs(
@@ -82,6 +222,8 @@ def build_dispatcher(
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     bot_username: str | None = None
+    progress = UploadProgressCoordinator(repository)
+    upload_slots = asyncio.Semaphore(UPLOAD_CONCURRENCY)
 
     async def admin_for(user_id: int, display_name: str) -> CertificateAdmin | None:
         admin = await repository.admin(user_id)
@@ -94,10 +236,23 @@ def build_dispatcher(
         if admin is None:
             await bot.send_message(user_id, "Доступ к этому боту не предоставлен.")
             return
+        active = await repository.active_batch(admin.telegram_user_id)
+        if active is not None:
+            summary = await repository.summary(admin.telegram_user_id, active.id)
+            if summary is not None:
+                if active.status == "awaiting_confirmation":
+                    await bot.send_message(
+                        user_id,
+                        _batch_text(summary) + "\n\nИмпортировать готовые сертификаты?",
+                        reply_markup=_confirmation_keyboard(),
+                    )
+                else:
+                    await bot.send_message(
+                        user_id, _batch_text(summary), reply_markup=_batch_keyboard()
+                    )
+                return
         await bot.send_message(
-            user_id,
-            "Управление сертификатами",
-            reply_markup=_main_keyboard(admin),
+            user_id, "Управление сертификатами", reply_markup=_main_keyboard(admin)
         )
 
     async def show_stock(bot: Bot, admin: CertificateAdmin) -> None:
@@ -107,10 +262,7 @@ def build_dispatcher(
         for slug in ("ozon", "pyaterochka"):
             row = by_slug.get(slug)
             available = row.available if row is not None else 0
-            lines.append(
-                f"{POOL_LABELS[slug]}: доступно {available}; "
-                f"ориентир {settings.certificate_admin_target_batch_size}"
-            )
+            lines.append(f"{POOL_LABELS[slug]}: доступно {available}")
         await bot.send_message(
             admin.telegram_user_id, "\n".join(lines), reply_markup=_main_keyboard(admin)
         )
@@ -150,6 +302,13 @@ def build_dispatcher(
             )
         await show_menu(bot, message.from_user.id, message.from_user.full_name)
 
+    @dispatcher.message(Command("menu"))
+    @dispatcher.message(F.text == "Меню")
+    async def menu_command(message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        await show_menu(bot, message.from_user.id, message.from_user.full_name)
+
     @dispatcher.message(Command("cancel"))
     async def cancel_command(message: Message) -> None:
         if message.from_user is None or message.chat.type != "private":
@@ -159,13 +318,15 @@ def build_dispatcher(
             return
         batch = await repository.active_batch(admin.telegram_user_id)
         if batch is None:
-            await message.answer("Активной загрузки нет.")
+            await message.answer("Активной загрузки нет.", reply_markup=_main_keyboard(admin))
             return
+        await progress.forget(admin.telegram_user_id, batch.id)
         refs = await repository.cancel_batch(admin.telegram_user_id, batch.id)
         await _delete_refs(object_store, refs)
         await message.answer("Загрузка отменена.", reply_markup=_main_keyboard(admin))
 
     @dispatcher.message(Command("stock"))
+    @dispatcher.message(F.text == "Остатки")
     async def stock_command(message: Message, bot: Bot) -> None:
         if message.from_user is None or message.chat.type != "private":
             return
@@ -175,12 +336,7 @@ def build_dispatcher(
 
     private_callback = F.message.chat.type == "private"
 
-    @dispatcher.callback_query(private_callback & (F.data == "menu:upload"))
-    async def choose_pool(query: CallbackQuery, bot: Bot) -> None:
-        admin = await admin_for(query.from_user.id, query.from_user.full_name)
-        await query.answer()
-        if admin is None:
-            return
+    async def choose_pool_for(admin: CertificateAdmin, bot: Bot) -> None:
         active = await repository.active_batch(admin.telegram_user_id)
         if active is not None:
             summary = await repository.summary(admin.telegram_user_id, active.id)
@@ -188,10 +344,11 @@ def build_dispatcher(
                 await bot.send_message(
                     admin.telegram_user_id,
                     _batch_text(summary),
-                    reply_markup=_keyboard([[
-                        ("Завершить", f"batch:finish:{active.id}"),
-                        ("Отменить", f"batch:cancel:{active.id}"),
-                    ]]),
+                    reply_markup=(
+                        _confirmation_keyboard()
+                        if active.status == "awaiting_confirmation"
+                        else _batch_keyboard()
+                    ),
                 )
             return
         await bot.send_message(
@@ -203,6 +360,22 @@ def build_dispatcher(
             ]]),
         )
 
+    @dispatcher.message(F.text == "Загрузить сертификаты")
+    async def choose_pool_message(message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        admin = await admin_for(message.from_user.id, message.from_user.full_name)
+        if admin is not None:
+            await choose_pool_for(admin, bot)
+
+    @dispatcher.callback_query(private_callback & (F.data == "menu:upload"))
+    async def choose_pool(query: CallbackQuery, bot: Bot) -> None:
+        admin = await admin_for(query.from_user.id, query.from_user.full_name)
+        await query.answer()
+        if admin is None:
+            return
+        await choose_pool_for(admin, bot)
+
     @dispatcher.callback_query(
         private_callback & F.data.in_({"upload:ozon", "upload:pyaterochka"})
     )
@@ -213,10 +386,9 @@ def build_dispatcher(
             return
         pool_slug = query.data.split(":", 1)[1]
         try:
-            batch = await repository.start_batch(
+            await repository.start_batch(
                 admin.telegram_user_id,
                 pool_slug,
-                target_count=settings.certificate_admin_target_batch_size,
                 ttl_hours=settings.certificate_admin_batch_ttl_hours,
             )
         except Exception as error:  # noqa: BLE001 - keep database details out of Telegram/logs
@@ -228,11 +400,9 @@ def build_dispatcher(
         await bot.send_message(
             admin.telegram_user_id,
             f"Загрузка {POOL_LABELS[pool_slug]}.\nКатегории: {categories}.\n"
-            f"Ожидается файлов: {batch.target_count}. Отправляйте PDF по одному или пачкой.",
-            reply_markup=_keyboard([[
-                ("Завершить", f"batch:finish:{batch.id}"),
-                ("Отменить", f"batch:cancel:{batch.id}"),
-            ]]),
+            "Отправляйте PDF по одному или пачкой. Когда закончите, нажмите "
+            "«Завершить загрузку».",
+            reply_markup=_batch_keyboard(),
         )
 
     @dispatcher.message(F.document)
@@ -244,85 +414,95 @@ def build_dispatcher(
             return  # Never download an unauthorized user's file.
         batch = await repository.active_batch(admin.telegram_user_id)
         if batch is None or batch.status != "collecting":
-            await message.answer("Сначала начните новую загрузку через меню.")
+            await message.answer(
+                "Нет активной загрузки. Выберите «Загрузить сертификаты».",
+                reply_markup=_main_keyboard(admin),
+            )
             return
         filename = message.document.file_name or "certificate.pdf"
-        if (
-            message.document.file_size is not None
-            and message.document.file_size > MAX_CERTIFICATE_PDF_BYTES
-        ):
-            await repository.add_rejected(batch.id, filename, "invalid", "file_too_large")
-            await message.answer("Файл отклонён: размер превышает 10 MiB.")
-            return
+        await progress.begin(bot, admin.telegram_user_id, batch.id)
         try:
-            downloaded = await bot.download(message.document)
-            if downloaded is None:
-                raise ValueError("download returned no data")
-            pdf_bytes = downloaded.read()
-            parsed = await asyncio.to_thread(parse_certificate_pdf, pdf_bytes, filename)
-        except Exception as error:  # noqa: BLE001 - parser inputs and SDK payloads are sensitive
-            logger.info("Certificate PDF rejected kind=%s", type(error).__name__)
-            await repository.add_rejected(batch.id, filename, "invalid", "invalid_pdf")
-            await message.answer("Файл не распознан как поддерживаемый сертификат.")
-            return
-        if parsed.provider_slug != batch.pool_slug:
-            await repository.add_rejected(batch.id, filename, "invalid", "provider_mismatch")
-            await message.answer("Тип сертификата не совпадает с выбранной загрузкой.")
-            return
-        if await inventory.contains_document(parsed):
-            await repository.add_rejected(batch.id, filename, "duplicate", "already_imported")
-            await message.answer("Этот сертификат уже есть в инвентаре.")
-            return
-        ref: CertificateObjectRef | None = None
-        try:
-            ref = await object_store.upload(parsed)
-            added = await repository.add_ready(batch.id, filename, parsed, ref)
-            if not added:
-                await object_store.delete(ref)
-                await repository.add_rejected(batch.id, filename, "duplicate", "batch_duplicate")
-                await message.answer("Этот сертификат уже есть в текущей пачке.")
-                return
-        except Exception as error:  # noqa: BLE001 - never log certificate or object details
-            if ref is not None:
-                with suppress(Exception):
-                    await object_store.delete(ref)
-            logger.warning("Certificate staging failed kind=%s", type(error).__name__)
-            await message.answer("Не удалось безопасно сохранить файл. Попробуйте ещё раз.")
-            return
-        summary = await repository.summary(admin.telegram_user_id, batch.id)
-        if summary is not None:
-            await message.answer(_batch_text(summary))
+            async with upload_slots:
+                if (
+                    message.document.file_size is not None
+                    and message.document.file_size > MAX_CERTIFICATE_PDF_BYTES
+                ):
+                    await repository.add_rejected(
+                        batch.id, filename, "invalid", "file_too_large"
+                    )
+                    return
+                try:
+                    downloaded = await bot.download(message.document)
+                    if downloaded is None:
+                        raise ValueError("download returned no data")
+                    pdf_bytes = downloaded.read()
+                    parsed = await asyncio.to_thread(parse_certificate_pdf, pdf_bytes, filename)
+                except Exception as error:  # noqa: BLE001 - parser inputs may be sensitive
+                    logger.info("Certificate PDF rejected kind=%s", type(error).__name__)
+                    await repository.add_rejected(batch.id, filename, "invalid", "invalid_pdf")
+                    return
+                if parsed.provider_slug != batch.pool_slug:
+                    await repository.add_rejected(
+                        batch.id, filename, "invalid", "provider_mismatch"
+                    )
+                    return
+                if await inventory.contains_document(parsed):
+                    await repository.add_rejected(
+                        batch.id, filename, "duplicate", "already_imported"
+                    )
+                    return
+                ref: CertificateObjectRef | None = None
+                try:
+                    ref = await object_store.upload(parsed)
+                    added = await repository.add_ready(batch.id, filename, parsed, ref)
+                    if not added:
+                        await object_store.delete(ref)
+                        await repository.add_rejected(
+                            batch.id, filename, "duplicate", "batch_duplicate"
+                        )
+                except Exception as error:  # noqa: BLE001 - never log certificate details
+                    if ref is not None:
+                        with suppress(Exception):
+                            await object_store.delete(ref)
+                    logger.warning("Certificate staging failed kind=%s", type(error).__name__)
+                    await repository.add_rejected(
+                        batch.id, filename, "invalid", "storage_error"
+                    )
+        finally:
+            await progress.complete(bot, admin.telegram_user_id, batch.id)
 
-    @dispatcher.callback_query(private_callback & F.data.startswith("batch:finish:"))
-    async def finish_batch(query: CallbackQuery, bot: Bot) -> None:
-        admin = await admin_for(query.from_user.id, query.from_user.full_name)
-        await query.answer()
-        if admin is None or query.data is None:
+    async def finish_for(admin: CertificateAdmin, batch_id: int, bot: Bot) -> None:
+        pending = await progress.pending(admin.telegram_user_id, batch_id)
+        if pending:
+            await bot.send_message(
+                admin.telegram_user_id,
+                f"Ещё обрабатываются файлы: {pending}. Дождитесь завершения проверки.",
+                reply_markup=_batch_keyboard(),
+            )
             return
-        batch_id = int(query.data.rsplit(":", 1)[1])
         summary = await repository.finish_batch(admin.telegram_user_id, batch_id)
         if summary is None or summary.status != "awaiting_confirmation":
-            await bot.send_message(admin.telegram_user_id, "В пачке нет готовых сертификатов.")
+            await bot.send_message(
+                admin.telegram_user_id,
+                "В пачке нет готовых сертификатов.",
+                reply_markup=_batch_keyboard(),
+            )
             return
+        await progress.forget(admin.telegram_user_id, batch_id)
         await bot.send_message(
             admin.telegram_user_id,
             _batch_text(summary) + "\n\nИмпортировать готовые сертификаты?",
-            reply_markup=_keyboard([[
-                (f"Импортировать {summary.ready}", f"batch:confirm:{batch_id}"),
-                ("Отменить", f"batch:cancel:{batch_id}"),
-            ]]),
+            reply_markup=_confirmation_keyboard(),
         )
 
-    @dispatcher.callback_query(private_callback & F.data.startswith("batch:confirm:"))
-    async def confirm_batch(query: CallbackQuery, bot: Bot) -> None:
-        admin = await admin_for(query.from_user.id, query.from_user.full_name)
-        await query.answer()
-        if admin is None or query.data is None:
-            return
-        batch_id = int(query.data.rsplit(":", 1)[1])
+    async def confirm_for(admin: CertificateAdmin, batch_id: int, bot: Bot) -> None:
         documents = await repository.ready_documents(admin.telegram_user_id, batch_id)
         if not documents:
-            await bot.send_message(admin.telegram_user_id, "Пачка уже обработана или недоступна.")
+            await bot.send_message(
+                admin.telegram_user_id,
+                "Пачка уже обработана или недоступна.",
+                reply_markup=_main_keyboard(admin),
+            )
             return
         try:
             imported = await inventory.import_admin_batch(
@@ -335,6 +515,7 @@ def build_dispatcher(
             await bot.send_message(
                 admin.telegram_user_id,
                 "Импорт отменён целиком из-за конфликта или временной ошибки.",
+                reply_markup=_main_keyboard(admin),
             )
             return
         await bot.send_message(
@@ -343,18 +524,73 @@ def build_dispatcher(
             reply_markup=_main_keyboard(admin),
         )
 
-    @dispatcher.callback_query(private_callback & F.data.startswith("batch:cancel:"))
-    async def cancel_batch(query: CallbackQuery, bot: Bot) -> None:
-        admin = await admin_for(query.from_user.id, query.from_user.full_name)
-        await query.answer()
-        if admin is None or query.data is None:
-            return
-        batch_id = int(query.data.rsplit(":", 1)[1])
+    async def cancel_for(admin: CertificateAdmin, batch_id: int, bot: Bot) -> None:
+        await progress.forget(admin.telegram_user_id, batch_id)
         refs = await repository.cancel_batch(admin.telegram_user_id, batch_id)
         await _delete_refs(object_store, refs)
         await bot.send_message(
             admin.telegram_user_id, "Загрузка отменена.", reply_markup=_main_keyboard(admin)
         )
+
+    @dispatcher.message(F.text == "Завершить загрузку")
+    async def finish_batch_message(message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        admin = await admin_for(message.from_user.id, message.from_user.full_name)
+        if admin is None:
+            return
+        batch = await repository.active_batch(admin.telegram_user_id)
+        if batch is None:
+            await show_menu(bot, admin.telegram_user_id, admin.display_name)
+            return
+        await finish_for(admin, batch.id, bot)
+
+    @dispatcher.message(F.text == "Импортировать сертификаты")
+    async def confirm_batch_message(message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        admin = await admin_for(message.from_user.id, message.from_user.full_name)
+        if admin is None:
+            return
+        batch = await repository.active_batch(admin.telegram_user_id)
+        if batch is None or batch.status != "awaiting_confirmation":
+            await show_menu(bot, admin.telegram_user_id, admin.display_name)
+            return
+        await confirm_for(admin, batch.id, bot)
+
+    @dispatcher.message(F.text == "Отменить загрузку")
+    async def cancel_batch_message(message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        admin = await admin_for(message.from_user.id, message.from_user.full_name)
+        if admin is None:
+            return
+        batch = await repository.active_batch(admin.telegram_user_id)
+        if batch is None:
+            await show_menu(bot, admin.telegram_user_id, admin.display_name)
+            return
+        await cancel_for(admin, batch.id, bot)
+
+    @dispatcher.callback_query(private_callback & F.data.startswith("batch:finish:"))
+    async def finish_batch(query: CallbackQuery, bot: Bot) -> None:
+        admin = await admin_for(query.from_user.id, query.from_user.full_name)
+        await query.answer()
+        if admin is not None and query.data is not None:
+            await finish_for(admin, int(query.data.rsplit(":", 1)[1]), bot)
+
+    @dispatcher.callback_query(private_callback & F.data.startswith("batch:confirm:"))
+    async def confirm_batch(query: CallbackQuery, bot: Bot) -> None:
+        admin = await admin_for(query.from_user.id, query.from_user.full_name)
+        await query.answer()
+        if admin is not None and query.data is not None:
+            await confirm_for(admin, int(query.data.rsplit(":", 1)[1]), bot)
+
+    @dispatcher.callback_query(private_callback & F.data.startswith("batch:cancel:"))
+    async def cancel_batch(query: CallbackQuery, bot: Bot) -> None:
+        admin = await admin_for(query.from_user.id, query.from_user.full_name)
+        await query.answer()
+        if admin is not None and query.data is not None:
+            await cancel_for(admin, int(query.data.rsplit(":", 1)[1]), bot)
 
     @dispatcher.callback_query(private_callback & (F.data == "menu:stock"))
     async def stock(query: CallbackQuery, bot: Bot) -> None:
@@ -364,12 +600,7 @@ def build_dispatcher(
             return
         await show_stock(bot, admin)
 
-    @dispatcher.callback_query(private_callback & (F.data == "menu:admins"))
-    async def admins(query: CallbackQuery, bot: Bot) -> None:
-        admin = await admin_for(query.from_user.id, query.from_user.full_name)
-        await query.answer()
-        if admin is None or admin.role != "owner":
-            return
+    async def show_admins(bot: Bot, admin: CertificateAdmin) -> None:
         rows = await repository.admins()
         lines = ["Администраторы"] + [f"{item.display_name} — {item.role}" for item in rows]
         buttons: list[list[tuple[str, str]]] = [
@@ -384,6 +615,21 @@ def build_dispatcher(
                 )])
         buttons.append([("В меню", "menu:main")])
         await bot.send_message(admin.telegram_user_id, "\n".join(lines), reply_markup=_keyboard(buttons))
+
+    @dispatcher.message(F.text == "Администраторы")
+    async def admins_message(message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        admin = await admin_for(message.from_user.id, message.from_user.full_name)
+        if admin is not None and admin.role == "owner":
+            await show_admins(bot, admin)
+
+    @dispatcher.callback_query(private_callback & (F.data == "menu:admins"))
+    async def admins(query: CallbackQuery, bot: Bot) -> None:
+        admin = await admin_for(query.from_user.id, query.from_user.full_name)
+        await query.answer()
+        if admin is not None and admin.role == "owner":
+            await show_admins(bot, admin)
 
     @dispatcher.callback_query(private_callback & F.data.startswith("admin:invite:"))
     async def invite_admin(query: CallbackQuery, bot: Bot) -> None:
@@ -419,9 +665,11 @@ def build_dispatcher(
             await bot.send_message(admin.telegram_user_id, "Приглашение уже обработано.")
             return
         approved = action == "approve"
+        candidate = await repository.admin(candidate_id) if approved else None
         await bot.send_message(
             candidate_id,
             "Доступ предоставлен." if approved else "Запрос на доступ отклонён.",
+            reply_markup=_main_keyboard(candidate) if candidate is not None else None,
         )
         await bot.send_message(
             admin.telegram_user_id,
@@ -486,6 +734,11 @@ async def run() -> None:
             session=AiohttpSession(proxy=proxy) if proxy else AiohttpSession(),
         ) as bot:
             await bot.delete_webhook(drop_pending_updates=False)
+            await bot.set_my_commands([
+                BotCommand(command="menu", description="Открыть меню"),
+                BotCommand(command="stock", description="Показать остатки"),
+                BotCommand(command="cancel", description="Отменить загрузку"),
+            ])
             cleanup_task = asyncio.create_task(cleanup_expired_batches(repository, object_store))
             try:
                 await dispatcher.start_polling(

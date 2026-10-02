@@ -37,7 +37,6 @@ class ImportBatch:
     admin_id: int
     pool_slug: str
     status: str
-    target_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +44,6 @@ class BatchSummary:
     batch_id: int
     pool_slug: str
     status: str
-    target_count: int
     ready: int
     duplicates: int
     invalid: int
@@ -103,12 +101,15 @@ class CertificateAdminRepository:
                     status VARCHAR(32) NOT NULL DEFAULT 'collecting'
                         CHECK (status IN ('collecting','awaiting_confirmation','imported',
                                          'cancelled','expired','failed')),
-                    target_count INTEGER NOT NULL CHECK (target_count > 0),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     expires_at TIMESTAMPTZ NOT NULL,
                     confirmed_at TIMESTAMPTZ
                 )
+            """))
+            await connection.execute(text("""
+                ALTER TABLE women_help_certificate_import_batches
+                DROP COLUMN IF EXISTS target_count
             """))
             await connection.execute(text("""
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_women_help_certificate_active_batch
@@ -300,20 +301,20 @@ class CertificateAdminRepository:
             return result.rowcount == 1
 
     async def start_batch(
-        self, admin_id: int, pool_slug: str, *, target_count: int, ttl_hours: int
+        self, admin_id: int, pool_slug: str, *, ttl_hours: int
     ) -> ImportBatch:
         if pool_slug not in {"ozon", "pyaterochka"}:
             raise ValueError("unsupported certificate pool")
         async with self._engine.begin() as connection:
             row = (await connection.execute(text("""
                 INSERT INTO women_help_certificate_import_batches
-                    (admin_id, pool_slug, target_count, expires_at)
-                SELECT :admin_id, :pool_slug, :target_count, :expires_at
+                    (admin_id, pool_slug, expires_at)
+                SELECT :admin_id, :pool_slug, :expires_at
                 FROM women_help_certificate_admins
                 WHERE telegram_user_id = :admin_id AND is_active = true
-                RETURNING id, admin_id, pool_slug, status, target_count
+                RETURNING id, admin_id, pool_slug, status
             """), {
-                "admin_id": admin_id, "pool_slug": pool_slug, "target_count": target_count,
+                "admin_id": admin_id, "pool_slug": pool_slug,
                 "expires_at": datetime.now(UTC) + timedelta(hours=ttl_hours),
             })).mappings().first()
             if row is None:
@@ -323,7 +324,7 @@ class CertificateAdminRepository:
     async def active_batch(self, admin_id: int) -> ImportBatch | None:
         async with self._engine.connect() as connection:
             row = (await connection.execute(text("""
-                SELECT id, admin_id, pool_slug, status, target_count
+                SELECT id, admin_id, pool_slug, status
                 FROM women_help_certificate_import_batches
                 WHERE admin_id = :admin_id
                   AND status IN ('collecting','awaiting_confirmation')
@@ -395,7 +396,7 @@ class CertificateAdminRepository:
     async def summary(self, admin_id: int, batch_id: int) -> BatchSummary | None:
         async with self._engine.connect() as connection:
             row = (await connection.execute(text("""
-                SELECT b.id AS batch_id, b.pool_slug, b.status, b.target_count,
+                SELECT b.id AS batch_id, b.pool_slug, b.status,
                     count(i.id) FILTER (WHERE i.status = 'ready')::int AS ready,
                     count(i.id) FILTER (WHERE i.status = 'duplicate')::int AS duplicates,
                     count(i.id) FILTER (WHERE i.status = 'invalid')::int AS invalid
