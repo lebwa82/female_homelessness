@@ -571,13 +571,15 @@ class ChatwootAgentService:
             if (attributes.get("reply_owner") != "bot" or _human_assigned(conversation)
                     or conversation.get("status") == "snoozed"
                     or attributes.get("scenario_pending_input")
-                    or attributes.get("workflow_state") == "safety_escalation"
-                    or (attributes.get("scenario") or {}).get("awaiting_text")):
+                    or attributes.get("workflow_state") == "safety_escalation"):
                 return False
             due = await self._scenario_effects.due(conversation)
             if due is None:
                 return False
             key, job = due
+            if ((attributes.get("scenario") or {}).get("awaiting_text")
+                    and not (conversation.get("status") == "resolved" and job["screen"] == "s7")):
+                return False
             turn_key = f"scenario-followup:{key}"
             if await self._api.has_reply_for_turn(conversation_id, turn_key):
                 await self._scenario_effects.sent(conversation_id, key)

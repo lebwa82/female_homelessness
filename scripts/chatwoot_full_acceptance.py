@@ -595,6 +595,7 @@ class Acceptance:
             assert (await self.attrs(cid))["scenario_requests"][key]["state"] == "requested"
             if self.mode == "candidate":
                 service = self.services[cid]
+                await self.api.set_custom_attributes(cid, {"scenario": {"screen": "s35d", "awaiting_text": True}})
                 service._scenario_effects.clock = lambda: end + timedelta(days=1, hours=2)
                 assert await service.send_due_followup(cid), "scheduled_review_missing"
                 assert not await service.send_due_followup(cid), "scheduled_review_duplicated"

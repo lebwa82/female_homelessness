@@ -140,6 +140,18 @@ async def test_completion_uses_actual_end_and_not_preplanned_date(runtime):
 
 
 @pytest.mark.asyncio
+async def test_closed_chat_does_not_keep_old_optional_form_blocking_meeting_review(runtime):
+    api, service = runtime
+    await plan(api, service)
+    attributes(api)["scenario"] = {"screen": "s35d", "awaiting_text": True}
+    service._scenario_effects.clock = lambda: NOW + timedelta(days=1, hours=4)
+    assert not await service.send_due_followup(23)  # Do not interrupt an active form.
+    await api.set_status(23, "resolved")
+    assert await service.send_due_followup(23)  # That old form is no longer active.
+    assert attributes(api)["scenario"]["screen"] == "s7"
+
+
+@pytest.mark.asyncio
 async def test_review_preempts_same_request_contact_check_not_other_requests(runtime):
     api, service = runtime
     await plan(api, service)
