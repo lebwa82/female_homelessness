@@ -28,7 +28,8 @@ def test_deploy_installs_scenario_macros_and_agent_healthcheck() -> None:
     assert 'activate.py" queues' in deploy_script
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text()
     agent_block = compose.split("  agent-bot:\n", 1)[1].split("\n  certificate-admin-bot:", 1)[0]
-    assert "healthcheck:" in agent_block and "/healthz" in agent_block
+    assert "healthcheck:" in agent_block
+    assert '["CMD", "/app/.venv/bin/python", "-m", "app.chatwoot.healthcheck"]' in agent_block
     main = (ROOT / "app/chatwoot/__main__.py").read_text()
     assert "access_log=None" in main
 

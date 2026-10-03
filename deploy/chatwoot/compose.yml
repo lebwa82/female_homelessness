@@ -98,7 +98,7 @@ services:
       PYTHONUNBUFFERED: "1"
     profiles: ["agent"]
     healthcheck:
-      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; from app.config import settings; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % settings.chatwoot_listen_port, timeout=4).close()"]
+      test: ["CMD", "/app/.venv/bin/python", "-m", "app.chatwoot.healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 30s
