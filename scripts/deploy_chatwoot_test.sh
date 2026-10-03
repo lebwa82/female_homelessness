@@ -191,7 +191,8 @@ fi
 wait_for_container_health() {
   local container="$1"
   for _ in $(seq 1 15); do
-    if sudo podman healthcheck run "$container" >/dev/null 2>&1; then
+    # Podman otherwise consumes the SSH script's stdin, skipping later checks.
+    if sudo podman healthcheck run "$container" </dev/null >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
