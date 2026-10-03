@@ -195,8 +195,26 @@ class Acceptance:
         return [i["value"] for i in (reply.get("content_attributes") or {}).get("items", [])]
 
     async def staff(self, cid, text, *, private=False, completed=False, returning=False, scheduling=None):
-        m = await self.post(cid, "/messages", {"content": text, "message_type": "outgoing",
-                                               "private": private})
+        if scheduling and self.mode == "webhook":
+            # Exercise the actual operator macro, not just its private-note text.
+            names = {"schedule": "Запланировать опрос консультации", "cancel": "Отменить опрос консультации"}
+            macros = await self.raw_request("GET", "/macros")
+            macros = macros if isinstance(macros, list) else macros["payload"]
+            macro = next(m for m in macros if m["name"] == names[scheduling])
+            before = max(m["id"] for m in await self.api.get_messages(cid))
+            await self.transport.request("POST", f"{self.base}/macros/{macro['id']}/execute",
+                                         settings.chatwoot_read_token, {"conversation_ids": [cid]})
+            for _ in range(60):
+                m = next((m for m in await self.api.get_messages(cid)
+                          if m["id"] > before and m.get("private") and m.get("content") == text), None)
+                if m:
+                    break
+                await asyncio.sleep(.3)
+            else:
+                raise AssertionError("native_scheduling_macro_note_missing")
+        else:
+            m = await self.post(cid, "/messages", {"content": text, "message_type": "outgoing",
+                                                   "private": private})
         if self.mode == "candidate":
             await self.services[cid].process(StaffMessage(m["id"], cid, self.staff_id,
                                                         return_to_bot=returning,
@@ -544,6 +562,11 @@ class Acceptance:
         await self.case("timer-certificate-and-reminder", certificate_timer)
 
     async def scheduling(self):
+        if self.mode == "webhook":
+            definitions = await self.raw_request("GET", "/custom_attribute_definitions")
+            assert {"consultation_ends_at", "consultation_request_id"} <= {
+                d["attribute_key"] for d in definitions
+            }, "operator_fields_missing"
         async def appointment(cid):
             # Real client confirmation, staff replies and native status changes.
             await self.send(cid, "/start")
