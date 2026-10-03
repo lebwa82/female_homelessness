@@ -188,6 +188,25 @@ if [[ "$agent_was_active" == 1 ]]; then
   sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" refresh_routes </dev/null
 fi
 
+wait_for_container_health() {
+  local container="$1"
+  for _ in $(seq 1 15); do
+    if sudo podman healthcheck run "$container" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Container failed its healthcheck: $container" >&2
+  return 5
+}
+
+if [[ "$agent_was_active" == 1 ]]; then
+  wait_for_container_health women-help-chatwoot_agent-bot_1
+fi
+if [[ "$ingress_was_active" == 1 ]]; then
+  wait_for_container_health women-help-chatwoot_telegram-ingress_1
+fi
+
 sudo podman compose --env-file "$CHATWOOT_ENV" -f deploy/chatwoot/compose.yml ps
 sudo podman inspect --format '{{.Name}} image={{.Image}}' \
   women-help-chatwoot_chatwoot_1 women-help-chatwoot_sidekiq_1

@@ -26,6 +26,9 @@ def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
 def test_deploy_installs_scenario_macros_and_agent_healthcheck() -> None:
     deploy_script = (ROOT / "scripts/deploy_chatwoot_test.sh").read_text()
     assert 'activate.py" queues' in deploy_script
+    assert 'sudo podman healthcheck run "$container"' in deploy_script
+    assert "wait_for_container_health women-help-chatwoot_agent-bot_1" in deploy_script
+    assert "wait_for_container_health women-help-chatwoot_telegram-ingress_1" in deploy_script
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text()
     agent_block = compose.split("  agent-bot:\n", 1)[1].split("\n  certificate-admin-bot:", 1)[0]
     assert "healthcheck:" in agent_block
