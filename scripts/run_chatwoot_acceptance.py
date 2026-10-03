@@ -54,7 +54,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["candidate", "webhook"], default="webhook")
     parser.add_argument("--suites", nargs="+", choices=[
-        "journeys", "ownership", "classifications", "screens", "timers", "contextual", "attachments",
+        "journeys", "ownership", "classifications", "screens", "timers", "scheduling", "contextual", "attachments",
     ], default=[])
     args = parser.parse_args()
     os.umask(0o077)

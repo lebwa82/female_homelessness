@@ -180,6 +180,20 @@ def handoff_schema():
       request.assign_attributes(attribute_display_name: "Запрошен дежурный", attribute_display_type: :checkbox,
         attribute_description: "Запрос отмечен в приватной заметке с уведомлением команды. Бот отвечает до назначения сотрудницы.")
       request.save!
+      [
+        ['consultation_ends_at', 'Окончание консультации (МСК)',
+          'ДД.ММ.ГГГГ ЧЧ:ММ. Затем выполните макрос «Запланировать опрос консультации». Опрос через 2 часа после окончания, в дневное время.'],
+        ['consultation_request_id', 'ID консультации',
+          'Если заявок несколько, скопируйте ID из приватной заметки. Для единственной активной заявки можно оставить пустым.']
+      ].each do |key, name, description|
+        field = account.custom_attribute_definitions.find_or_initialize_by(
+          attribute_key: key, attribute_model: :conversation_attribute)
+        if field.new_record?
+          field.assign_attributes(attribute_display_name: name, attribute_display_type: :text,
+            attribute_description: description)
+          field.save!
+        end
+      end
       puts "ACTIVATION_RESULT=" + {handoff_schema_ready: true}.to_json
     """)
     print(json.dumps(result))
@@ -219,6 +233,8 @@ def queues():
       commands = [
         ['Вернуть боту', [{action_name: 'add_private_note', action_params: ['[women-help:return-to-bot]']}]],
         ['Консультация завершена', [{action_name: 'add_private_note', action_params: ['[women-help:consultation-completed]']}]],
+        ['Запланировать опрос консультации', [{action_name: 'add_private_note', action_params: ['[women-help:consultation-schedule]']}]],
+        ['Отменить опрос консультации', [{action_name: 'add_private_note', action_params: ['[women-help:consultation-cancel]']}]],
         ['Передать юристам', [{action_name: 'assign_team', action_params: [legal.id]}]],
         ['Передать дежурным', [{action_name: 'assign_team', action_params: [duty.id]}]]
       ]

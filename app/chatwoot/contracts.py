@@ -24,6 +24,8 @@ class ConversationChanged:
 
 RETURN_TO_BOT = "[women-help:return-to-bot]"
 CONSULTATION_COMPLETED = "[women-help:consultation-completed]"
+CONSULTATION_SCHEDULE = "[women-help:consultation-schedule]"
+CONSULTATION_CANCEL = "[women-help:consultation-cancel]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,7 @@ class StaffMessage:
     return_to_bot: bool = False
     consultation_completed: bool = False
     request_id: str | None = None
+    consultation_schedule: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +78,8 @@ def parse_staff_message(payload: object) -> StaffMessage | None:
     returning = payload.get("private") is True and payload.get("content") == RETURN_TO_BOT
     content = payload.get("content") or ""
     completed = payload.get("private") is True and content == CONSULTATION_COMPLETED
+    scheduling = ({CONSULTATION_SCHEDULE: "schedule", CONSULTATION_CANCEL: "cancel"}.get(content)
+                  if payload.get("private") is True and isinstance(content, str) else None)
     request_id = None
     prefix = CONSULTATION_COMPLETED[:-1] + ":"
     if (payload.get("private") is True and isinstance(content, str)
@@ -82,13 +87,14 @@ def parse_staff_message(payload: object) -> StaffMessage | None:
         candidate = content[len(prefix):-1]
         if len(candidate) == 24 and all(c in "0123456789abcdef" for c in candidate):
             completed, request_id = True, candidate
-    if payload.get("private") is True and not (returning or completed):
+    if payload.get("private") is True and not (returning or completed or scheduling):
         return None
     ids = [_positive_int(v) for v in (payload.get("id"), conversation.get("id"), sender.get("id"))]
     if None in ids:
         return None
     return StaffMessage(*ids, return_to_bot=returning,
-                        consultation_completed=completed, request_id=request_id)
+                        consultation_completed=completed, request_id=request_id,
+                        consultation_schedule=scheduling)
 
 
 def parse_conversation_changed(payload: object) -> ConversationChanged | None:

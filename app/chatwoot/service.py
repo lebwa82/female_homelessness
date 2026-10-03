@@ -157,6 +157,7 @@ class ChatwootAgentService:
                                   _epoch(attributes.get("last_clear_message_id")),
                                   _epoch(attributes.get("ownership_last_staff_message_id"))):
             return False
+        conversation = await self._scenario_effects.cancel_idle(conversation, before_message=event.message_id)
         # A new client message wakes a closed/snoozed conversation. Timers do not.
         if conversation.get("status") in {"resolved", "snoozed"}:
             await self._api.set_status(
@@ -188,6 +189,7 @@ class ChatwootAgentService:
 
         turn_key = f"message:{event.message_id}"
         if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
+            await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
             pending = _custom_attributes(conversation).get("scenario_pending_input") or {}
             if pending.get("message_id") == event.message_id:
                 await self._api.set_custom_attributes(event.conversation_id, {
@@ -298,6 +300,7 @@ class ChatwootAgentService:
                 turn_key=turn_key,
                 sensitive_content=turn.audit.get("sensitive_content"),
             )
+        await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
         await self._api.set_custom_attributes(event.conversation_id, {
             "scenario_pending_input": None, "scenario_last_message_id": event.message_id,
         })
@@ -397,6 +400,9 @@ class ChatwootAgentService:
             await self._api.unassign_human(conversation_id)
             conversation = await self._api.get_conversation(conversation_id)
         owner = "human" if _human_assigned(conversation) else "bot"
+        if owner == "human" or conversation.get("status") in {"resolved", "snoozed"}:
+            conversation = await self._scenario_effects.cancel_idle(conversation)
+            attrs = _custom_attributes(conversation)
         if attrs.get("reply_owner") != owner or attrs.get("ownership_version") != 3:
             update: dict[str, Any] = {"reply_owner": owner, "ownership_version": 3}
             if attrs.get("reply_owner") != owner:
@@ -415,6 +421,9 @@ class ChatwootAgentService:
         return conversation
 
     async def _staff_message(self, event: StaffMessage) -> None:
+        if event.consultation_schedule:
+            await self._scenario_effects.plan_consultation(event)
+            return  # Scheduling alone never changes ownership or the current menu.
         conversation = await self._api.get_conversation(event.conversation_id)
         attrs = _custom_attributes(conversation)
         if event.message_id <= max(_epoch(attrs.get("ownership_last_staff_message_id")),
@@ -424,6 +433,7 @@ class ChatwootAgentService:
             return
         release = event.return_to_bot or event.consultation_completed
         if not release:
+            await self._scenario_effects.cancel_idle(conversation)
             # A public answer is a takeover, but it must be visible in the UI.
             # Never steal another specialist's existing assignment.
             if not _human_assigned(conversation):
@@ -662,7 +672,7 @@ def _latest_staff_message(
             "message_type": "outgoing" if message.get("message_type") == 1
             else message.get("message_type"),
         })
-        if staff is not None:
+        if staff is not None and not staff.consultation_schedule:
             candidates.append(staff)
     return max(candidates, key=lambda e: e.message_id, default=None)
 

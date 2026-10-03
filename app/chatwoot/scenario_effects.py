@@ -37,6 +37,17 @@ def attrs(conversation: dict) -> dict:
     return conversation.get("custom_attributes") or {}
 
 
+def review_job(jobs: dict, key: str, request: dict, end: datetime) -> dict:
+    """Move an unsent review, but never send a second review for the same request."""
+    job_key = f"review:{key}"
+    if jobs.get(job_key, {}).get("state") in {"sent", "answered"}:
+        return jobs
+    return {**jobs, job_key: {
+        "screen": "s7", "due_at": daytime(end + timedelta(hours=2)).isoformat(),
+        "state": "pending", "context": {"aid_id": request["aid_id"], "request_key": key},
+    }}
+
+
 def returning_after_day(messages: tuple[dict, ...], message_id: int, now: datetime) -> bool:
     previous = []
     for message in messages:
@@ -163,9 +174,7 @@ class ScenarioEffects:
             completed_at = request.get("completed_at", self.clock().isoformat())
             requests[key] = {**request, "state": "completed", "completed_at": completed_at,
                              "completed_message_id": event.message_id}
-            jobs = schedule(jobs, f"review:{key}", "s7",
-                            datetime.fromisoformat(completed_at) + timedelta(hours=2),
-                            {"aid_id": request["aid_id"], "request_key": key, "completed": True})
+            jobs = review_job(jobs, key, request, datetime.fromisoformat(completed_at))
             check = f"check:{key}"
             if check in jobs:
                 jobs[check] = {**jobs[check], "context": {**jobs[check]["context"], "completed": True}}
@@ -175,15 +184,118 @@ class ScenarioEffects:
         })
         return True
 
+    async def plan_consultation(self, event) -> None:
+        """Explicit staff macros use sidebar fields; never infer dates from dialogue."""
+        current = attrs(await self.api.get_conversation(event.conversation_id))
+        last_message = current.get("consultation_schedule_last_message_id", 0)
+        if event.message_id <= last_message:
+            if event.message_id == last_message and current.get("consultation_schedule_note"):
+                await self.api.add_private_note(event.conversation_id, current["consultation_schedule_note"],
+                                                event_key=f"consultation-schedule:{event.message_id}")
+            return
+        requests = dict(current.get("scenario_requests") or {})
+        selected_id = str(current.get("consultation_request_id") or "").strip()
+        selected = [key for key, value in requests.items()
+                    if value["state"] in {"requested", "completed"}
+                    and (key == selected_id if selected_id else value["state"] == "requested")]
+        changes = {}
+        if len(selected) != 1:
+            note = ("Опрос не изменён. Укажите ID заявки в поле «ID консультации» и повторите макрос. "
+                    "Доступные ID: " + ", ".join(requests))
+        else:
+            key = selected[0]
+            request = requests[key]
+            jobs = dict(current.get("scenario_followups") or {})
+            job_key = f"review:{key}"
+            job = jobs.get(job_key, {})
+            # Reconcile a successful send whose HTTP acknowledgement was lost.
+            delivered = job.get("state") in {"sent", "answered"} or await self.api.has_reply_for_turn(
+                event.conversation_id, f"scenario-followup:{job_key}",
+            )
+            if delivered:
+                note = f"Опрос по заявке {key} уже отправлен; повторной отправки не будет."
+            elif event.consultation_schedule == "cancel":
+                if job:
+                    jobs[job_key] = {**job, "state": "cancelled"}
+                requests[key] = {**request, "appointment_state": "cancelled"}
+                changes = {"scenario_followups": jobs, "scenario_requests": requests}
+                note = f"Опрос по заявке {key} отменён. Заявка и переписка сохранены."
+            else:
+                value = str(current.get("consultation_ends_at") or "").strip()
+                try:
+                    end = datetime.strptime(value, "%d.%m.%Y %H:%M").replace(tzinfo=MSK)
+                except ValueError:
+                    note = ("Опрос не изменён. Укажите окончание встречи в формате "
+                            "ДД.ММ.ГГГГ ЧЧ:ММ (МСК) и повторите макрос.")
+                else:
+                    jobs = review_job(jobs, key, request, end)
+                    requests[key] = {**request, "appointment_ends_at": end.astimezone(UTC).isoformat(),
+                                     "appointment_state": "scheduled"}
+                    changes = {"scenario_followups": jobs, "scenario_requests": requests}
+                    due = datetime.fromisoformat(jobs[job_key]["due_at"]).astimezone(MSK)
+                    note = (f"Опрос по заявке {key} запланирован на {due:%d.%m.%Y %H:%M} МСК. "
+                            "Встреча ещё не отмечена состоявшейся. При переносе измените время "
+                            "и повторите макрос; при отмене используйте «Отменить опрос консультации».")
+        # Commit the result with the business change. A lost note acknowledgement
+        # must not reread edited sidebar fields and silently reschedule the meeting.
+        await self.api.set_custom_attributes(event.conversation_id, {
+            **changes, "consultation_schedule_last_message_id": event.message_id,
+            "consultation_schedule_note": note,
+        })
+        await self.api.add_private_note(event.conversation_id, note,
+                                        event_key=f"consultation-schedule:{event.message_id}")
+
+    async def menu_delivered(self, conversation_id: int, message_id: int) -> None:
+        current = attrs(await self.api.get_conversation(conversation_id))
+        if (current.get("scenario") or {}).get("screen") != "s2":
+            return
+        jobs = dict(current.get("scenario_followups") or {})
+        key = f"idle:{current.get('context_epoch', 0)}"
+        updated = schedule(jobs, key, "i4", self.clock() + timedelta(hours=1),
+                           {"menu_message_id": message_id})
+        if updated != jobs:
+            await self.api.set_custom_attributes(conversation_id, {"scenario_followups": updated})
+
+    async def cancel_idle(self, conversation: dict, *, before_message: int | None = None) -> dict:
+        current = attrs(conversation)
+        jobs = dict(current.get("scenario_followups") or {})
+        changed = False
+        for key, job in jobs.items():
+            if (job.get("screen") == "i4" and job["state"] == "pending"
+                    and (before_message is None or job["context"]["menu_message_id"] < before_message)):
+                jobs[key] = {**job, "state": "cancelled"}
+                changed = True
+        if changed:
+            await self.api.set_custom_attributes(conversation["id"], {"scenario_followups": jobs})
+            return {**conversation, "custom_attributes": {**current, "scenario_followups": jobs}}
+        return conversation
+
     async def due(self, conversation: dict) -> tuple[str, dict] | None:
         current = attrs(conversation)
         jobs = dict(current.get("scenario_followups") or {})
         now = self.clock()
         if daytime(now) > now:
             return None
-        for key, job in sorted(jobs.items(), key=lambda pair: pair[1]["due_at"]):
+        # A due post-meeting review takes precedence over an older contact check.
+        for key, job in sorted(jobs.items(), key=lambda p: (p[1]["screen"] != "s7", p[1]["due_at"])):
             if job["state"] != "pending" or datetime.fromisoformat(job["due_at"]) > now:
                 continue
+            if job["screen"] == "i4":
+                # Also check stored messages: an incoming webhook may still be
+                # queued. Never nudge a user who has already answered.
+                messages = await self.api.get_messages(conversation["id"])
+                scenario = current.get("scenario") or {}
+                waiting = (scenario.get("screen") == "s2" or scenario.get("job_key") == key
+                           and scenario.get("screen") == "i4")
+                activity = any(m.get("id", 0) > job["context"]["menu_message_id"]
+                               and not m.get("private")
+                               and (m.get("message_type") in {0, "incoming"}
+                                    or (m.get("sender") or {}).get("type") == "user")
+                               for m in messages)
+                if not waiting or activity:
+                    conversation = await self.cancel_idle(conversation)
+                    jobs = dict(attrs(conversation).get("scenario_followups") or {})
+                    continue
             expiry = job["context"].get("expires_at")
             if expiry and datetime.fromisoformat(expiry) <= now:
                 jobs[key] = {**job, "state": "expired"}
@@ -199,6 +311,11 @@ class ScenarioEffects:
         if job["state"] != "pending":
             return
         jobs[key] = {**job, "state": "sent", "sent_at": self.clock().isoformat()}
+        if job["screen"] == "s7":
+            check = f"check:{job['context'].get('request_key')}"
+            for obsolete in (check, f"reminder:{check}"):
+                if jobs.get(obsolete, {}).get("state") == "pending":
+                    jobs[obsolete] = {**jobs[obsolete], "state": "cancelled"}
         # Exactly one reminder for block 5; no idle or consultation-review nudges.
         if job["screen"] == "s5":
             context = job["context"]

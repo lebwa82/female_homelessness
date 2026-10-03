@@ -255,23 +255,23 @@ async def test_partial_delivery_retry_does_not_lose_or_duplicate_consultation():
     restarted = ChatwootAgentService(api, duty_team_id=9)
     assert await restarted.process(event(callback, 45))
     assert len(api.conversation["custom_attributes"]["scenario_requests"]) == 1
-    assert len(api.conversation["custom_attributes"]["scenario_followups"]) == 1
+    assert len(api.conversation["custom_attributes"]["scenario_followups"]) == 2  # cancelled idle + check
     assert len([n for n in api.note_keys if n.startswith("scenario:")]) == 1
     await restarted.process(event("/clear", 46))
     assert len(api.conversation["custom_attributes"]["scenario_requests"]) == 1
-    assert len(api.conversation["custom_attributes"]["scenario_followups"]) == 1
+    assert len(api.conversation["custom_attributes"]["scenario_followups"]) == 2
     assert not await restarted.process(event(callback, 45))
 
 
 @pytest.mark.asyncio
-async def test_no_survey_while_human_no_expired_reminder_no_idle_timer():
+async def test_no_survey_while_human_no_expired_reminder():
     api = FakeChatwoot()
     service = ChatwootAgentService(api, duty_team_id=9)
     now = datetime(2026, 10, 3, 10, tzinfo=UTC)
     service._scenario_effects.clock = lambda: now
     await service.process(event("/start", 41))
     await service.process(event("continue", 42))
-    assert not api.conversation["custom_attributes"].get("scenario_followups")
+    assert api.conversation["custom_attributes"]["scenario_followups"]["idle:0"]["state"] == "pending"
     await service._scenario_effects.certificate_delivered(23, "cert", {
         "aid_id": "food_card", "expires_at": (now + timedelta(days=7)).isoformat(),
     })

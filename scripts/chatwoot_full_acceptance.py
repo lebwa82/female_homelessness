@@ -194,16 +194,18 @@ class Acceptance:
     def choices(reply):
         return [i["value"] for i in (reply.get("content_attributes") or {}).get("items", [])]
 
-    async def staff(self, cid, text, *, private=False, completed=False, returning=False):
+    async def staff(self, cid, text, *, private=False, completed=False, returning=False, scheduling=None):
         m = await self.post(cid, "/messages", {"content": text, "message_type": "outgoing",
                                                "private": private})
         if self.mode == "candidate":
             await self.services[cid].process(StaffMessage(m["id"], cid, self.staff_id,
                                                         return_to_bot=returning,
-                                                        consultation_completed=completed))
+                                                        consultation_completed=completed,
+                                                        consultation_schedule=scheduling))
         else:
             for _ in range(60):
-                if (await self.attrs(cid)).get("ownership_last_staff_message_id", 0) >= m["id"]:
+                watermark = "consultation_schedule_last_message_id" if scheduling else "ownership_last_staff_message_id"
+                if (await self.attrs(cid)).get(watermark, 0) >= m["id"]:
                     break
                 await asyncio.sleep(.3)
             else:
@@ -541,6 +543,63 @@ class Acceptance:
             assert not await service.send_due_followup(cid)
         await self.case("timer-certificate-and-reminder", certificate_timer)
 
+    async def scheduling(self):
+        async def appointment(cid):
+            # Real client confirmation, staff replies and native status changes.
+            await self.send(cid, "/start")
+            reply = await self.send(cid, "continue")
+            for screen in ("s23", "s35", "s35b"):
+                reply = await self.choose(cid, reply, screen)
+            key = next(iter((await self.attrs(cid))["scenario_requests"]))
+            await self.staff(cid, "Технический тест: встреча согласована.")
+            end = (datetime.now(UTC) + timedelta(days=3)).replace(hour=12, minute=0, second=0, microsecond=0)
+            from app.chatwoot.scenario_effects import MSK, daytime
+
+            for shift in (0, 1):
+                await self.api.set_custom_attributes(cid, {
+                    "consultation_ends_at": (end + timedelta(days=shift)).astimezone(MSK).strftime("%d.%m.%Y %H:%M"),
+                })
+                await self.staff(cid, "[women-help:consultation-schedule]", private=True, scheduling="schedule")
+                attrs = await self.attrs(cid)
+                job = attrs["scenario_followups"][f"review:{key}"]
+                assert job["due_at"] == daytime(end + timedelta(days=shift, hours=2)).isoformat()
+                assert attrs["scenario_requests"][key]["state"] == "requested"
+                assert attrs["reply_owner"] == "human", "schedule_changed_owner"
+            await self.staff(cid, "[women-help:consultation-cancel]", private=True, scheduling="cancel")
+            assert (await self.attrs(cid))["scenario_followups"][f"review:{key}"]["state"] == "cancelled"
+            await self.staff(cid, "[women-help:consultation-schedule]", private=True, scheduling="schedule")
+            await self.native_change(cid, "/toggle_status", {"status": "resolved"})
+            assert (await self.attrs(cid))["scenario_requests"][key]["state"] == "requested"
+            if self.mode == "candidate":
+                service = self.services[cid]
+                service._scenario_effects.clock = lambda: end + timedelta(days=1, hours=2)
+                assert await service.send_due_followup(cid), "scheduled_review_missing"
+                assert not await service.send_due_followup(cid), "scheduled_review_duplicated"
+                await self.check_screen(cid, "s7")
+            else:
+                await self.send(cid, "/system_info")
+        await self.case("scheduled-consultation-end-transfer-cancel", appointment)
+
+        async def idle(cid):
+            await self.send(cid, "/start")
+            await self.send(cid, "continue")
+            attrs = await self.attrs(cid)
+            key = next(k for k in attrs["scenario_followups"] if k.startswith("idle:"))
+            assert attrs["scenario_followups"][key]["state"] == "pending"
+            if self.mode == "candidate":
+                service = self.services[cid]
+                due = datetime.fromisoformat(attrs["scenario_followups"][key]["due_at"])
+                service._scenario_effects.clock = lambda: due - timedelta(seconds=1)
+                assert not await service.send_due_followup(cid)
+                service._scenario_effects.clock = lambda: due
+                assert await service.send_due_followup(cid)
+                assert not await service.send_due_followup(cid)
+                await self.check_screen(cid, "i4")
+            else:
+                await self.send(cid, "/system_info")
+                assert (await self.attrs(cid))["scenario_followups"][key]["state"] == "cancelled"
+        await self.case("initial-menu-one-hour-reminder", idle)
+
     async def contextual(self):
         samples = (
             ("food", "Мне сейчас не хватает денег на продукты.", {"food_money"}),
@@ -662,13 +721,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["candidate", "webhook"], default="candidate")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--suites", nargs="+", choices=["journeys", "ownership", "classifications", "screens", "timers", "contextual", "attachments"],
+    parser.add_argument("--suites", nargs="+", choices=["journeys", "ownership", "classifications", "screens", "timers", "scheduling", "contextual", "attachments"],
                         default=None)
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
     os.umask(0o077)
-    suites = args.suites or (["journeys", "ownership", "contextual"] if args.mode == "webhook" else
-                            ["journeys", "ownership", "classifications", "screens", "timers", "contextual", "attachments"])
+    suites = args.suites or (["journeys", "ownership", "scheduling", "contextual"] if args.mode == "webhook" else
+                            ["journeys", "ownership", "classifications", "screens", "timers", "scheduling", "contextual", "attachments"])
     raise SystemExit(0 if asyncio.run(Acceptance(args.mode, args.output, suites, args.limit).run()) else 1)
 
 
