@@ -180,6 +180,13 @@ async def main(
         await send("/start")
         assert not await human()
         passed("native_close_reopens_with_bot")
+        await post("/assignments", {"assignee_id": profile["id"]})
+        await wait_for(human, "human_takeover_before_completion")
+        await macro("Консультация завершена")
+        await wait_for(closed_and_released, "native_completion_releases_specialist")
+        await send("/start")
+        assert not await human()
+        passed("native_completion_macro_reopens_with_bot")
         await macro("Передать юристам")
 
         async def moved_to_legal():
