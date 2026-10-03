@@ -138,6 +138,12 @@ ID самой машины по SSH. На VM отправляется тольк
 
 ## Chatwoot: тестовый операторский контур
 
+Официальный CLI и проверка без Telegram: [команды и настройка](docs/chatwoot-cli.md).
+Новый HTML-сценарий, опросы и завершение консультации:
+[реализация и границы проверки](docs/scenario-runtime.md).
+Быстро: `just cw auth status`, `just cw convs --assignee all --status all`,
+`just chatwoot-test-live` (создаёт только технические API-диалоги).
+
 ### Telegram через исходящее соединение
 
 При недоступности публичного webhook со стороны Telegram используем

@@ -173,7 +173,7 @@ def handoff_schema():
         attribute_key: "reply_owner", attribute_model: :conversation_attribute)
       definition.assign_attributes(attribute_display_name: "Кто отвечает", attribute_display_type: :list,
         attribute_values: ["bot", "human"],
-        attribute_description: "После подключения сотрудницы сохраняется human. Возврат — макрос «Вернуть боту», не снятие назначения.")
+        attribute_description: "Отражает назначение сотрудника. Снятие назначения, закрытие или макрос «Вернуть боту» возвращают управление боту.")
       definition.save!
       request = account.custom_attribute_definitions.find_or_initialize_by(
         attribute_key: "handoff_requested", attribute_model: :conversation_attribute)
@@ -218,6 +218,7 @@ def queues():
       end
       commands = [
         ['Вернуть боту', [{action_name: 'add_private_note', action_params: ['[women-help:return-to-bot]']}]],
+        ['Консультация завершена', [{action_name: 'add_private_note', action_params: ['[women-help:consultation-completed]']}]],
         ['Передать юристам', [{action_name: 'assign_team', action_params: [legal.id]}]],
         ['Передать дежурным', [{action_name: 'assign_team', action_params: [duty.id]}]]
       ]

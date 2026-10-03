@@ -14,8 +14,14 @@ from app.chatwoot.contracts import RETURN_TO_BOT
 from app.config import settings
 
 
-async def main(conversation_id: int, *, handoff_only: bool = False) -> None:
-    api = ChatwootClient(
+async def main(
+    conversation_id: int, *, handoff_only: bool = False,
+    api: ChatwootClient | None = None, account_id: int | None = None,
+    duty_team_id: int | None = None,
+) -> None:
+    account_id = account_id or settings.chatwoot_account_id
+    duty_team_id = duty_team_id or settings.chatwoot_duty_team_id
+    api = api or ChatwootClient(
         base_url=settings.chatwoot_base_url,
         account_id=settings.chatwoot_account_id,
         read_token=settings.chatwoot_read_token,
@@ -28,7 +34,7 @@ async def main(conversation_id: int, *, handoff_only: bool = False) -> None:
         or meta.get("sender", {}).get("name") != "Техническая проверка — не обращение"
     ):
         raise RuntimeError("Refusing to modify a non-test conversation")
-    prefix = f"/api/v1/accounts/{settings.chatwoot_account_id}/conversations/{conversation_id}"
+    prefix = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}"
 
     async def post(suffix, payload):
         return await api._transport.request(
@@ -100,7 +106,7 @@ async def main(conversation_id: int, *, handoff_only: bool = False) -> None:
         if m.get("content_attributes", {}).get("bot_event_key") == key
     ]
     assert len(notes) == 1 and notes[0]["private"]
-    assert f"mention://team/{settings.chatwoot_duty_team_id}/" in notes[0]["content"]
+    assert f"mention://team/{duty_team_id}/" in notes[0]["content"]
     passed("duty_notified_without_takeover", notification_message_id=notes[0]["id"])
     # Chatwoot keeps one notification per conversation. The bot's acknowledgement
     # can already replace the mention with a participant notification; both must
@@ -109,7 +115,7 @@ async def main(conversation_id: int, *, handoff_only: bool = False) -> None:
     while monotonic() < deadline:
         notifications = await api._transport.request(
             "GET",
-            f"/api/v1/accounts/{settings.chatwoot_account_id}/notifications",
+            f"/api/v1/accounts/{account_id}/notifications",
             settings.chatwoot_read_token,
         )
         found = any(

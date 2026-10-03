@@ -69,7 +69,7 @@ class QueueCoordinator:
             conversation_id,
             f"[{name}](mention://team/{notice['team_id']}/queue): "
             "обращение ожидает специалистку. Назначьте разговор на себя перед ответом. "
-            "После подключения человека бот ждёт явного «Вернуть боту».",
+            "Чтобы снова включить бота, снимите назначение или нажмите «Вернуть боту».",
             event_key=notice["key"],
         )
         await self.api.set_custom_attributes(conversation_id, {

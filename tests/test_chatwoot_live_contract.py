@@ -38,6 +38,18 @@ def test_chatwoot_activity_is_never_sent_to_model_as_assistant_speech():
     assert history == (("user", "Hello"),)
 
 
+def test_history_excludes_queued_future_inputs_but_followups_can_use_full_history():
+    messages = (
+        {"id": 4, "message_type": 0, "content": "future", "created_at": 1},
+        {"id": 2, "message_type": 0, "content": "past", "created_at": 1},
+        {"id": 3, "message_type": 0, "content": "current", "created_at": 1},
+    )
+    assert _history_after_epoch(messages, 0, 3) == (("user", "past"),)
+    assert _history_after_epoch(messages, 0, 0) == (
+        ("user", "past"), ("user", "current"), ("user", "future"),
+    )
+
+
 def test_certificate_message_is_masked_before_chatwoot_history_reaches_model():
     history = _history_after_epoch(
         (

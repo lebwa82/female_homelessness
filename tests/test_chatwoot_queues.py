@@ -133,13 +133,13 @@ async def test_failed_assignment_retries_saved_selection_not_a_new_model_decisio
     assert len(api.notes) == 1
 
 
-async def test_takeover_and_transfer_keep_bot_silent_until_explicit_return():
+async def test_takeover_and_team_transfer_keep_bot_silent_until_unassignment_or_return():
     api = CatalogApi()
     bot = service(api)
     await bot.process(event("human"))
     api.conversation["assignee_id"] = 4
     await bot.process(ConversationChanged(23))
-    api.conversation.update(assignee_id=None, assignee_team_id=9)
+    api.conversation.update(assignee_team_id=9)
     await bot.process(ConversationChanged(23))
     bot = service(api)  # No process-local ownership state.
     assert not await bot.process(event("test", 42))

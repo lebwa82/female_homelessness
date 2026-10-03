@@ -6,12 +6,14 @@ from typing import Any
 
 WORKFLOW_FIELDS = (
     "state", "need", "pending_aid_id", "pending_contact_method",
-    "pending_city", "pending_district", "pending_offer",
+    "pending_city", "pending_district", "pending_offer", "scenario",
 )
 
 
 def checkpoint_update(record: Any, values: dict[str, Any]) -> dict[str, Any]:
     """Include navigation in the same atomic write as a workflow transition."""
+    if "state" in values and values["state"] != record.state and "scenario" not in values:
+        values = {**values, "scenario": {}}
     if "navigation" in values:
         return values
     before = {name: getattr(record, name) for name in WORKFLOW_FIELDS}
@@ -30,7 +32,8 @@ def checkpoint_update(record: Any, values: dict[str, Any]) -> dict[str, Any]:
         # A follow-up worker can advance the row outside ConversationStore.
         entries.append({"workflow": before, "previous": cursor})
         cursor = len(entries) - 1
-    elif before["state"] == after["state"] and before["need"] == after["need"]:
+    elif (before["state"] == after["state"] and before["need"] == after["need"]
+          and before["scenario"].get("screen") == after["scenario"].get("screen")):
         # Draft-field updates refine the current state, not an extra user-facing step.
         cursor = entries[cursor]["previous"]
     if before != after or reset:
@@ -62,6 +65,8 @@ def back_update(navigation: dict[str, Any], callback_id: str) -> dict[str, Any] 
         return None
     return {
         **navigation["entries"][previous]["workflow"],
+        # Checkpoints written before the HTML migration have no scenario field.
+        "scenario": navigation["entries"][previous]["workflow"].get("scenario", {}),
         "navigation": {
             **navigation,
             "cursor": previous,

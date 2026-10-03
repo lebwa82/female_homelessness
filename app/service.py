@@ -34,6 +34,15 @@ from app.domain import (
 from app.knowledge import find_verified_articles, format_verified_context
 from app.navigation import back_update, checkpoint_update, previous_checkpoint
 from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, model_risk_assessment, resolve_turn
+from app.scenario import (
+    AID_SCREENS,
+    HUMAN,
+    NEEDS,
+    ScenarioFlow,
+    certificate_context,
+    copy_text,
+    render,
+)
 from app.store import ConversationRecord, PostgresConversationStore, StoredCertificate
 from app.ui import (
     CONTACT_CHOICES,
@@ -100,10 +109,16 @@ def _diagnostics_unavailable(error_type: str | None = None) -> AgentEvaluation:
 
 
 class ConversationService:
-    def __init__(self, store: Any | None = None, gateway: YandexAgentGateway | None = None) -> None:
+    def __init__(self, store: Any | None = None, gateway: YandexAgentGateway | None = None,
+                 *, html_scenario: bool = False) -> None:
         self.store = store or PostgresConversationStore()
         self.gateway = gateway or YandexAgentGateway()
         self._conversation_locks: dict[tuple[str, int], asyncio.Lock] = {}
+        # The retired standalone entrypoint retains compatibility with saved old callbacks.
+        self.scenario_flow = ScenarioFlow(self) if html_scenario else None
+
+    def _welcome_turn(self) -> AgentTurn:
+        return render("s1") if self.scenario_flow else self._turn(WELCOME, CONTINUE_CHOICES)
 
     async def start(self, incoming: IncomingMessage) -> AgentTurn:
         async with self._lock_for(incoming):
@@ -162,8 +177,9 @@ class ConversationService:
             pending_district=None,
             pending_offer=None,
             context_epoch=record.context_epoch + 1,
+            scenario={"screen": "s1", "variant": 0} if self.scenario_flow else {},
         )
-        turn = self._with_back_choice(record, self._turn(WELCOME, CONTINUE_CHOICES))
+        turn = self._with_back_choice(record, self._welcome_turn())
         await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
         return turn
 
@@ -201,7 +217,7 @@ class ConversationService:
             effect_key=self._effect_key(start_key, "started"),
         )
         await self._reset_entry_workflow(record)
-        turn = self._with_back_choice(record, self._turn(WELCOME, CONTINUE_CHOICES))
+        turn = self._with_back_choice(record, self._welcome_turn())
         await self.store.save_text_outcome(record, incoming.message_id, lease_token, turn)
         return turn
 
@@ -445,6 +461,10 @@ class ConversationService:
             if values is not None:
                 await self.store.update(record, **values)
             return await self._state_turn(record)
+        if self.scenario_flow:
+            turn = await self.scenario_flow.callback(record, callback_id, request_key)
+            if turn is not None:
+                return turn
         if (
             callback_id.startswith("followup:")
             and record.state == ConversationState.FOLLOWUP_SENT.value
@@ -468,6 +488,9 @@ class ConversationService:
                     need = NeedKind(record.need or "")
                 except ValueError:
                     return await self._enter_need_discovery(record)
+                if self.scenario_flow:
+                    target = next(k for k, value in NEEDS.items() if value is need)
+                    return await self.scenario_flow.show(record, target)
                 await self.store.update(record, state=ConversationState.CHOOSING_AID.value)
                 return self._offer_turn(need)
             if record.state != ConversationState.OPEN_CONVERSATION.value:
@@ -647,7 +670,7 @@ class ConversationService:
             await self.store.record_agent_run(record, "support", evaluation.support_audit)
             state_before = record.state
             policy_context = PolicyContext(
-                state=state_before,
+                state=ConversationState.OPEN_CONVERSATION.value if self.scenario_flow else state_before,
                 safety_status=evaluation.safety_status,
                 support_status=evaluation.support_status,
                 safety=evaluation.safety,
@@ -660,12 +683,14 @@ class ConversationService:
             await self.store.record_risk(record, assessment)
             decision = resolve_turn(policy_context)
             request_key = self._text_request_key(record, incoming.message_id, decision.effect)
-            turn = await self._execute_resolved_turn(
-                record,
-                decision,
-                assessment,
-                request_key=request_key,
-            )
+            if (self.scenario_flow and not decision.fallback_reason and decision.effect not in {
+                PolicyEffect.SAFETY_ESCALATION, PolicyEffect.HUMAN_HANDOFF, PolicyEffect.CLOSE,
+            }):
+                turn = await self.scenario_flow.text(record, incoming.text, request_key)
+            if turn is None:
+                turn = await self._execute_resolved_turn(
+                    record, decision, assessment, request_key=request_key,
+                )
             turn = self._with_back_choice(record, turn)
             await self._record_policy_decision(
                 record,
@@ -697,6 +722,7 @@ class ConversationService:
                 AgentContext(
                     history=history,
                     state=record.state,
+                    pending_offer=record.pending_offer,
                     catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
                     knowledge=(format_verified_context(verified_articles),)
                     if verified_articles
@@ -833,6 +859,8 @@ class ConversationService:
             request_key=request_key,
         )
         if request.certificate_status == "already_issued":
+            if self.scenario_flow:
+                return await self.scenario_flow.show(record, "i9", variant=1)
             await self.store.update(
                 record, state=ConversationState.AID_REQUESTED.value, pending_aid_id=None
             )
@@ -842,6 +870,8 @@ class ConversationService:
                 CERTIFICATE_EXTRA_CHOICES,
             )
         if request.certificate_status == "unavailable":
+            if self.scenario_flow:
+                return await self.scenario_flow.show(record, "i8", aid_id=aid_id)
             await self.store.update(record, state=ConversationState.CERTIFICATE_UNAVAILABLE.value)
             return self._turn(
                 "Сейчас свободных сертификатов этого вида нет. "
@@ -849,6 +879,8 @@ class ConversationService:
                 (Choice(id="certificate:request", label="Передать запрос"),),
             )
         if request.certificate_status == "review_required":
+            if self.scenario_flow:
+                return await self.scenario_flow.show(record, "i8", aid_id=aid_id)
             await self.store.update(record, state=ConversationState.CERTIFICATE_UNAVAILABLE.value)
             return self._turn(
                 "Выдача сертификатов временно недоступна. Могу передать ваш запрос человеку из команды.",
@@ -868,10 +900,24 @@ class ConversationService:
             "completed",
             effect_key=self._effect_key(request_key, "create_aid_request"),
         )
+        if request.certificate is not None:
+            turn = self._certificate_turn(request.certificate)
+            if self.scenario_flow:
+                context = certificate_context(request.certificate)
+                screen = AID_SCREENS[aid_id] + "b"
+                shown = render(screen, context=context)
+                safe_context = {k: v for k, v in context.items() if k != "code"}
+                next_screen = "s33c" if aid_id == "hostel_3_nights" else screen
+                next_turn = await self.scenario_flow.show(record, next_screen, **safe_context)
+                turn = turn.model_copy(update={
+                    "text": shown.text, "choices": next_turn.choices,
+                    "audit": {**turn.audit, "certificate_followup": safe_context,
+                              "after_certificate_text": copy_text("s33c") if next_screen == "s33c"
+                              else "Что можно сделать дальше?"},
+                })
+            return turn
         if decision is not None:
             return self._render_resolved_turn(decision)
-        if request.certificate is not None:
-            return self._certificate_turn(request.certificate)
         return self._turn("Хорошо, запрос сохранён. Нужно что-то ещё?", MORE_HELP_CHOICES)
 
     @staticmethod
@@ -969,6 +1015,8 @@ class ConversationService:
                 "simulated",
                 effect_key=self._effect_key(escalation.request_key or request_key, "human_handoff"),
             )
+            if self.scenario_flow:
+                return await self.scenario_flow.show(record, "i1")
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.CANCEL_WORKFLOW:
             await self._clear_abandoned_workflow(record)
@@ -980,6 +1028,9 @@ class ConversationService:
             )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.OFFER_AID and decision.need is not None:
+            if self.scenario_flow:
+                target = next(k for k, value in NEEDS.items() if value is decision.need)
+                return await self.scenario_flow.show(record, target)
             await self.store.update(
                 record,
                 need=decision.need.value,
@@ -988,6 +1039,8 @@ class ConversationService:
             )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.START_NEED_DISCOVERY:
+            if self.scenario_flow:
+                return await self.scenario_flow.show(record, "s2")
             await self.store.update(
                 record,
                 pending_offer=None,
@@ -995,6 +1048,8 @@ class ConversationService:
             )
             return self._render_resolved_turn(decision)
         if decision.effect is PolicyEffect.START_PSYCHOLOGIST_REQUEST:
+            if self.scenario_flow:
+                return await self.scenario_flow.show(record, "s34")
             await self.store.update(
                 record,
                 pending_aid_id=PSYCHOLOGIST_AID_ID,
@@ -1129,6 +1184,7 @@ class ConversationService:
             pending_city=None,
             pending_district=None,
             pending_offer=None,
+            scenario={},
         )
 
     async def _reset_entry_workflow(self, record: ConversationRecord) -> None:
@@ -1142,6 +1198,7 @@ class ConversationService:
             pending_city=None,
             pending_district=None,
             pending_offer=None,
+            scenario={"screen": "s1", "variant": 0} if self.scenario_flow else {},
         )
 
     async def _enter_safety_escalation(
@@ -1284,6 +1341,10 @@ class ConversationService:
 
     @staticmethod
     def _with_back_choice(record: ConversationRecord, turn: AgentTurn) -> AgentTurn:
+        if record.channel == "chatwoot":
+            turn = turn.model_copy(update={"choices": tuple(
+                HUMAN if choice.id == "human" else choice for choice in turn.choices
+            )})
         # Keep a stored outcome's original token: replay must not turn an old
         # button into permission to navigate a newer workflow.
         if any(choice.id.startswith("back:") for choice in turn.choices):
@@ -1291,13 +1352,14 @@ class ConversationService:
         if previous_checkpoint(record.navigation) is None:
             return turn
         choices = tuple(choice for choice in turn.choices if choice.id != "human")
+        back = Choice(id=f"back:{record.navigation['revision']}", label="Вернуться на шаг назад")
+        if record.channel == "chatwoot":
+            return turn.model_copy(update={"choices": (*choices, HUMAN, back)})
         return turn.model_copy(
             update={
                 "choices": (
                     *choices,
-                    Choice(
-                        id=f"back:{record.navigation['revision']}", label="Вернуться на шаг назад"
-                    ),
+                    back,
                 )
             }
         ).with_human_choice()
@@ -1312,6 +1374,8 @@ class ConversationService:
         text: str = NEED_PROMPT,
         choices: tuple[Choice, ...] = NEED_CHOICES,
     ) -> AgentTurn:
+        if self.scenario_flow:
+            return await self.scenario_flow.show(record, "s2")
         await self.store.update(record, state=ConversationState.DISCOVERING_NEED.value)
         return self._turn(text, choices)
 
@@ -1352,6 +1416,8 @@ class ConversationService:
         return ConversationService._turn(text, CONTACT_CHOICES)
 
     async def _state_turn(self, record: ConversationRecord) -> AgentTurn:
+        if self.scenario_flow and record.scenario.get("screen"):
+            return self.scenario_flow.current(record)
         if record.state == ConversationState.GREETING.value:
             return self._turn(WELCOME, CONTINUE_CHOICES)
         if record.state == ConversationState.CLOSED.value:

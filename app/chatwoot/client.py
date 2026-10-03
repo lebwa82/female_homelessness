@@ -154,6 +154,16 @@ class ChatwootClient:
         )
         return _as_object(payload)
 
+    async def list_conversations(self, page: int) -> tuple[dict[str, Any], ...]:
+        payload = await self._transport.request(
+            "GET", self._path(f"/conversations?status=all&assignee_type=all&page={page}"),
+            self._read_token,
+        )
+        data = _as_object(payload).get("data", {})
+        if not isinstance(data, dict) or not isinstance(data.get("payload"), list):
+            raise ChatwootApiError("list_conversations_shape", 0)
+        return tuple(item for item in data["payload"] if isinstance(item, dict))
+
     async def get_teams(self) -> tuple[dict[str, Any], ...]:
         payload = await self._transport.request("GET", self._path("/teams"), self._read_token)
         if not isinstance(payload, list):
@@ -169,11 +179,14 @@ class ChatwootClient:
         return tuple(m["id"] for m in payload if isinstance(m, dict) and type(m.get("id")) is int)
 
     async def unassign_human(self, conversation_id: int) -> None:
+        await self.assign_human(conversation_id, None)
+
+    async def assign_human(self, conversation_id: int, user_id: int | None) -> None:
         await self._transport.request(
             "POST",
             self._path(f"/conversations/{conversation_id}/assignments"),
             self._bot_token,
-            {"assignee_id": None},
+            {"assignee_id": user_id},
         )
 
     async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]:
@@ -301,6 +314,13 @@ class ChatwootClient:
         timeout_seconds: float = 60,
         poll_interval_seconds: float = 0.25,
     ) -> None:
+        conversation = await self.get_conversation(conversation_id)
+        api_only = False
+        if (conversation.get("meta") or {}).get("channel") == "Channel::Api":
+            inbox = await self._transport.request(
+                "GET", self._path(f"/inboxes/{conversation['inbox_id']}"), self._read_token,
+            )
+            api_only = not (inbox.get("webhook_url") or inbox.get("callback_webhook_url"))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         while True:
@@ -315,7 +335,8 @@ class ChatwootClient:
             if message is not None:
                 if message.get("status") == "failed":
                     raise ChatwootApiError("external_delivery", 502)
-                if message.get("source_id") not in {None, ""}:
+                if (message.get("source_id") not in {None, ""}
+                        or api_only and message.get("attachments")):
                     return
             if loop.time() >= deadline:
                 raise ChatwootApiError("external_delivery", 504)

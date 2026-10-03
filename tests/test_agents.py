@@ -22,11 +22,20 @@ from app.agents import (
 from app.domain import DiagnosticStatus, SafetyEscalation, SupportIntent
 
 
-def test_qwen_uses_json_object_responses_boundary_and_one_provider_settings_source() -> None:
+def test_qwen_uses_strict_schema_and_one_provider_settings_source() -> None:
     provider_settings = ProviderSettings(temperature=0.2, max_tokens=111, reasoning_effort="low")
 
-    assert yandex_response_format("risk") == {"type": "json_object"}
-    assert yandex_response_format("support") == {"type": "json_object"}
+    for name in ("risk", "support"):
+        response_format = yandex_response_format(name)
+        assert response_format["type"] == "json_schema" and response_format["strict"]
+        schema = response_format["schema"]
+        assert set(schema["required"]) == set(schema["properties"])
+        assert schema["additionalProperties"] is False
+        assert "rationale_alias_used" not in schema["properties"]
+    assert yandex_response_format("support")["schema"]["properties"]["intent"] == {"$ref": "#/$defs/SupportIntent"}
+    risk_schema = yandex_response_format("risk")["schema"]
+    assert "direct_human_request" not in risk_schema["$defs"]["SafetyCategory"]["enum"]
+    assert next(iter(risk_schema["properties"])) == "evidence_claims"
     assert yandex_model_settings(provider_settings) == {
         "temperature": 0.2,
         "max_output_tokens": 111,
@@ -36,8 +45,21 @@ def test_qwen_uses_json_object_responses_boundary_and_one_provider_settings_sour
 
 
 def test_default_qwen_settings_match_the_short_calm_mvp_contract() -> None:
-    assert DEFAULT_PROVIDER_SETTINGS.temperature == 0.3
+    assert DEFAULT_PROVIDER_SETTINGS.temperature == 0.0
     assert DEFAULT_PROVIDER_SETTINGS.max_tokens == 1500
+
+
+def test_classifier_does_not_load_legacy_workflow_instructions(monkeypatch) -> None:
+    from app import skills
+
+    def forbidden():
+        raise AssertionError("Legacy workflow bundle must not control diagnostic intent")
+
+    monkeypatch.setattr(skills, "load_support_skills", forbidden)
+    instructions = agents.support_instructions()
+    assert agents.SUPPORT_CLASSIFICATION_CONTRACT in instructions
+    assert agents.SUPPORT_TONE in instructions
+    assert "# Skill:" not in instructions
 
 
 def test_yandex_client_uses_fixed_timeout_and_disables_sdk_retries(

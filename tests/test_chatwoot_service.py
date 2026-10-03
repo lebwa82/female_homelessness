@@ -73,6 +73,11 @@ class FakeChatwoot:
         self.conversation["assignee_id"] = None
         self.conversation.get("meta", {}).pop("assignee", None)
 
+    async def assign_human(self, conversation_id, user_id):
+        self.conversation["assignee_id"] = user_id
+        self.conversation["meta"] = {**self.conversation.get("meta", {}),
+                                      "assignee_type": "User", "assignee": {"id": user_id}}
+
     async def get_conversation(self, conversation_id: int) -> dict[str, Any]:
         self.conversation_reads += 1
         return self.conversation
@@ -168,7 +173,7 @@ async def test_requested_duty_keeps_conversation_and_commands_available() -> Non
     assert api.conversation["custom_attributes"]["handoff_requested"] is True
     assert await service.process(event("test followup", 42))
     assert gateway.calls == 1
-    assert len(api.notes) == 1
+    assert len(api.notes) == 3  # Initial alert, explicit message to duty, renewed alert.
     assert await service.process(event("/clear", 43))
     assert api.conversation["custom_attributes"]["context_epoch"] == 1
     assert api.conversation["custom_attributes"]["handoff_requested"] is True
@@ -261,12 +266,14 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
     assert claimed[0][0] == "food_card"
     assert "TEST-CODE" in api.replies[-1]["text"]
     assert api.replies[-1]["sensitive_content"] == "certificate"
-    assert api.conversation["custom_attributes"]["workflow_state"] == "aid_requested"
+    assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s31b"
     assert "contact=not_provided:not_provided" in api.notes[0]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("takeover", [None, "download", "delivery"])
 async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
+    takeover,
 ) -> None:
     api = FakeChatwoot()
     api.conversation["custom_attributes"].update(
@@ -277,6 +284,8 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
     class Store:
         async def download(self, ref: CertificateObjectRef) -> bytes:
             assert ref.key == "test/object.pdf"
+            if takeover == "download":
+                api.conversation["assignee_id"] = 4
             return payload
 
         async def upload(self, parsed):  # pragma: no cover - protocol completeness
@@ -295,6 +304,14 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
         ))
 
     submitted: list[tuple[str, int]] = []
+    wait_for_delivery = api.wait_for_external_delivery
+
+    async def delivery(conversation_id, message_id):
+        await wait_for_delivery(conversation_id, message_id)
+        if takeover == "delivery":
+            api.conversation["assignee_id"] = 4
+
+    api.wait_for_external_delivery = delivery
     service = ChatwootAgentService(
         api,
         certificate_claim=claim,
@@ -303,7 +320,14 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
     )
     await service.process(event("aid:food_card", 41))
     api.replies.clear()
-    await service.process(event("certificate:confirm", 42))
+    handled = await service.process(event("certificate:confirm", 42))
+
+    if takeover:
+        assert not handled
+        assert len(api.replies) == (1 if takeover == "delivery" else 0)
+        assert len(submitted) == (1 if takeover == "delivery" else 0)
+        assert not any(r["turn_key"] == "message:42" for r in api.replies)
+        return
 
     assert len(api.replies) == 2
     assert api.replies[0]["turn_key"] == "message:42:certificate"
@@ -364,10 +388,11 @@ async def test_chatwoot_certificate_limit_survives_clear_and_allows_legal_help()
     await service.process(event("certificate:confirm", 56))
 
     assert len(recipients) == 1
-    assert "уже получили сертификат" in api.replies[-1]["text"]
+    assert api.conversation["custom_attributes"]["scenario"]["screen"] == "i9"
+    assert api.conversation["custom_attributes"]["scenario"]["variant"] == 1
     assert "TEST-FIRST" not in api.replies[-1]["text"]
     await service.process(event("extra:legal", 57))
-    assert api.conversation["custom_attributes"]["workflow_state"] == "collecting_contact_method"
+    assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s35"
 
 
 @pytest.mark.asyncio
@@ -516,7 +541,7 @@ async def test_takeover_and_return_sync_owner_without_model_or_reply():
     assert api.conversation["custom_attributes"]["reply_owner"] == "human"
     api.conversation["assignee_id"] = None
     await service.process(ConversationChanged(23))
-    assert api.conversation["custom_attributes"]["reply_owner"] == "human"
+    assert api.conversation["custom_attributes"]["reply_owner"] == "bot"
     await service.process(StaffMessage(50, 23, 4, return_to_bot=True))
     assert api.conversation["custom_attributes"]["reply_owner"] == "bot"
     count = len(api.attributes)

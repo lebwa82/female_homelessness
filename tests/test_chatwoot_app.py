@@ -169,3 +169,60 @@ async def test_signed_assignment_event_reaches_owner_synchronization(name: str) 
     assert (await webhook.handle(request)).status == 204
     await asyncio.sleep(0)
     assert service.events == [ConversationChanged(23)]
+
+
+async def test_each_delivery_status_is_processed_once_in_legacy_mode():
+    service = RecordingService()
+    webhook = AgentBotWebhook(service, route_secret="route")
+    for status in ("sent", "delivered", "read", "read"):
+        payload = {**_payload(), "event": "message_updated", "message_type": "outgoing",
+                   "status": status}
+        await webhook.handle(FakeRequest(json.dumps(payload).encode(), {}))
+    await webhook.shutdown(None)
+    assert [e.status for e in service.events] == ["sent", "delivered", "read"]
+
+
+async def test_failed_delivery_is_not_marked_as_success_and_can_be_redelivered(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    service = RecordingService()
+    service.process = AsyncMock(side_effect=RuntimeError("unavailable"))
+    monkeypatch.setattr("app.chatwoot.app.asyncio.sleep", AsyncMock())
+    webhook = AgentBotWebhook(service, route_secret="route")
+    request = FakeRequest(json.dumps(_payload()).encode(), {})
+    await webhook.handle(request)
+    await webhook.shutdown(None)
+    assert service.process.await_count == 3
+    assert not webhook._inflight and not webhook._deliveries
+    service.process.side_effect = None
+    await webhook.handle(request)
+    await webhook.shutdown(None)
+    assert service.process.await_count == 4
+    await webhook.handle(request)
+    assert service.process.await_count == 4
+
+
+async def test_completed_delivery_cache_is_bounded():
+    webhook = AgentBotWebhook(RecordingService(), route_secret="route")
+    for number in range(2050):
+        await webhook._process(object(), str(number))
+    assert len(webhook._deliveries) == 2048
+    assert "0" not in webhook._deliveries and "2049" in webhook._deliveries
+
+
+async def test_shutdown_drains_inflight_work():
+    from unittest.mock import AsyncMock
+
+    service = RecordingService()
+    finished = asyncio.Event()
+
+    async def process(event):
+        await asyncio.sleep(0)
+        finished.set()
+
+    service.process = AsyncMock(side_effect=process)
+    webhook = AgentBotWebhook(service, route_secret="route")
+    await webhook.handle(FakeRequest(json.dumps(_payload()).encode(), {}))
+    await webhook.shutdown(None)
+    assert finished.is_set()
+    assert not webhook._inflight

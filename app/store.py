@@ -48,6 +48,7 @@ class ConversationRecord:
     context_epoch: int = 0
     version: int = 0
     navigation: dict[str, Any] = field(default_factory=dict)
+    scenario: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -1174,6 +1175,7 @@ class PostgresConversationStore:
             pending_city=row.pending_city,
             pending_district=row.pending_district,
             pending_offer=row.pending_offer,
+            scenario=row.scenario or {},
             generation=row.generation,
             context_epoch=row.context_epoch,
             version=row.version,

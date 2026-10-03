@@ -1,4 +1,4 @@
-"""Exercise native macros, routing and sticky ownership in an isolated API conversation."""
+"""Exercise native macros, routing and visible ownership in an isolated API conversation."""
 
 import argparse
 import asyncio
@@ -11,8 +11,13 @@ from app.chatwoot.queues import team_id
 from app.config import settings
 
 
-async def main(conversation_id: int):
-    api = ChatwootClient(
+async def main(
+    conversation_id: int, *, api: ChatwootClient | None = None,
+    account_id: int | None = None, duty_team_id: int | None = None,
+):
+    account_id = account_id or settings.chatwoot_account_id
+    duty_team_id = duty_team_id or settings.chatwoot_duty_team_id
+    api = api or ChatwootClient(
         base_url=settings.chatwoot_base_url, account_id=settings.chatwoot_account_id,
         read_token=settings.chatwoot_read_token, bot_token=settings.chatwoot_bot_token,
     )
@@ -23,7 +28,7 @@ async def main(conversation_id: int):
         or meta.get("sender", {}).get("name") != "Техническая проверка — не обращение"
     ):
         raise RuntimeError("Refusing to modify a non-test conversation")
-    base = f"/api/v1/accounts/{settings.chatwoot_account_id}"
+    base = f"/api/v1/accounts/{account_id}"
     prefix = f"{base}/conversations/{conversation_id}"
 
     async def request(method, path, payload=None):
@@ -58,7 +63,7 @@ async def main(conversation_id: int):
     macro_ids = {m["name"]: m["id"] for m in macros}
     teams = await api.get_teams()
     legal_id = next(t["id"] for t in teams if t["name"].casefold() == "юристы")
-    default_id = settings.chatwoot_duty_team_id
+    default_id = duty_team_id
     assert legal_id != default_id
     assert await api.get_team_members(legal_id)
     passed("native_queue_catalog", team_count=len(teams))
@@ -139,7 +144,6 @@ async def main(conversation_id: int):
             )
 
         await wait_for(moved, "transfer_macro")
-        await post("/assignments", {"assignee_id": None})
         await send("/system_info")
         assert await human()
         incoming = await post("/messages", {
@@ -149,10 +153,33 @@ async def main(conversation_id: int):
         assert not await api.has_reply_for_turn(conversation_id, f"message:{incoming['id']}")
         await send("/clear")
         assert await human()
-        passed("native_transfer_and_unassignment_keep_human_mode")
+        passed("native_team_transfer_preserves_assigned_specialist")
+        await post("/assignments", {"assignee_id": None})
+        await send("/start")
+        assert not await human()
+        passed("native_unassignment_returns_bot")
+        # A public staff answer must create a visible assignment itself.
+        await post("/messages", {"content": "Техническая проверка ответа специалиста.",
+                                  "message_type": "outgoing"})
+        await wait_for(human, "public_staff_takeover")
+        current = await api.get_conversation(conversation_id)
+        assert current["meta"]["assignee"]["id"] == profile["id"]
+        passed("public_staff_reply_assigns_sender_visibly")
         await return_to_bot()
         await send("/start")
         passed("native_return_macro_reenables_bot")
+        await post("/assignments", {"assignee_id": profile["id"]})
+        await wait_for(human, "human_takeover_before_close")
+        await post("/toggle_status", {"status": "resolved"})
+
+        async def closed_and_released():
+            c = await api.get_conversation(conversation_id)
+            return c["status"] == "resolved" and c["custom_attributes"].get("reply_owner") == "bot"
+
+        await wait_for(closed_and_released, "native_close_releases_specialist")
+        await send("/start")
+        assert not await human()
+        passed("native_close_reopens_with_bot")
         await macro("Передать юристам")
 
         async def moved_to_legal():
@@ -172,7 +199,7 @@ async def main(conversation_id: int):
         folder = next(f for f in folders if f["name"] == "Юридическая помощь")
         assert str(legal_id) in folder["query"]["payload"][0]["values"]
         filtered = await request("POST", base + "/conversations/filter", folder["query"])
-        assert isinstance(filtered, dict)
+        assert any(c["id"] == conversation_id for c in filtered["payload"])
         passed("native_navigation_folder_filter")
     finally:
         await post("/toggle_status", {"status": "resolved"})

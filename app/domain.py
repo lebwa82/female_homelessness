@@ -10,6 +10,7 @@ DELIVERY_AMBIGUOUS_CATEGORY = "delivery_ambiguous"
 
 
 class ConversationState(str, Enum):
+    SCENARIO = "scenario"
     OPEN_CONVERSATION = "open_conversation"
     GREETING = "greeting"
     DISCOVERING_NEED = "discovering_need"

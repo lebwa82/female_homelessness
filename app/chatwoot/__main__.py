@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+
 from aiohttp import web
+from redis.asyncio import Redis
 
 from app.certificate_documents import S3CertificateObjectStore
 from app.chatwoot.app import create_application
 from app.chatwoot.certificates import CertificateInventory, database_url
 from app.chatwoot.client import ChatwootClient
+from app.chatwoot.event_queue import DurableEventQueue
+from app.chatwoot.followups import run as run_followups
 from app.chatwoot.service import ChatwootAgentService
 from app.config import settings
 
@@ -49,24 +55,39 @@ def main() -> None:
         certificate_mark_delivered=inventory.mark_delivered,
         certificate_mark_delivery_failed=inventory.mark_delivery_failed,
     )
+    redis = Redis.from_url(settings.telegram_ingress_redis_url, decode_responses=True,
+                           socket_timeout=5, socket_connect_timeout=5)
+    event_queue = DurableEventQueue(redis, service,
+                                   namespace=f"women-help:chatwoot-events:{settings.chatwoot_account_id}")
     application = create_application(
         service,
         route_secret=settings.chatwoot_webhook_secret,
         signature_secret=settings.chatwoot_webhook_hmac_secret,
+        event_queue=event_queue,
     )
 
-    async def on_startup(_app: web.Application) -> None:
+    async def lifecycle(_app: web.Application):
         await inventory.initialize()
+        await event_queue.start()
+        worker = asyncio.create_task(run_followups(client, service))
+        try:
+            yield
+        finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+            await event_queue.close()
+            await redis.aclose()
+            await inventory.close()
 
-    async def on_cleanup(_app: web.Application) -> None:
-        await inventory.close()
-
-    application.on_startup.append(on_startup)
-    application.on_cleanup.append(on_cleanup)
+    application.cleanup_ctx.append(lifecycle)
     web.run_app(
         application,
         host=settings.chatwoot_listen_host,
         port=settings.chatwoot_listen_port,
+        # The webhook's URL includes its route credential. Standard aiohttp
+        # access logging would copy that credential into the container journal.
+        access_log=None,
     )
 
 

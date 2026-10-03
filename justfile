@@ -85,6 +85,23 @@ deploy-chatwoot-test host="":
 chatwoot-check host="":
     bash scripts/chatwoot_test_status.sh "{{host}}"
 
+# Login to the official Chatwoot CLI; credentials stay in the macOS keyring.
+chatwoot-login:
+    uv run python -m scripts.setup_chatwoot_cli
+
+# Official CLI shorthand, e.g. just cw convs --assignee all --status all.
+[positional-arguments]
+cw *args:
+    @"${CHATWOOT_CLI:-$HOME/.local/bin/chatwoot}" "$@"
+
+# Live Chatwoot-only acceptance: creates isolated test chats, then resolves them.
+chatwoot-test-live suite="all":
+    uv run python -m scripts.chatwoot_acceptance --suite "{{suite}}"
+
+# Full current-code acceptance, or real deployed webhook; isolated chats, no Telegram.
+chatwoot-acceptance mode="webhook":
+    uv run python -m scripts.run_chatwoot_acceptance --mode "{{mode}}"
+
 # Generate 15+15 neutral invalid PDF certificates locally.
 certificates-generate-test output="output/test-certificates":
     uv run python -m scripts.generate_test_certificate_pdfs "{{output}}" --count 15

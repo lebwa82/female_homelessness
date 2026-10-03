@@ -183,7 +183,8 @@ if [[ "$healthy" != 1 ]]; then
 fi
 
 if [[ "$agent_was_active" == 1 ]]; then
-  sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" handoff_schema </dev/null
+  # Includes handoff schema and new scenario macros; preserves edited macros.
+  sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" queues </dev/null
   sudo python3 "$TARGET_DIR/deploy/chatwoot/activate.py" refresh_routes </dev/null
 fi
 

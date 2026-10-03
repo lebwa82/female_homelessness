@@ -109,7 +109,7 @@ async def test_support_catalog_displays_current_wording_and_keeps_legacy_callbac
     turn = await service.handle_callback(incoming(3), "need:support")
     labels = {choice.id: choice.label for choice in turn.choices}
     assert labels["aid:psychologist_3_sessions"] == "Встреча с психологом"
-    assert labels["aid:peer_consultation"] == "Разговор с женщиной, пережившей схожий опыт"
+    assert labels["aid:peer_consultation"] == "Разговор с равной консультанткой"
     assert "Три" not in turn.text
 
 

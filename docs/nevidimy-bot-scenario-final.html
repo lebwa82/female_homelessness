@@ -61,6 +61,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
 @media (max-width:640px){.wrap{padding:36px 16px 80px}.screen{padding:18px 16px}.bubble{font-size:16px;padding:13px 15px}}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 @media print{body{background:#fff}.screen,.map{break-inside:avoid;border-color:#999}.key{color:#000;border-color:#999}h2{break-after:avoid}}
+.bubble .step-head{font-family:var(--doc);font-size:15px;font-weight:600;color:var(--ink);margin:14px 0 4px 0}
+.key.human{border:1px dashed var(--flag);color:var(--flag);background:transparent;border-radius:999px}
+a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
+.col .key{display:inline-block;padding:0 9px;font-size:13.5px;line-height:1.7}
 </style>
 </head>
 <body>
@@ -73,6 +77,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
 <h2><span class="n">01</span>Как читать</h2>
 <div class="col">
 <p>В карте каждый прямоугольник — это экран. Нажмите на него, чтобы перейти к точному тексту. Зелёные — то, что выбирает женщина, серые пунктирные — выходы из разговора.</p>
+<p>Кнопка <span class="key human">💬 Поговорить с человеком</span> выглядит иначе, чем остальные: это не вариант помощи, а возможность в любой момент связаться с командой. Она всегда стоит отдельной строкой — под вариантами помощи и над кнопками навигации.</p>
 <p>Ниже карты идут экраны по порядку: когда появляется, дословный текст и кнопки под ним. <span class="ph">В скобках</span> — то, что вписывается перед запуском.</p>
 </div>
 
@@ -89,7 +94,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
           <li><a class="node pick" href="#s21"><span class="id">2.1</span>Жильё / некуда идти</a>
             <ul>
               <li><a class="node" href="#s33"><span class="id">3.3</span>Сертификат на проживание → <span class="id">3.3.1</span> выдача → <span class="id">3.3.2</span> что ещё доступно</a></li>
-              <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста → <span class="id">3.5.1</span> запрос принят</a></li>
+              <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста → <span class="id">3.5.1</span> запрос и тема → <span class="id">3.5.3</span> записано</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
             </ul>
           </li>
@@ -109,6 +114,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
           <li><a class="node pick" href="#s24"><span class="id">2.4</span>Поговорить / нужна поддержка</a>
             <ul>
               <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога → <span class="id">3.4.1</span> запрос принят</a></li>
+              <li><a class="node" href="#s38"><span class="id">3.8</span>Равная консультантка → <span class="id">3.8.1</span> запрос принят</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
             </ul>
           </li>
@@ -130,9 +136,9 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
 
 <span class="branchlabel">Кнопка «Здесь нет того, что мне нужно» есть на каждом из экранов 2.1–2.5 и ведёт в одну и ту же ветку 3.6</span>
 
-<span class="branchlabel">Через неделю — всем, кто получил помощь</span>
+<span class="branchlabel">Через четыре дня — всем, кто получил помощь</span>
 <ul class="tree">
-  <li><a class="node" href="#s5"><span class="id">5</span>Вопрос через неделю</a>
+  <li><a class="node" href="#s5"><span class="id">5</span>Вопрос через четыре дня</a>
     <ul>
       <li><a class="node pick" href="#s51"><span class="id">5.1</span>«Да» → на что пригодился сертификат</a>
         <ul><li><a class="node" href="#s511"><span class="id">5.1.1</span>«На другое» → можно написать или пропустить</a></li></ul>
@@ -141,13 +147,27 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
         <ul>
           <li><a class="node" href="#s53"><span class="id">5.3</span>Стало легче → <a class="node" href="#s6"><span class="id">6</span>обратная связь</a></a></li>
           <li><a class="node" href="#s54"><span class="id">5.4</span>Пока так же → <a class="node" href="#s6"><span class="id">6</span>обратная связь</a></a></li>
-          <li><a class="node" href="#s55"><span class="id">5.5</span>Стало тяжелее → человек, без просьбы об отзыве</a></li>
+          <li><a class="node" href="#s55"><span class="id">5.5</span>Стало тяжелее → <a class="node" href="#s6"><span class="id">6</span>обратная связь</a></a></li>
         </ul>
       </li>
-      <li><a class="node" href="#s56"><span class="id">5.6</span>Пока не получилось воспользоваться</a></li>
+      <li><a class="node" href="#s56"><span class="id">5.6</span>Пока не получилось</a>
+        <ul><li><a class="node" href="#s561"><span class="id">5.6.1</span>Запрос специалисту ещё раз</a></li></ul>
+      </li>
       <li><a class="node" href="#s57"><span class="id">5.7</span>Что-то не получилось с сертификатом</a></li>
       <li><a class="node" href="#s58"><span class="id">5.8</span>Мне всё ещё нужна помощь</a></li>
       <li><a class="node exit" href="#s59"><span class="id">5.9</span>Нет ответа — одно напоминание</a></li>
+    </ul>
+  </li>
+</ul>
+
+<span class="branchlabel">После консультации психолога, юриста или разговора с равной консультанткой</span>
+<ul class="tree">
+  <li><a class="node" href="#s7"><span class="id">7</span>Оценка консультации</a>
+    <ul>
+      <li><a class="node" href="#s71"><span class="id">7.1</span>Был ли разговор полезным</a></li>
+      <li><a class="node" href="#s72"><span class="id">7.2</span>Было ли комфортно → <span class="id">7.2.1</span> если нет</a></li>
+      <li><a class="node" href="#s73"><span class="id">7.3</span>Удобно ли было записаться</a></li>
+      <li><a class="node" href="#s74"><span class="id">7.4</span>Впечатления своими словами → <span class="id">7.5</span> спасибо</a></li>
     </ul>
   </li>
 </ul>
@@ -182,8 +202,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="keys">
     <a class="key" href="#s2">Да, посмотреть</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s1a">Не сейчас</a>
-    <a class="key quiet" href="#i1">Поговорить с человеком</a>
   </div>
 </section>
 <section class="screen" id="s1a">
@@ -213,6 +235,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <span class="keyrule"></span>
     <a class="key quiet" href="#s1">Вернуться на шаг назад</a>
   </div>
+  <div class="second">Если она пишет своими словами, бот предлагает подходящую ветку 2.1–2.5. Если понять запрос не получается — экран И5.</div>
 </section>
 <section class="screen" id="s21">
   <div class="shead"><span class="sid">2.1</span><span class="stitle">Жильё, некуда идти</span>
@@ -226,9 +249,11 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key" href="#s33">Сертификат на несколько ночей в хостеле</a>
     <span class="keyrule"></span>
     <a class="key" href="#s35">Консультация юриста</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -244,9 +269,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key" href="#s31">Сертификат на продукты</a>
     <a class="key" href="#s32">Сертификат на лекарства</a>
     <span class="keyrule"></span>
-    <a class="key" href="#i1">Поговорить с человеком</a>
-    <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -260,9 +286,11 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="keys">
     <a class="key" href="#s35">Консультация юриста</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -270,15 +298,18 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">2.4</span><span class="stitle">Поговорить, нужна поддержка</span>
   <span class="swhen">Выбрана кнопка «Поговорить / нужна поддержка».</span></div>
   <div class="bubble">
-    <p>Сейчас мы можем помочь бесплатной консультацией психолога или разговором с человеком из команды поддержки.</p>
+    <p>Сейчас мы можем помочь бесплатной консультацией психолога или можно поговорить с равной консультанткой — женщиной с личным опытом зависимости или созависимости.</p>
     <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
   <div class="keys">
     <a class="key" href="#s34">Консультация психолога</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key" href="#s38">Поговорить с равной консультанткой</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -296,9 +327,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key" href="#s35">Консультация юриста</a>
     <a class="key" href="#s34">Консультация психолога</a>
     <span class="keyrule"></span>
-    <a class="key" href="#i1">Поговорить с человеком</a>
-    <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -306,10 +338,11 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.1</span><span class="stitle">Продукты: описание</span>
   <span class="swhen">Выбран сертификат на продукты на экране 2.2.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат в <span class="ph">[МАГАЗИН]</span> на <span class="ph">[СУММА]</span> ₽ и купить продукты, которые нужны именно вам.</p>
+    <p>Можно получить электронный сертификат в магазин «Пятёрочка» на 3 000 ₽ и купить продукты, которые нужны именно вам.</p>
     <p>Присылать список покупок, чеки или объяснять свой выбор не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
-    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога и юриста доступны отдельно и дополнительно к нему.</em></p>
+    <p>Срок действия сертификата — 7 дней со дня получения.</p>
+    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога, юриста и равной консультантки доступны отдельно и дополнительно к нему.</em></p>
   </div>
   <div class="keys">
     <a class="key" href="#s31b">Выбрать сертификат</a>
@@ -320,15 +353,16 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.1.1</span><span class="stitle">Продукты: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат в <span class="ph">[МАГАЗИН]</span> на <span class="ph">[СУММА]</span> ₽:</p>
+    <p>Вот ваш сертификат в магазин «Пятёрочка» на 3 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
     <p>Как воспользоваться:</p>
     <ul>
-      <li>Выберите продукты в любом магазине <span class="ph">[МАГАЗИН]</span>.</li>
-      <li>На кассе скажите, что хотите оплатить покупку сертификатом, и покажите его номер с телефона или запишите номер на бумаге.</li>
-      <li>Если покупка дороже суммы сертификата, разницу можно доплатить. Если дешевле, остаток сохранится.</li>
+      <li>Выберите продукты в любом магазине «Пятёрочка».</li>
+      <li>Перед сканированием товаров предупредите кассира, что оплата будет подарочным сертификатом.</li>
+      <li>Предъявите сертификат: покажите штрихкод или QR-код на экране смартфона либо распечатанную версию.</li>
+      <li>Если стоимость покупки превышает номинал сертификата, доплатите разницу наличными или банковской картой.</li>
     </ul>
-    <p>Сертификат действует до <span class="ph">[ДАТА]</span>.</p>
+    <p>Сертификат действует 7 дней — до <span class="ph">[ДАТА]</span>.</p>
     <p>Если кроме этого вам хочется с кем-то поговорить или разобраться с юридическим вопросом, здесь можно бесплатно обратиться к психологу или юристу.</p>
   </div>
   <div class="keys">
@@ -343,11 +377,12 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.2</span><span class="stitle">Лекарства: описание</span>
   <span class="swhen">Выбран сертификат на лекарства на экране 2.2.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат в аптеку <span class="ph">[АПТЕКА]</span> на <span class="ph">[СУММА]</span> ₽.</p>
+    <p>Можно получить электронный сертификат Ozon на 3 000 ₽.</p>
     <p>Им можно оплатить лекарства, средства гигиены и другие нужные товары.</p>
     <p>Что именно покупать, решаете вы. Отчитываться о покупках не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
-    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога и юриста доступны отдельно и дополнительно к нему.</em></p>
+    <p>Срок действия сертификата — 7 дней со дня получения.</p>
+    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога, юриста и равной консультантки доступны отдельно и дополнительно к нему.</em></p>
   </div>
   <div class="keys">
     <a class="key" href="#s32b">Выбрать сертификат</a>
@@ -358,15 +393,27 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.2.1</span><span class="stitle">Лекарства: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат в аптеку <span class="ph">[АПТЕКА]</span> на <span class="ph">[СУММА]</span> ₽:</p>
+    <p>Вот ваш сертификат на лекарства на 3 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
-    <p>Как воспользоваться:</p>
+    <p class="step-head">1. Зарегистрируйтесь или войдите на Ozon</p>
     <ul>
-      <li>Выберите нужные товары в аптеке <span class="ph">[АПТЕКА]</span> или на её сайте.</li>
-      <li>В аптеке покажите номер сертификата на кассе. При заказе на сайте введите его в поле для промокода.</li>
-      <li>Если покупка дороже суммы сертификата, разницу можно доплатить.</li>
+      <li>Если у вас ещё нет аккаунта, создайте его. Если есть — войдите.</li>
     </ul>
-    <p>Сертификат действует до <span class="ph">[ДАТА]</span>.</p>
+    <p class="step-head">2. Найдите нужные лекарства</p>
+    <ul>
+      <li>Выберите форму выпуска, дозировку и количество, затем добавьте товар в корзину.</li>
+    </ul>
+    <p class="step-head">3. Перейдите к оплате и примените сертификат</p>
+    <ul>
+      <li>Откройте корзину и начните оформление заказа.</li>
+      <li>В разделе оплаты найдите поле для подарочного сертификата или промокода и введите код.</li>
+      <li>Сумма сертификата зачислится на баланс заказа. Если заказ стоит дороже, оставшуюся часть можно доплатить любым удобным способом.</li>
+    </ul>
+    <p class="step-head">4. Выберите способ доставки</p>
+    <ul>
+      <li>Заказ можно получить курьером, в пункте выдачи или в ближайшей аптеке.</li>
+    </ul>
+    <p>Сертификат действует 7 дней — до <span class="ph">[ДАТА]</span>.</p>
     <p>Если вам нужна не только эта помощь, здесь можно бесплатно поговорить с психологом или задать вопрос юристу.</p>
   </div>
   <div class="keys">
@@ -381,10 +428,11 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.3</span><span class="stitle">Проживание: описание</span>
   <span class="swhen">Выбран сертификат на проживание на экране 2.1.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат на проживание на <span class="ph">[СУММА]</span> ₽. Обычно этой суммы хватает примерно на три ночи в хостеле.</p>
-    <p>Вы сами выбираете город, даты и место на <span class="ph">[АГРЕГАТОР]</span>. Сообщать нам, где вы остановитесь и почему понадобилось жильё, не обязательно.</p>
+    <p>Можно получить электронный сертификат на проживание на 3 000 ₽. Обычно этой суммы хватает примерно на три ночи в хостеле.</p>
+    <p>Вы сами выбираете город, даты и место на Ozon Travel. Сообщать нам, где вы остановитесь и почему понадобилось жильё, не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
-    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога и юриста доступны отдельно и дополнительно к нему.</em></p>
+    <p>Срок действия сертификата — 7 дней со дня получения.</p>
+    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога, юриста и равной консультантки доступны отдельно и дополнительно к нему.</em></p>
   </div>
   <div class="keys">
     <a class="key" href="#s33b">Выбрать сертификат</a>
@@ -395,15 +443,28 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.3.1</span><span class="stitle">Проживание: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат на проживание на <span class="ph">[СУММА]</span> ₽:</p>
+    <p>Вот ваш сертификат на проживание на 3 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
-    <p>Как забронировать:</p>
+    <p class="step-head">1. Активируйте сертификат</p>
     <ul>
-      <li>Откройте <span class="ph">[АГРЕГАТОР]</span> и выберите подходящее жильё, город и даты.</li>
-      <li>При оплате введите номер сертификата в поле для промокода.</li>
-      <li>Подтверждение бронирования придёт вам на почту или в приложение.</li>
+      <li>Войдите в личный кабинет на Ozon.</li>
+      <li>Откройте раздел «Кодовые слова и сертификаты», введите код и нажмите «Активировать».</li>
+      <li>Проверьте, что деньги зачислились на «Баланс средств», — обычно это занимает 10–15 минут.</li>
     </ul>
-    <p>Сертификат действует до <span class="ph">[ДАТА]</span>.</p>
+    <p class="step-head">2. Найдите и выберите хостел</p>
+    <ul>
+      <li>Откройте раздел Ozon Travel и выберите вкладку «Отели».</li>
+      <li>Укажите город, даты и количество гостей и нажмите «Найти».</li>
+      <li>Выберите подходящий хостел и нажмите «Перейти к бронированию».</li>
+    </ul>
+    <p class="step-head">3. Оплатите бронирование</p>
+    <ul>
+      <li>Заполните данные гостей.</li>
+      <li>На шаге оплаты отметьте «Использовать баланс средств».</li>
+      <li>Если суммы сертификата не хватает, оставшуюся часть можно доплатить картой или через СБП.</li>
+      <li>Нажмите «Оплатить» — подтверждение бронирования придёт на почту или в приложение.</li>
+    </ul>
+    <p>Сертификат действует 7 дней — до <span class="ph">[ДАТА]</span>: забронировать жильё нужно в этот срок.</p>
     <p>При заселении могут попросить паспорт — это правило самого места проживания. Нам документы не требуются.</p>
   </div>
   <div class="second">Следом приходит второе сообщение — экран 3.3.2.</div>
@@ -421,7 +482,8 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="keys">
     <a class="key" href="#s34">Поговорить с психологом</a>
     <a class="key" href="#s35">Задать вопрос юристу</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#s1">Вернуться в начало</a>
     <a class="key quiet" href="#i2">Завершить</a>
@@ -431,11 +493,12 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.7</span><span class="stitle">Товары для детей: описание</span>
   <span class="swhen">Выбран сертификат на товары для детей на экране 2.5.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат в <span class="ph">[ДЕТСКИЙ МАГАЗИН]</span> на <span class="ph">[СУММА]</span> ₽.</p>
-    <p>Им можно оплатить одежду, обувь, питание, подгузники и другие детские товары.</p>
+    <p>Можно получить электронный сертификат в магазин «Пятёрочка» на 3 000 ₽.</p>
+    <p>Им можно оплатить детское питание, подгузники, средства гигиены и другие товары для детей.</p>
     <p>Что именно покупать, решаете вы. Отчитываться о покупках не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
-    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога и юриста доступны отдельно и дополнительно к нему.</em></p>
+    <p>Срок действия сертификата — 7 дней со дня получения.</p>
+    <p><em>Сертификат выдаётся один — на продукты, лекарства, проживание или товары для детей. Консультации психолога, юриста и равной консультантки доступны отдельно и дополнительно к нему.</em></p>
   </div>
   <div class="keys">
     <a class="key" href="#s37b">Выбрать сертификат</a>
@@ -446,15 +509,16 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">3.7.1</span><span class="stitle">Товары для детей: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат в <span class="ph">[ДЕТСКИЙ МАГАЗИН]</span> на <span class="ph">[СУММА]</span> ₽:</p>
+    <p>Вот ваш сертификат в магазин «Пятёрочка» на 3 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
     <p>Как воспользоваться:</p>
     <ul>
-      <li>Выберите нужные товары в магазине <span class="ph">[ДЕТСКИЙ МАГАЗИН]</span> или на его сайте.</li>
-      <li>На кассе покажите номер сертификата. При заказе на сайте введите его в поле для промокода.</li>
-      <li>Если покупка дороже суммы сертификата, разницу можно доплатить. Если дешевле, остаток сохранится.</li>
+      <li>Выберите нужные товары в любом магазине «Пятёрочка».</li>
+      <li>Перед сканированием товаров предупредите кассира, что оплата будет подарочным сертификатом.</li>
+      <li>Предъявите сертификат: покажите штрихкод или QR-код на экране смартфона либо распечатанную версию.</li>
+      <li>Если стоимость покупки превышает номинал сертификата, доплатите разницу наличными или банковской картой.</li>
     </ul>
-    <p>Сертификат действует до <span class="ph">[ДАТА]</span>.</p>
+    <p>Сертификат действует 7 дней — до <span class="ph">[ДАТА]</span>.</p>
     <p>Если появятся вопросы про документы, выплаты или сложности с детским садом или школой, здесь можно бесплатно обратиться к юристу или психологу.</p>
   </div>
   <div class="keys">
@@ -491,6 +555,33 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key quiet" href="#s1">Вернуться в начало</a>
   </div>
 </section>
+<section class="screen" id="s38">
+  <div class="shead"><span class="sid">3.8</span><span class="stitle">Равная консультантка: описание</span>
+  <span class="swhen">Выбрано «Поговорить с равной консультанткой» на экране 2.4.</span></div>
+  <div class="bubble">
+    <p>Можно бесплатно поговорить с равной консультанткой онлайн.</p>
+    <p>Это женщина, которая сама сталкивалась с зависимостью или созависимостью и знает об этом не понаслышке. С ней можно поговорить о том, что происходит сейчас — с вами или с близким человеком, — без оценки и советов.</p>
+    <p>Готовиться заранее или решать, достаточно ли серьёзная у вас причина для разговора, не нужно.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s38b">Хочу поговорить с равной консультанткой</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s24">Вернуться на шаг назад</a>
+  </div>
+</section>
+<section class="screen" id="s38b">
+  <div class="shead"><span class="sid">3.8.1</span><span class="stitle">Равная консультантка: запрос принят</span>
+  <span class="swhen">Нажато «Хочу поговорить с равной консультанткой».</span></div>
+  <div class="bubble">
+    <p>Передала ваш запрос равной консультантке.</p>
+    <p>С вами свяжутся здесь, в чате. Обычно равная консультантка отвечает в течение десяти минут, с 10:00 до 20:00 по московскому времени.</p>
+    <p>Готовить что-то к разговору заранее не обязательно.</p>
+  </div>
+  <div class="keys">
+    <a class="key quiet" href="#i2">Завершить</a>
+    <a class="key quiet" href="#s1">Вернуться в начало</a>
+  </div>
+</section>
 <section class="screen" id="s35">
   <div class="shead"><span class="sid">3.5</span><span class="stitle">Юрист: описание</span>
   <span class="swhen">Выбрана консультация юриста — с экранов 2.1, 2.3, 2.5 или после выдачи сертификата.</span></div>
@@ -504,11 +595,47 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
 </section>
 <section class="screen" id="s35b">
-  <div class="shead"><span class="sid">3.5.1</span><span class="stitle">Юрист: запрос принят</span>
+  <div class="shead"><span class="sid">3.5.1</span><span class="stitle">Юрист: запрос принят и тема</span>
   <span class="swhen">Нажато «Задать вопрос юристу».</span></div>
   <div class="bubble">
     <p>Передала ваш запрос юристу.</p>
     <p>С вами свяжутся здесь, в чате. Обычно юрист отвечает в течение десяти минут, с 10:00 до 20:00 по московскому времени.</p>
+    <p>Если хотите, выберите тему консультации — так юрист сможет заранее подготовиться. Этот шаг можно пропустить.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s35c">Долги / банкротство</a>
+    <a class="key" href="#s35c">Выселение из жилья</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s35c">Мошенническая сделка</a>
+    <a class="key" href="#s35c">Развод / алименты</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s35c">Трудовые отношения</a>
+    <a class="key" href="#s35d">Здесь нет нужной мне темы</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s35c">Пропустить</a>
+  </div>
+</section>
+<section class="screen" id="s35d">
+  <div class="shead"><span class="sid">3.5.2</span><span class="stitle">Нужной темы нет</span>
+  <span class="swhen">Выбрано «Здесь нет нужной мне темы».</span></div>
+  <div class="bubble">
+    <p>Если хотите, напишите тему в двух словах. Можно и пропустить — юрист всё уточнит сам.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s35c">Написать</a>
+    <a class="key quiet" href="#s35c">Пропустить</a>
+  </div>
+</section>
+<section class="screen" id="s35c">
+  <div class="shead"><span class="sid">3.5.3</span><span class="stitle">Тема записана</span>
+  <span class="swhen">После выбора темы или пропуска. Дальше — как обычно.</span></div>
+  <div class="variant">Если тема выбрана или написана</div>
+  <div class="bubble">
+    <p>Спасибо, записала!</p>
+  </div>
+  <div class="variant">Если выбор темы пропущен</div>
+  <div class="bubble">
+    <p>Хорошо, юрист уточнит всё во время консультации.</p>
   </div>
   <div class="keys">
     <a class="key quiet" href="#i2">Завершить</a>
@@ -537,20 +664,20 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <p>Он поможет нам понять, какой помощи сейчас не хватает.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#s1">Вернуться в начало</a>
     <a class="key quiet" href="#i2">Завершить</a>
   </div>
 </section>
-<h2><span class="n">04</span>Через неделю</h2>
-<p class="lede">Бот пишет один раз всем, кто получил помощь. Текст вопроса зависит от того, что именно было выбрано. Дальше разговор идёт по одной общей ветке: на что пригодился сертификат → изменилось ли что-то → по желанию несколько слов о том, как всё прошло.</p>
+<h2><span class="n">04</span>Через четыре дня</h2>
+<p class="lede">Через четыре дня бот пишет один раз всем, кто получил помощь, — пока сертификат ещё действует. Текст вопроса зависит от того, что именно было выбрано. Дальше разговор идёт по одной общей ветке: на что пригодился сертификат → изменилось ли что-то → по желанию несколько слов о том, как всё прошло.</p>
 <section class="screen" id="s5">
-  <div class="shead"><span class="sid">5</span><span class="stitle">Вопрос через неделю</span>
-  <span class="swhen">Через 7 дней после получения помощи.</span></div>
+  <div class="shead"><span class="sid">5</span><span class="stitle">Вопрос через четыре дня</span>
+  <span class="swhen">Через 4 дня после получения помощи, днём — с 10:00 до 20:00. Если она получила и сертификат, и консультацию, бот спрашивает только о сертификате: консультацию она оценивает отдельно, в блоке 7. Если консультация к этому времени уже состоялась, используется последний вариант.</span></div>
   <div class="variant">Если был сертификат на продукты</div>
   <div class="bubble">
-    <p>Здравствуйте! Неделю назад вы получили сертификат на продукты.</p>
+    <p>Здравствуйте! Несколько дней назад вы получили сертификат на продукты.</p>
     <p>Удалось им воспользоваться?</p>
   </div>
   <div class="keys">
@@ -561,7 +688,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="variant">Если был сертификат на лекарства</div>
   <div class="bubble">
-    <p>Здравствуйте! Неделю назад вы получили сертификат в аптеку.</p>
+    <p>Здравствуйте! Несколько дней назад вы получили сертификат на лекарства.</p>
     <p>Удалось им воспользоваться?</p>
   </div>
   <div class="keys">
@@ -572,7 +699,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="variant">Если был сертификат на проживание</div>
   <div class="bubble">
-    <p>Здравствуйте! Неделю назад вы получили сертификат на проживание.</p>
+    <p>Здравствуйте! Несколько дней назад вы получили сертификат на проживание.</p>
     <p>Удалось забронировать место и воспользоваться сертификатом?</p>
   </div>
   <div class="keys">
@@ -583,7 +710,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="variant">Если был сертификат на товары для детей</div>
   <div class="bubble">
-    <p>Здравствуйте! Неделю назад вы получили сертификат на детские товары.</p>
+    <p>Здравствуйте! Несколько дней назад вы получили сертификат на детские товары.</p>
     <p>Удалось им воспользоваться?</p>
   </div>
   <div class="keys">
@@ -594,7 +721,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="variant">Если был запрос психологу</div>
   <div class="bubble">
-    <p>Здравствуйте! Неделю назад вы оставляли запрос психологу.</p>
+    <p>Здравствуйте! Несколько дней назад вы оставляли запрос психологу.</p>
     <p>Получилось связаться и поговорить со специалистом?</p>
   </div>
   <div class="keys">
@@ -605,7 +732,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="variant">Если был запрос юристу</div>
   <div class="bubble">
-    <p>Здравствуйте! Неделю назад вы оставляли вопрос юристу.</p>
+    <p>Здравствуйте! Несколько дней назад вы оставляли вопрос юристу.</p>
     <p>Получилось связаться со специалистом?</p>
   </div>
   <div class="keys">
@@ -614,10 +741,34 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key" href="#s58">Мне всё ещё нужна помощь</a>
     <a class="key quiet" href="#i2">Не хочу отвечать</a>
   </div>
+  <div class="variant">Если был запрос равной консультантке</div>
+  <div class="bubble">
+    <p>Здравствуйте! Несколько дней назад вы оставляли запрос равной консультантке.</p>
+    <p>Получилось связаться и поговорить?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s52">Да</a>
+    <a class="key" href="#s56">Нет</a>
+    <a class="key" href="#s58">Мне всё ещё нужна помощь</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#i2">Не хочу отвечать</a>
+  </div>
+  <div class="variant">Если консультация уже состоялась</div>
+  <div class="bubble">
+    <p>Здравствуйте! Несколько дней назад у вас была консультация.</p>
+    <p>Изменилось ли что-то за эти дни? Ответить можно одним нажатием.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s53">Стало легче</a>
+    <a class="key" href="#s54">Пока так же</a>
+    <a class="key" href="#s55">Стало тяжелее</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#i2">Не хочу отвечать</a>
+  </div>
 </section>
 <section class="screen" id="s51">
   <div class="shead"><span class="sid">5.1</span><span class="stitle">На что пригодился сертификат</span>
-  <span class="swhen">Ответ «Да» на вопрос про сертификат. Экрана нет у тех, кто обращался к психологу или юристу.</span></div>
+  <span class="swhen">Ответ «Да» на вопрос про сертификат. Тем, кто обращался к психологу, юристу или равной консультантке, этот вопрос не задаётся.</span></div>
   <div class="bubble">
     <p>Спасибо. Ещё один короткий вопрос — он нужен нам, чтобы понимать, чего людям не хватает чаще всего.</p>
   </div>
@@ -671,7 +822,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <span class="swhen">Общий экран для всех веток.</span></div>
   <div class="bubble">
     <p>И последний вопрос.</p>
-    <p>Изменилось ли что-то за эту неделю? Ответить можно одним нажатием.</p>
+    <p>Изменилось ли что-то за эти дни? Ответить можно одним нажатием.</p>
   </div>
   <div class="keys">
     <a class="key" href="#s53">Стало легче</a>
@@ -688,7 +839,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <p>Чат останется здесь: если позже понадобится что-то ещё, можно вернуться в любой момент.</p>
   </div>
   <div class="keys">
-    <a class="key quiet" href="#s6">Пропустить</a>
+    <a class="key quiet" href="#s6">Продолжить</a>
   </div>
 </section>
 <section class="screen" id="s54">
@@ -700,7 +851,8 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="keys">
     <a class="key" href="#s34">Поговорить с психологом</a>
     <a class="key" href="#s35">Задать вопрос юристу</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#s6">Пропустить</a>
   </div>
@@ -708,11 +860,11 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
 <section class="screen" id="s55">
   <div class="shead"><span class="sid">5.5</span><span class="stitle">Стало тяжелее</span></div>
   <div class="bubble">
-    <p>Спасибо, что написали об этом.</p>
+    <p>Спасибо, что сказали об этом.</p>
     <p>Если сейчас нужна помощь, можно написать человеку из команды. Подробно рассказывать, что произошло, не обязательно — начните с того, с чего удобно.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Посмотреть варианты помощи</a>
     <a class="key quiet" href="#s6">Пропустить</a>
@@ -723,24 +875,37 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <span class="swhen">Ответ «Пока нет» или «Нет».</span></div>
   <div class="variant">После любого сертификата</div>
   <div class="bubble">
-    <p>Ничего страшного. Сертификат действует до <span class="ph">[ДАТА]</span> — им можно воспользоваться позже.</p>
+    <p>Ничего страшного. Сертификат действует до <span class="ph">[ДАТА]</span> — им ещё можно воспользоваться.</p>
     <p>Если что-то не получается, напишите человеку из команды: разберёмся вместе.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Посмотреть варианты помощи</a>
     <a class="key quiet" href="#i2">Завершить</a>
   </div>
-  <div class="variant">После запроса психологу или юристу</div>
+  <div class="variant">После запроса психологу, юристу или равной консультантке</div>
   <div class="bubble">
     <p>Я могу передать запрос ещё раз или соединить вас с человеком из команды — как вам удобнее.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#s34">Передать запрос ещё раз</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key" href="#s561">Передать запрос ещё раз</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#i2">Завершить</a>
+  </div>
+</section>
+<section class="screen" id="s561">
+  <div class="shead"><span class="sid">5.6.1</span><span class="stitle">Запрос передан ещё раз</span>
+  <span class="swhen">Запрос уходит тому же специалисту, к которому она обращалась. Координатор получает пометку.</span></div>
+  <div class="bubble">
+    <p>Простите, что в прошлый раз связаться не получилось.</p>
+    <p>Передала ваш запрос ещё раз. С вами свяжутся здесь, в чате: обычно ответ приходит в течение десяти минут, с 10:00 до 20:00 по московскому времени.</p>
+  </div>
+  <div class="keys">
+    <a class="key quiet" href="#i2">Завершить</a>
+    <a class="key quiet" href="#s1">Вернуться в начало</a>
   </div>
 </section>
 <section class="screen" id="s57">
@@ -751,29 +916,33 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <p>Подробности не обязательны.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Написать</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key" href="#s57">Написать</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#i2">Завершить</a>
+  </div>
+  <div class="second">После сообщения:</div>
+  <div class="bubble">
+    <p>Передала ваше сообщение команде. Вам ответят здесь, в этом чате.</p>
   </div>
 </section>
 <section class="screen" id="s58">
   <div class="shead"><span class="sid">5.8</span><span class="stitle">Мне всё ещё нужна помощь</span>
-  <span class="swhen">Ответ после запроса психологу или юристу.</span></div>
+  <span class="swhen">Ответ после запроса психологу, юристу или равной консультантке.</span></div>
   <div class="bubble">
     <p>Спасибо, что сказали.</p>
     <p>Можно написать человеку из команды — вместе посмотрим, что ещё можно сделать. Или вернуться к вариантам помощи и выбрать что-то другое.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
     <a class="key" href="#s2">Посмотреть варианты помощи</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
     <span class="keyrule"></span>
     <a class="key quiet" href="#i2">Завершить</a>
   </div>
 </section>
 <section class="screen" id="s59">
   <div class="shead"><span class="sid">5.9</span><span class="stitle">Она не ответила</span>
-  <span class="swhen">Напоминание отправляется один раз, дальше бот молчит.</span></div>
+  <span class="swhen">Если ответа нет, через два дня бот напоминает один раз — тоже днём и пока сертификат ещё действует. Дальше бот молчит.</span></div>
   <div class="variant">После сертификата</div>
   <div class="bubble">
     <p>Здравствуйте!</p>
@@ -785,10 +954,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key" href="#s57">Что-то не получилось</a>
     <a class="key quiet" href="#i2">Не хочу отвечать</a>
   </div>
-  <div class="variant">После запроса психологу или юристу</div>
+  <div class="variant">После запроса психологу, юристу или равной консультантке</div>
   <div class="bubble">
     <p>Здравствуйте!</p>
-    <p>Будем благодарны, если ответите, получилось ли связаться со специалистом. Так мы поймём, насколько такая поддержка доступна. Если отвечать не хочется — ничего страшного.</p>
+    <p>Будем благодарны, если ответите, получилось ли связаться и поговорить. Так мы поймём, насколько такая поддержка доступна. Если отвечать не хочется — ничего страшного.</p>
   </div>
   <div class="keys">
     <a class="key" href="#s52">Да</a>
@@ -798,10 +967,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
 </section>
 <h2><span class="n">05</span>Обратная связь в конце</h2>
-<p class="lede">Приходит после экранов 5.3, 5.4 и 5.5 — по кнопке «Пропустить». Отвечать не обязательно.</p>
+<p class="lede">Приходит после экранов 5.3, 5.4 и 5.5. Отвечать не обязательно.</p>
 <section class="screen" id="s6">
   <div class="shead"><span class="sid">6</span><span class="stitle">Несколько слов о том, как всё прошло</span>
-  <span class="swhen">Приходит по кнопке «Пропустить» с экранов 5.3, 5.4 и 5.5.</span></div>
+  <span class="swhen">Приходит по кнопке «Продолжить» с экрана 5.3 или «Пропустить» с экранов 5.4 и 5.5. Если она уже оценивала консультацию в блоке 7, эти кнопки сразу завершают разговор.</span></div>
   <div class="bubble">
     <p>И совсем последнее, если будет желание.</p>
     <p>Напишите пару слов: понятно ли было, что здесь можно получить, удобно ли было этим воспользоваться и чего не хватило.</p>
@@ -823,14 +992,119 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key quiet" href="#i2">Завершить</a>
   </div>
 </section>
-<h2><span class="n">06</span>Сквозные кнопки</h2>
+<h2><span class="n">06</span>Оценка консультации</h2>
+<p class="lede">Приходит один раз после консультации психолога, юриста или разговора с равной консультанткой — когда разговор отмечен завершённым. Ответить можно одним нажатием, а можно не отвечать вовсе: напоминаний по этому блоку нет. Ответ «Нет» на вопрос о комфорте сразу видит координатор.</p>
+<section class="screen" id="s7">
+  <div class="shead"><span class="sid">7</span><span class="stitle">Оценка консультации</span>
+  <span class="swhen">Через 1–2 часа после консультации. Если она закончилась вечером — на следующий день, после 10:00.</span></div>
+  <div class="variant">После консультации психолога</div>
+  <div class="bubble">
+    <p>Здравствуйте! Недавно у вас была консультация с психологом.</p>
+    <p>Если будет желание, ответьте, пожалуйста, на три коротких вопроса — это можно сделать одним нажатием. Так мы сможем делать консультации лучше.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s71">Ответить</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#i2">Не сейчас</a>
+  </div>
+  <div class="variant">После консультации юриста</div>
+  <div class="bubble">
+    <p>Здравствуйте! Недавно у вас была консультация с юристом.</p>
+    <p>Если будет желание, ответьте, пожалуйста, на три коротких вопроса — это можно сделать одним нажатием. Так мы сможем делать консультации лучше.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s71">Ответить</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#i2">Не сейчас</a>
+  </div>
+  <div class="variant">После разговора с равной консультанткой</div>
+  <div class="bubble">
+    <p>Здравствуйте! Недавно у вас был разговор с равной консультанткой.</p>
+    <p>Если будет желание, ответьте, пожалуйста, на три коротких вопроса — это можно сделать одним нажатием. Так мы сможем делать такие разговоры лучше.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s71">Ответить</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#i2">Не сейчас</a>
+  </div>
+</section>
+<section class="screen" id="s71">
+  <div class="shead"><span class="sid">7.1</span><span class="stitle">Был ли разговор полезным</span></div>
+  <div class="bubble">
+    <p>Разговор был для вас полезным?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s72">Да</a>
+    <a class="key" href="#s72">Нет</a>
+    <a class="key" href="#s72">Не знаю</a>
+  </div>
+</section>
+<section class="screen" id="s72">
+  <div class="shead"><span class="sid">7.2</span><span class="stitle">Было ли комфортно</span></div>
+  <div class="bubble">
+    <p>Вам было комфортно во время разговора?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s73">Да</a>
+    <a class="key" href="#s721">Нет</a>
+    <a class="key" href="#s73">Не знаю</a>
+  </div>
+</section>
+<section class="screen" id="s721">
+  <div class="shead"><span class="sid">7.2.1</span><span class="stitle">Если было некомфортно</span>
+  <span class="swhen">Ответ «Нет». Координатор получает пометку.</span></div>
+  <div class="bubble">
+    <p>Спасибо, что сказали. Это важно для нас.</p>
+    <p>Если захотите рассказать, что было не так, можно написать в команду поддержки — это будет другой человек, не тот, с кем вы разговаривали.</p>
+  </div>
+  <div class="keys">
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s73">Продолжить</a>
+  </div>
+</section>
+<section class="screen" id="s73">
+  <div class="shead"><span class="sid">7.3</span><span class="stitle">Удобно ли было записаться</span></div>
+  <div class="bubble">
+    <p>Удобно ли было записаться через этот чат?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s74">Да</a>
+    <a class="key" href="#s74">Нет</a>
+    <a class="key" href="#s74">Не знаю</a>
+  </div>
+</section>
+<section class="screen" id="s74">
+  <div class="shead"><span class="sid">7.4</span><span class="stitle">Впечатления своими словами</span></div>
+  <div class="bubble">
+    <p>Если хотите, напишите своими словами, какие остались впечатления. Это не обязательно.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s75">Написать</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s75">Пропустить</a>
+  </div>
+</section>
+<section class="screen" id="s75">
+  <div class="shead"><span class="sid">7.5</span><span class="stitle">Спасибо</span></div>
+  <div class="bubble">
+    <p>Спасибо! Я передала ваши ответы команде.</p>
+    <p>Чат останется здесь: если что-то понадобится, возвращайтесь в любое время.</p>
+  </div>
+  <div class="keys">
+    <a class="key quiet" href="#i2">Завершить</a>
+    <a class="key quiet" href="#s1">Вернуться в начало</a>
+  </div>
+</section>
+
+<h2><span class="n">07</span>Сквозные кнопки</h2>
 <section class="screen" id="i1">
   <div class="shead"><span class="sid">И1</span><span class="stitle">Поговорить с человеком</span>
   <span class="swhen">Доступно со стартового экрана, со всех экранов 2.1–2.5 и из ряда других мест.</span></div>
   <div class="bubble">
     <p>Напишите, с чем вам нужна помощь или что хочется спросить.</p>
     <p>Можно коротко и без личных данных: представляться или рассказывать всю ситуацию не обязательно — только то, чем вы сами готовы поделиться.</p>
-    <p>Я передам сообщение человеку из команды поддержки. Обычно специалистка команды поддержки отвечает в течение десяти минут, с 10:00 до 20:00 по московскому времени. Если вы пишете позже, ответ придёт на следующий день.</p>
+    <p>Я передам сообщение человеку из команды поддержки. Обычно специалистка команды поддержки отвечает в течение десяти минут, с 10:00 до 20:00 по московскому времени. Если вы пишете вечером или ночью, ответ придёт утром, после 10:00.</p>
   </div>
   <div class="keys">
     <a class="key" href="#i1">Написать сообщение</a>
@@ -861,7 +1135,7 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="second">«Вернуться на шаг назад» возвращает именно на тот экран, с которого женщина пришла: к юристу можно попасть с трёх разных экранов, и кнопка должна помнить путь. Переписка при этом не стирается.</div>
 </section>
-<h2><span class="n">07</span>Непредвиденные ситуации</h2>
+<h2><span class="n">08</span>Непредвиденные ситуации</h2>
 <section class="screen" id="i4">
   <div class="shead"><span class="sid">И4</span><span class="stitle">Она открыла бот и молчит</span>
   <span class="swhen">Ни одного нажатия после вопроса «Что сейчас важнее всего».</span></div>
@@ -871,7 +1145,8 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="keys">
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
   </div>
 </section>
 <section class="screen" id="i5">
@@ -883,7 +1158,8 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="keys">
     <a class="key" href="#s2">Посмотреть варианты помощи</a>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
   </div>
 </section>
 <section class="screen" id="i6">
@@ -892,7 +1168,8 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <p>Если хочется поговорить с человеком, можно написать нашей команде. Сразу рассказывать всё не обязательно — можно начать с нескольких слов. Мы постараемся помочь.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -900,11 +1177,12 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   <div class="shead"><span class="sid">И7</span><span class="stitle">Прямое указание на опасность</span></div>
   <div class="bubble">
     <p>Если вы сейчас в опасности и нужна срочная помощь, позвоните по телефону доверия 8 (800) 100-49-94. Он работает круглосуточно.</p>
-    <p>Я также могу передать ваше сообщение человеку из команды поддержки. Обычно специалистка команды поддержки отвечает в течение десяти минут, с 10:00 до 20:00 по московскому времени. Если сейчас ночь, ответ придёт утром, а телефон доверия работает всё это время.</p>
+    <p>Я также могу передать ваше сообщение человеку из команды поддержки. Обычно специалистка команды поддержки отвечает в течение десяти минут, с 10:00 до 20:00 по московскому времени. Если сейчас вечер или ночь, ответ придёт утром, после 10:00, а телефон доверия доступен всё это время.</p>
     <p>Все остальные варианты помощи останутся доступны в этом чате.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
@@ -916,8 +1194,13 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <p>Я могу передать ваш запрос человеку из команды, чтобы вам написали, когда они появятся.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Передать запрос</a>
+    <a class="key" href="#i8">Передать запрос</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
+  </div>
+  <div class="second">После нажатия:</div>
+  <div class="bubble">
+    <p>Передала. Когда сертификаты появятся, вам напишут здесь.</p>
   </div>
 </section>
 <section class="screen" id="i9">
@@ -928,9 +1211,10 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
   </div>
   <div class="keys">
     <a class="key" href="#s2">Посмотреть варианты помощи</a>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
   </div>
-  <div class="variant">Если сертификат она уже получала и выбирает ещё один</div>
+  <div class="variant">Если она уже получала сертификат и выбирает ещё один — при возвращении или в том же разговоре</div>
   <div class="bubble">
     <p>Один сертификат вы уже получали, и пока мы можем выдавать его только раз — так помощь успевает дойти до большего числа женщин.</p>
     <p>Но поддержка на этом не заканчивается: можно поговорить с психологом, задать вопрос юристу или написать человеку из команды. И если ситуация изменилась, напишите — посмотрим вместе, что ещё можно сделать.</p>
@@ -939,7 +1223,8 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <a class="key" href="#s34">Поговорить с психологом</a>
     <a class="key" href="#s35">Задать вопрос юристу</a>
     <span class="keyrule"></span>
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
   <div class="variant">Если возникла проблема с уже полученным сертификатом</div>
@@ -947,20 +1232,16 @@ td code{font-family:var(--doc);background:rgba(74,90,140,.11);color:var(--flag);
     <p>Если сертификат потерялся, не сработал или возникла другая сложность, напишите человеку из команды. Я передам сообщение, и мы постараемся разобраться.</p>
   </div>
   <div class="keys">
-    <a class="key" href="#i1">Поговорить с человеком</a>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться на шаг назад</a>
   </div>
 </section>
-<h2><span class="n">08</span>Что вписывается перед запуском</h2>
+<h2><span class="n">09</span>Что вписывается перед запуском</h2>
 <table>
 <thead><tr><th>Заполнить</th><th>Где встречается</th></tr></thead>
 <tbody>
-<tr><td><code>[МАГАЗИН]</code></td><td>3.1, 3.1.1</td></tr>
-<tr><td><code>[АПТЕКА]</code></td><td>3.2, 3.2.1</td></tr>
-<tr><td><code>[АГРЕГАТОР]</code></td><td>3.3, 3.3.1</td></tr>
-<tr><td><code>[ДЕТСКИЙ МАГАЗИН]</code></td><td>3.7, 3.7.1</td></tr>
-<tr><td><code>[СУММА]</code> — по каждому из четырёх сертификатов</td><td>3.1, 3.1.1, 3.2, 3.2.1, 3.3, 3.3.1, 3.7, 3.7.1</td></tr>
-<tr><td><code>[ДАТА]</code> — срок действия сертификата</td><td>3.1.1, 3.2.1, 3.3.1, 3.7.1, 5.6</td></tr>
+<tr><td><code>[ДАТА]</code> — последний день действия сертификата (7 дней со дня выдачи)</td><td>3.1.1, 3.2.1, 3.3.1, 3.7.1, 5.6</td></tr>
 <tr><td><code>[НОМЕР СЕРТИФИКАТА]</code> — подставляется автоматически</td><td>3.1.1, 3.2.1, 3.3.1, 3.7.1</td></tr>
 </tbody>
 </table>

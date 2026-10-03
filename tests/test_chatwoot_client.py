@@ -82,6 +82,19 @@ async def test_catalog_members_and_return_use_correct_api_identities():
     assert transport.calls[-1][3] == {"assignee_id": None}
 
 
+async def test_followup_scan_includes_pending_and_resolved_conversations():
+    path = "/api/v1/accounts/12/conversations?status=all&assignee_type=all&page=2"
+    transport = RecordingTransport(responses={("GET", path): {"data": {"payload": [{"id": 23}]}}})
+    assert await client(transport).list_conversations(2) == ({"id": 23},)
+
+
+async def test_staff_reply_can_establish_visible_native_assignment_with_bot_identity():
+    transport = RecordingTransport()
+    await client(transport).assign_human(23, 4)
+    assert transport.calls == [("POST", "/api/v1/accounts/12/conversations/23/assignments",
+                                "bot-token", {"assignee_id": 4})]
+
+
 @pytest.mark.asyncio
 async def test_sends_telegram_input_select_and_persistent_turn_key() -> None:
     transport = RecordingTransport()
@@ -225,6 +238,20 @@ async def test_waits_for_telegram_source_id_before_followup(monkeypatch) -> None
 
     assert transport.reads == 2
     delay.assert_awaited_once_with(0.25)
+
+
+@pytest.mark.asyncio
+async def test_api_inbox_pdf_does_not_wait_for_nonexistent_telegram_source_id():
+    transport = RecordingTransport(responses={
+        ("GET", "/api/v1/accounts/12/conversations/23"): {
+            "meta": {"channel": "Channel::Api"}, "inbox_id": 2,
+        },
+        ("GET", "/api/v1/accounts/12/inboxes/2"): {"webhook_url": None},
+        ("GET", "/api/v1/accounts/12/conversations/23/messages"): {"payload": [
+            {"id": 91, "status": "sent", "attachments": [{"id": 1}], "source_id": None},
+        ]},
+    })
+    await client(transport).wait_for_external_delivery(23, 91, timeout_seconds=0)
 
 
 @pytest.mark.asyncio

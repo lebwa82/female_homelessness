@@ -63,8 +63,8 @@ AID_CATALOG = (
     ),
     AidItem(
         id="peer_consultation",
-        label="Разговор с женщиной, пережившей схожий опыт",
-        description="Разговор с женщиной, пережившей схожий опыт.",
+        label="Разговор с равной консультанткой",
+        description="Разговор с равной консультанткой с опытом зависимости или созависимости.",
     ),
     AidItem(
         id="addiction_specialist",
@@ -77,13 +77,12 @@ _BY_ID = {item.id: item for item in AID_CATALOG}
 _BY_NEED = {
     NeedKind.HOUSING: ("hostel_3_nights", "legal_consultation"),
     NeedKind.FOOD_MONEY: ("food_card", "medicine_card"),
-    NeedKind.LEGAL: ("legal_consultation", "peer_consultation", "psychologist_3_sessions"),
+    NeedKind.LEGAL: ("legal_consultation",),
     NeedKind.SUPPORT: (
-        "peer_consultation",
         "psychologist_3_sessions",
-        "addiction_specialist",
+        "peer_consultation",
     ),
-    NeedKind.CHILDREN: ("children_card", "legal_consultation", "peer_consultation"),
+    NeedKind.CHILDREN: ("children_card", "legal_consultation", "psychologist_3_sessions"),
     NeedKind.OTHER: (),
 }
 

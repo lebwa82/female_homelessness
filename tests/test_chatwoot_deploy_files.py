@@ -23,6 +23,16 @@ def test_agent_image_copies_only_tracked_certificate_import_modules() -> None:
     assert "scripts/__init__.py" not in containerfile
 
 
+def test_deploy_installs_scenario_macros_and_agent_healthcheck() -> None:
+    deploy_script = (ROOT / "scripts/deploy_chatwoot_test.sh").read_text()
+    assert 'activate.py" queues' in deploy_script
+    compose = (ROOT / "deploy/chatwoot/compose.yml").read_text()
+    agent_block = compose.split("  agent-bot:\n", 1)[1].split("\n  certificate-admin-bot:", 1)[0]
+    assert "healthcheck:" in agent_block and "/healthz" in agent_block
+    main = (ROOT / "app/chatwoot/__main__.py").read_text()
+    assert "access_log=None" in main
+
+
 def test_certificate_admin_bot_is_a_separate_service_using_the_agent_image() -> None:
     compose = (ROOT / "deploy/chatwoot/compose.yml").read_text(encoding="utf-8")
     unit = (ROOT / "deploy/chatwoot/women-help-certificate-admin.service").read_text(

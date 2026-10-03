@@ -265,7 +265,7 @@ async def test_s11_continue_opens_the_classified_child_help_catalog() -> None:
     assert [choice.id for choice in catalog.choices if not choice.id.startswith("back:")] == [
         "aid:children_card",
         "aid:legal_consultation",
-        "aid:peer_consultation",
+        "aid:psychologist_3_sessions",
         "need:other",
         "human",
     ]

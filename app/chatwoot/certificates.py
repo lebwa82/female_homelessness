@@ -152,6 +152,8 @@ class CertificateInventory:
                 WHERE a.aid_id = :aid_id AND c.status = 'available'
                   AND (c.valid_from IS NULL OR c.valid_from <= now())
                   AND c.expires_at > now()
+                  AND (c.is_test OR (c.nominal_rubles = 3000
+                       AND c.expires_at >= now() + interval '7 days'))
                 ORDER BY c.expires_at, c.id
                 FOR UPDATE OF c SKIP LOCKED LIMIT 1
             """), {"aid_id": aid_id})).first()

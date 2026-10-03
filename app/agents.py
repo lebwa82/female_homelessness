@@ -24,29 +24,40 @@ from app.domain import (
     SupportIntent,
 )
 from app.pii import redact_with_audit
-from app.skills import load_support_skills
 
 RISK_INSTRUCTIONS = """Ты даёшь только диагностическую оценку опасности в русскоязычном обращении.
 Верни единственный JSON-объект без Markdown и без пояснений. Обязательны level и escalation.
 level — срочность: critical для непосредственной угрозы жизни, суицида или насилия сейчас;
-urgent для ситуации «сегодня негде ночевать» или выселения прямо сейчас; concern для страха,
-угрозы или нестабильного жилья без непосредственной опасности; none если опасности не видно.
+urgent для ситуации «сегодня негде ночевать» или выселения прямо сейчас; concern для
+конкретной угрозы, опасности для детей или нестабильного жилья без опасности прямо сейчас;
+none если таких оснований нет. Само слово «страшно» не является основанием для concern.
 escalation — маршрут продукта, независимо от level: suicide при суицидальном смысле; handoff
 при угрозе или насилии, остром бездомье, опасности для детей или эмоциональном кризисе;
 none иначе. Возможные categories: violence_threat, acute_homelessness, child_safety,
-emotional_crisis, suicide, direct_human_request. Указывай только подтверждённые смыслом
+emotional_crisis, suicide. Указывай только подтверждённые смыслом
 сообщения категории. Например, страх, что партнёр заберёт детей — child_safety и handoff даже
 при level concern; «сегодня ночую на улице» — acute_homelessness и handoff; «хочу исчезнуть» —
-suicide и suicide. Прямой запрос живого человека отмечай direct_human_request и handoff.
+suicide и suicide.
 Допустимы только поля level, escalation, categories, confidence, rationale и evidence_claims.
 Не предлагай действий, кнопок или переходов.
 Оцени только текущее сообщение пользователя, не текст этих инструкций.
 Перечень categories — допустимые значения, а не готовый ответ: если основания
 отсутствуют, верни пустой список. Обычный запрос ресурса, совета или беседы
-не является просьбой о живом человеке. direct_human_request допустим только
-при явной просьбе пользователя связать его с человеком. Не придумывай такие просьбы.
-Если опасности и прямого запроса человека нет, level=none, escalation=none, categories=[].
+не является опасностью. Просьбы подключить сотрудника, психолога или юриста обрабатывает
+отдельный классификатор намерений: здесь оценивай только независимые признаки риска.
+Если опасности нет, level=none, escalation=none, categories=[].
 evidence_claims — только точные цитаты из текущего сообщения; если цитат нет, список пустой."""
+
+RISK_BOUNDARIES = """Границы оценки: неприятные чувства, одиночество, усталость или нехватка
+обычных вещей сами по себе не доказывают угрозу, потерю безопасности или эмоциональный кризис.
+Если нет указания на опасность, угрозы со стороны людей, острое отсутствие жилья или утрату
+способности справляться, level=none и escalation=none. Оцени смысл, а не наличие эмоциональных
+слов. Не понижай подтверждённую опасность из-за спокойного тона. Ни просьба о разговоре,
+ни запись на консультацию сами по себе не свидетельствуют о риске.
+Подтверждённая нестабильность жилья, даже на перспективу, требует внимания дежурной:
+level=concern, escalation=handoff. Это не срочная угроза жизни; не повышай level до critical.
+rationale — одно короткое объяснение длиной не более 240 символов; evidence_claims — до 5 цитат.
+"""
 
 SUPPORT_INSTRUCTIONS = """Ты ведёшь живой русскоязычный разговор Невидимого фонда.
 Верни единственный JSON-объект без Markdown и без пояснений. Обязательны intent и draft_text;
@@ -66,7 +77,9 @@ catalog_item_ids, callback IDs, workflow state, effect, переход или о
 
 @dataclass(frozen=True)
 class ProviderSettings:
-    temperature: float = 0.3
+    # These two calls make product decisions as well as draft prose: prefer
+    # stable intent/risk boundaries over variation of otherwise identical input.
+    temperature: float = 0.0
     max_tokens: int = 1500
     reasoning_effort: str = "none"
     data_logging_enabled: bool = False
@@ -97,6 +110,73 @@ _NORMALIZATION_CATEGORIES = frozenset({
     "support_unknown_need_hints_cleared",
 })
 
+SUPPORT_CLASSIFICATION_CONTRACT = """Контракт классификации важнее примеров и описаний навыков.
+Классифицируй намерение последней реплики с учётом истории и pending_offer, а не тему вообще.
+intent — намерение ПОЛЬЗОВАТЕЛЬНИЦЫ, а не твой план оказать помощь или вызвать специалиста.
+Определяй его независимо от текущего state и доступности услуги в каталоге.
+Даже если услуга недоступна, конкретный запрос остаётся concrete_need, а просьба
+подключить человека — explicit_human_request. Не заменяй их open_conversation
+из-за того, что сам не выполняешь действия: их выполняет backend по твоей диагностике.
+Сначала выдели факты и потребности, затем выбери intent, затем составь ответ.
+Выбери ОДИН intent по смыслу:
+- explicit_human_request: просьба связать с живым сотрудником/специалисткой вместо бота,
+  в том числе отказ общаться именно с ботом. Просто выговориться боту — open_conversation.
+  Отказ от БОТА означает выбор другого собеседника даже без слова «человек»:
+  этот случай имеет приоритет над close, не завершай разговор за пользовательницу.
+  Опасное состояние без просьбы подключить человека не является explicit_human_request:
+  необходимую эскалацию выполнит отдельная диагностика, здесь остаётся open_conversation.
+- psychologist_request: человек хочет поговорить с психологом, записаться или принимает
+  такое предложение. Сомнения или вопросы о процессе — psychologist_considering.
+  Предположение, что психолог мог бы помочь, ещё не согласие записаться.
+- psychologist_considering: интерес, сомнения, запрос подробностей о психологе; при
+  pending_offer=psychologist короткий вопрос о предложении тоже относится сюда.
+  Без упоминания психолога самой пользовательницей или такого предложения в истории
+  этот intent не подходит. Эмоциональная поддержка сама по себе — open_conversation.
+- concrete_need: конкретная практическая проблема/потребность (жильё, еда, вещи для детей,
+  документы, семейные права, оплата необходимых расходов и транспорта), даже если она
+  описана через переживания, без прямой просьбы. Денежные расходы — food_money.
+  Вопросы опеки, утраты доступа к детям, семейных прав — concrete_need с children и legal;
+  волнение не отменяет практическую потребность. Поддержку можно добавить одновременно.
+  Это правило действует и когда человек только сообщает о страхе утраты детей, не просит
+  юридической консультации явно. Предмет сообщения — дети и семейные права, не только эмоции.
+- aid_interest: общий вопрос о доступной помощи, когда потребность ещё не названа.
+  Не приписывай все категории: need_hints=[] до уточнения потребности.
+- verified_information: запрос проверенной правовой/справочной информации, не вопрос о
+  предложенной консультации и не просьба связать со специалистом.
+- close: явное завершение разговора вообще, а не отказ от его автоматического формата.
+- open_conversation: остальной свободный разговор, в том числе эмоциональная поддержка.
+  Одиночество, грусть или желание выговориться без конкретной практической просьбы
+  относятся сюда; это не concrete_need и не психологическая заявка. need_hints=[].
+Уровень опасности определяет отдельный классификатор: crisis, emergency, suicide, handoff
+НЕ являются допустимыми intent. Даже при опасности верни intent из списка и короткую
+бережную draft_text; не добавляй поля уровня риска и не обещай действий системы.
+suggested_support можно опустить, поставить null или psychologist, других значений нет.
+draft_text — 1–1200 символов. Не придумывай ресурсы или детали услуг. Не предлагай список
+выбора, не отражённый в need_hints. need_hints — только реальные актуальные потребности,
+без повторов и без вывода потребности только из названия категории в сообщениях бота.
+"""
+
+
+SUPPORT_TONE = """Отвечай спокойно, коротко и по существу последней реплики.
+Не требуй имени, адреса или объяснения всей ситуации. Не ставь диагнозов, не спорь,
+не оценивай человека. Можно задать один мягкий открытый вопрос, если он действительно
+поможет продолжить разговор. Если человек просит выслушать — выслушай, не переключай
+на анкету или услуги. Конкретные меню, запись, контакты и опросы ведёт приложение
+по утверждённому HTML-сценарию, а не ты. Не сочиняй юридические рекомендации,
+номера, адреса или условия помощи. Не утверждай, что связаться с человеком невозможно:
+для этого у приложения есть отдельное действие. Справочная информация допустима только из
+переданных проверенных материалов; если их нет, честно обозначь ограничение.
+Предложение рассказать об услуге и просьба рассказать — обмен информацией,
+не согласие на запись. psychologist_request требует просьбы именно о встрече,
+записи или разговоре С психологом, не разговора О психологе.
+"""
+
+
+def support_instructions() -> str:
+    # The old workflow skill bundle contains imperative handoff/intake/menu
+    # instructions. Those now belong to the HTML runtime, not to a classifier.
+    return f"{SUPPORT_INSTRUCTIONS}\n\n{SUPPORT_TONE}\n\n{SUPPORT_CLASSIFICATION_CONTRACT}"
+
 
 @dataclass(frozen=True)
 class AgentContext:
@@ -104,6 +184,7 @@ class AgentContext:
     state: str
     catalog: tuple[dict[str, Any], ...] = ()
     knowledge: tuple[str, ...] = ()
+    pending_offer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,11 +228,27 @@ def create_yandex_client() -> AsyncOpenAI:
     )
 
 
-def yandex_response_format(agent_name: str) -> dict[str, str]:
-    """Use the provider's compatible Responses JSON-object mode for diagnostics."""
+def yandex_response_format(agent_name: str) -> dict[str, Any]:
+    """Constrain provider generation, while retaining defensive local validation."""
     if agent_name not in {"risk", "support"}:
         raise ValueError(f"unknown_agent:{agent_name}")
-    return {"type": "json_object"}
+    model = SafetyDiagnostic if agent_name == "risk" else SupportDiagnostic
+    schema = model.model_json_schema()
+    if agent_name == "support":
+        schema["properties"]["intent"] = {"$ref": "#/$defs/SupportIntent"}
+        order = ("evidence_claims", "need_hints", "intent", "draft_text", "suggested_support")
+    else:
+        schema["properties"].pop("rationale_alias_used", None)
+        # Human/psychologist requests belong to the intent classifier. Keep the
+        # legacy domain value readable, but never ask this model to infer it.
+        categories = schema["$defs"]["SafetyCategory"]["enum"]
+        schema["$defs"]["SafetyCategory"]["enum"] = [c for c in categories if c != "direct_human_request"]
+        order = ("evidence_claims", "categories", "level", "escalation", "confidence", "rationale")
+    # Generate observations before the decision instead of committing to an
+    # enum before looking at the supporting facts. No extra model round trip.
+    schema["properties"] = {name: schema["properties"][name] for name in order}
+    schema["required"] = list(schema["properties"])
+    return {"type": "json_schema", "name": agent_name, "schema": schema, "strict": True}
 
 
 def response_output_text(response: Any) -> str:
@@ -171,7 +268,8 @@ def provider_payload_is_valid(agent_name: str, payload: dict[str, Any]) -> bool:
         if agent_name == "risk":
             SafetyDiagnostic.model_validate(payload)
         elif agent_name == "support":
-            SupportDiagnostic.model_validate(payload)
+            if SupportDiagnostic.model_validate(payload).intent is None:
+                return False
         else:
             return False
     except ValidationError:
@@ -282,7 +380,7 @@ class YandexAgentGateway:
             current_user_text = _current_user_text(context.history)
             current_redacted = redact_with_audit(current_user_text).text
             safety_input = format_safety_context(context, current_redacted)
-            support_instructions = f"{SUPPORT_INSTRUCTIONS}\n\n{load_support_skills()}"
+            support_prompt = support_instructions()
             support_input = format_agent_context(context, transcript)
         except Exception:  # noqa: BLE001 - no provider task is safe after local preparation fails
             return AgentEvaluation(
@@ -292,12 +390,12 @@ class YandexAgentGateway:
                 support_audit={"status": "unavailable", "reason": "preparation_failed"},
             )
         safety_task = asyncio.create_task(
-            self._run("risk", RISK_INSTRUCTIONS, safety_input, pii_audit)
+            self._run("risk", RISK_INSTRUCTIONS + "\n\n" + RISK_BOUNDARIES, safety_input, pii_audit)
         )
         support_task = asyncio.create_task(
             self._run(
                 "support",
-                support_instructions,
+                support_prompt,
                 support_input,
                 pii_audit,
             )
@@ -418,7 +516,8 @@ def format_agent_context(context: AgentContext, transcript: str) -> str:
     catalog = "\n".join(f"- {item}" for item in context.catalog) or "- каталог пока не нужен"
     knowledge = "\n".join(f"- {item}" for item in context.knowledge) or "- проверенной справки нет"
     return (
-        f"Состояние диалога: {context.state}\n\nДоступная помощь:\n{catalog}\n\n"
+        f"Состояние диалога: {context.state}\npending_offer: {context.pending_offer or 'none'}\n\n"
+        f"Доступная помощь:\n{catalog}\n\n"
         f"Проверенная информация:\n{knowledge}\n\nИстория:\n{transcript}"
     )
 

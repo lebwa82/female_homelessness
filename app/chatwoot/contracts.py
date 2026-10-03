@@ -23,6 +23,7 @@ class ConversationChanged:
 
 
 RETURN_TO_BOT = "[women-help:return-to-bot]"
+CONSULTATION_COMPLETED = "[women-help:consultation-completed]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,8 @@ class StaffMessage:
     conversation_id: int
     sender_id: int
     return_to_bot: bool = False
+    consultation_completed: bool = False
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +73,22 @@ def parse_staff_message(payload: object) -> StaffMessage | None:
     if not isinstance(conversation, dict):
         return None
     returning = payload.get("private") is True and payload.get("content") == RETURN_TO_BOT
-    if payload.get("private") is True and not returning:
+    content = payload.get("content") or ""
+    completed = payload.get("private") is True and content == CONSULTATION_COMPLETED
+    request_id = None
+    prefix = CONSULTATION_COMPLETED[:-1] + ":"
+    if (payload.get("private") is True and isinstance(content, str)
+            and content.startswith(prefix) and content.endswith("]")):
+        candidate = content[len(prefix):-1]
+        if len(candidate) == 24 and all(c in "0123456789abcdef" for c in candidate):
+            completed, request_id = True, candidate
+    if payload.get("private") is True and not (returning or completed):
         return None
     ids = [_positive_int(v) for v in (payload.get("id"), conversation.get("id"), sender.get("id"))]
     if None in ids:
         return None
-    return StaffMessage(*ids, return_to_bot=returning)
+    return StaffMessage(*ids, return_to_bot=returning,
+                        consultation_completed=completed, request_id=request_id)
 
 
 def parse_conversation_changed(payload: object) -> ConversationChanged | None:
