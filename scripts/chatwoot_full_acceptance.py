@@ -606,7 +606,16 @@ class Acceptance:
         async def idle(cid):
             await self.send(cid, "/start")
             await self.send(cid, "continue")
-            attrs = await self.attrs(cid)
+            # The public response precedes the durable post-delivery timer write.
+            # Wait for that write, not merely the appearance of the bot message.
+            for _ in range(60):
+                attrs = await self.attrs(cid)
+                if (not attrs.get("scenario_pending_input")
+                        and any(k.startswith("idle:") for k in attrs.get("scenario_followups", {}))):
+                    break
+                await asyncio.sleep(.3)
+            else:
+                raise AssertionError("menu_timer_not_persisted")
             key = next(k for k in attrs["scenario_followups"] if k.startswith("idle:"))
             assert attrs["scenario_followups"][key]["state"] == "pending"
             if self.mode == "candidate":
