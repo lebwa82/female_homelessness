@@ -32,7 +32,7 @@ config:
 ---
 flowchart TB
     accTitle: Целевая архитектура приложения Невидимого фонда
-    accDescr: Telegram, WhatsApp, VK и MAX связаны с Chatwoot через логические блоки коннекторов. Telegram-транспорт работает через прокси. Chatwoot отправляет события бэкенду через webhook; бэкенд работает с Chatwoot API, LLM, S3 и учётом сертификатов в PostgreSQL. Общий Redis используется Chatwoot для фоновых задач Sidekiq, бэкендом для очереди событий и повторов, Telegram-коннектором для курсора и блокировки polling. Человек отвечает через панель Chatwoot.
+    accDescr: Telegram, WhatsApp, VK и MAX связаны с Chatwoot через логические блоки коннекторов. Telegram-транспорт работает через прокси. Chatwoot отправляет события бэкенду через webhook; бэкенд работает с Chatwoot API, LLM, S3 и учётом сертификатов в PostgreSQL. Общий Redis используется Chatwoot для фоновых задач Sidekiq, бэкендом для очереди событий и повторов, Telegram-коннектором для курсора и блокировки polling. Администратор отвечает через панель Chatwoot.
 
     TG["Telegram"]
     WA["WhatsApp"]
@@ -46,7 +46,7 @@ flowchart TB
 
     CW["Chatwoot<br/>каналы, диалоги, панель"]
     AGENT["Bot backend<br/>сценарии и ИИ"]
-    STAFF["Женщина, пережившая<br/>схожий опыт<br/>ответы через Chatwoot"]
+    STAFF["Администратор,<br/>отвечающий в Chatwoot"]
     PG["PostgreSQL<br/>история и состояние"]
     LLM["LLM API<br/>модель"]
     S3["S3<br/>PDF сертификатов"]
@@ -81,8 +81,8 @@ flowchart TB
 
 В Chatwoot видна вся переписка. Бот продолжает отвечать после уведомления команды
 и замолкает, когда разговор берёт человек. Ответы человека идут в тот же Telegram-чат.
-На схеме показана женщина, пережившая схожий опыт; дежурная, юрист и психолог
-работают через тот же Chatwoot.
+На схеме показан администратор, отвечающий в Chatwoot. Дежурная, юрист и
+психолог работают через ту же панель; это название блока, не изменение прав.
 
 Все коннекторы на рисунке показаны на одном логическом уровне: они обеспечивают
 обмен сообщениями между мессенджером и Chatwoot. Это границы ответственности,
@@ -127,7 +127,7 @@ LLM вызывается нашим бэкендом, не Chatwoot; перед 
 | Бэкенд ↔ PostgreSQL | `CertificateInventory`, `database_url`, таблицы `women_help_*`; [certificates.py](../app/chatwoot/certificates.py) |
 | Бэкенд ↔ LLM | `YandexAgentGateway.evaluate`, `_call_live`, `format_redacted_transcript`; [agents.py](../app/agents.py) |
 | Бэкенд ↔ S3 | `_send_certificate` загружает PDF через `S3CertificateObjectStore.download`; [service.py](../app/chatwoot/service.py), [certificate_documents.py](../app/certificate_documents.py) |
-| Человек ↔ Chatwoot | Панель Chatwoot; `parse_staff_message` и `_staff_message` обрабатывают ответ специалиста; [contracts.py](../app/chatwoot/contracts.py), [service.py](../app/chatwoot/service.py) |
+| Администратор ↔ Chatwoot | Панель Chatwoot; `parse_staff_message` и `_staff_message` обрабатывают ответ сотрудника; [contracts.py](../app/chatwoot/contracts.py), [service.py](../app/chatwoot/service.py) |
 | Chatwoot ↔ Redis | Один `REDIS_URL` у Rails и Sidekiq, `redis-server --appendonly yes`; [Compose](../deploy/chatwoot/compose.yml) |
 | Бэкенд ↔ Redis | `Redis.from_url` и `DurableEventQueue`: запись, чтение, подтверждение и повторы событий; [__main__.py](../app/chatwoot/__main__.py), [event_queue.py](../app/chatwoot/event_queue.py) |
 | Telegram-коннектор ↔ Redis | Чтение и сохранение offset, распределённая блокировка polling; [telegram_ingress.py](../app/chatwoot/telegram_ingress.py) |
