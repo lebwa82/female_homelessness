@@ -47,7 +47,7 @@ def client(transport: RecordingTransport) -> ChatwootClient:
 
 def test_chatwoot_http_transport_disables_content_encoding_for_the_pinned_release() -> None:
     assert AiohttpChatwootTransport.request_headers("bot-token") == {
-        "api_access_token": "bot-token",
+        "Api-Access-Token": "bot-token",
         "Accept": "application/json",
         "Accept-Encoding": "identity",
     }

@@ -60,7 +60,9 @@ class AiohttpChatwootTransport:
         # compressed API requests. Its Agent Bot implementation is otherwise
         # the supported test-stack choice, so keep every API call uncompressed.
         return {
-            "api_access_token": token,
+            # Rails accepts the canonical Rack header. Proxies can discard
+            # underscore-bearing names before the request reaches Chatwoot.
+            "Api-Access-Token": token,
             "Accept": "application/json",
             "Accept-Encoding": "identity",
         }

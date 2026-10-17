@@ -1,0 +1,20 @@
+[Unit]
+Description=Nevidimy outbound-only Telegram transport on Timeweb
+Requires=docker.service nevidimy.service nevidimy-agent.service
+After=docker.service nevidimy.service nevidimy-agent.service nevidimy-proxy-tunnel.service network-online.target
+Wants=network-online.target nevidimy-proxy-tunnel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/nevidimy/app
+ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
+ExecStartPre=/usr/bin/test -s /etc/women-help-telegram.env
+ExecStartPre=/usr/bin/test -s /etc/women-help-telegram-proxy.env
+ExecStart=/usr/bin/docker compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml -f deploy/chatwoot/compose.managed.yml -f deploy/timeweb/compose.yml --profile telegram --profile polling up -d --no-build --pull never --no-deps --wait --wait-timeout 180 telegram-proxy telegram-ingress
+ExecStop=/usr/bin/docker compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml -f deploy/chatwoot/compose.managed.yml -f deploy/timeweb/compose.yml --profile telegram --profile polling stop telegram-ingress telegram-proxy
+TimeoutStartSec=240
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

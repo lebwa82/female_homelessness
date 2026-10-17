@@ -1,0 +1,39 @@
+# Docker Compose 2.24.4+ only; combine with compose.yml, never use on its own.
+x-managed-database: &managed-database
+  POSTGRES_HOST: ${POSTGRES_HOST:?Set the managed PostgreSQL host}
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  POSTGRES_DATABASE: ${POSTGRES_DATABASE:?Set the managed PostgreSQL database}
+  POSTGRES_USERNAME: ${POSTGRES_USERNAME:?Set the managed PostgreSQL user}
+  PGSSLMODE: verify-full
+
+x-certificate-database: &certificate-database
+  CERTIFICATE_DATABASE_HOST: ${POSTGRES_HOST:?Set the managed PostgreSQL host}
+  CERTIFICATE_DATABASE_PORT: ${POSTGRES_PORT:-5432}
+  CERTIFICATE_DATABASE_NAME: ${POSTGRES_DATABASE:?Set the managed PostgreSQL database}
+  CERTIFICATE_DATABASE_USER: ${POSTGRES_USERNAME:?Set the managed PostgreSQL user}
+  CERTIFICATE_DATABASE_SSLMODE: verify-full
+
+services:
+  postgres: !reset null
+
+  chatwoot:
+    environment:
+      <<: *managed-database
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  sidekiq:
+    environment:
+      <<: *managed-database
+    depends_on: !override
+      redis:
+        condition: service_healthy
+
+  agent-bot:
+    environment:
+      <<: *certificate-database
+
+  certificate-admin-bot:
+    environment:
+      <<: *certificate-database

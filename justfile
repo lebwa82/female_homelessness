@@ -89,6 +89,11 @@ chatwoot-check host="":
 chatwoot-login:
     uv run python -m scripts.setup_chatwoot_cli
 
+# Inspect/validate historical import without sending any messages; --apply commits.
+[positional-arguments]
+chatwoot-import-history dump *args:
+    uv run python -m scripts.import_legacy_telegram_history "$@"
+
 # Official CLI shorthand, e.g. just cw convs --assignee all --status all.
 [positional-arguments]
 cw *args:

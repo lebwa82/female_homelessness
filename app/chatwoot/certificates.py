@@ -14,6 +14,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.certificate_documents import CertificateObjectRef, ParsedCertificatePdf
+from app.config import settings
 from app.store import CertificateClaimResult, StoredCertificate
 
 POOL_AIDS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -32,9 +33,18 @@ class CertificatePoolStock:
 
 
 def database_url(password: str) -> str:
+    query = (
+        {"ssl": settings.certificate_database_sslmode}
+        if settings.certificate_database_sslmode else {}
+    )
     return URL.create(
-        "postgresql+asyncpg", username="chatwoot", password=password,
-        host="postgres", port=5432, database="chatwoot",
+        "postgresql+asyncpg",
+        username=settings.certificate_database_user,
+        password=password,
+        host=settings.certificate_database_host,
+        port=settings.certificate_database_port,
+        database=settings.certificate_database_name,
+        query=query,
     ).render_as_string(hide_password=False)
 
 

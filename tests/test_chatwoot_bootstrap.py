@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
+from unittest.mock import AsyncMock, call
 
 import pytest
 
-from deploy.chatwoot.bootstrap import AgentBotBootstrap, AiohttpChatwootAdminApi, BootstrapSettings
+from deploy.chatwoot.bootstrap import (
+    AgentBotBootstrap,
+    AiohttpChatwootAdminApi,
+    BootstrapApiError,
+    BootstrapSettings,
+)
 
 
 @dataclass
@@ -18,7 +24,7 @@ class FakeChatwootAdminApi:
         return self.teams
 
     async def create_team(self, name: str) -> dict[str, Any]:
-        team = {"id": 8, "name": name}
+        team = {"id": 8, "name": name.strip().lower()}
         self.teams.append(team)
         return team
 
@@ -50,16 +56,17 @@ def settings() -> BootstrapSettings:
 
 def test_bootstrap_transport_disables_content_encoding_for_the_pinned_release() -> None:
     assert AiohttpChatwootAdminApi.request_headers("read-token") == {
-        "api_access_token": "read-token",
+        "Api-Access-Token": "read-token",
         "Accept": "application/json",
         "Accept-Encoding": "identity",
     }
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_creates_team_bot_and_inbox_attachment_idempotently() -> None:
+@pytest.mark.parametrize("team_name", ["Duty team", "Дежурные"])
+async def test_bootstrap_creates_team_bot_and_inbox_attachment_idempotently(team_name: str) -> None:
     api = FakeChatwootAdminApi()
-    bootstrap = AgentBotBootstrap(api, settings())
+    bootstrap = AgentBotBootstrap(api, replace(settings(), team_name=team_name))
 
     first = await bootstrap.provision()
     second = await bootstrap.provision()
@@ -88,3 +95,26 @@ async def test_bootstrap_rejects_an_existing_bot_with_another_webhook_url() -> N
 
     with pytest.raises(ValueError, match="Agent Bot URL does not match"):
         await AgentBotBootstrap(api, settings()).provision()
+
+
+@pytest.mark.asyncio
+async def test_agent_attachment_uses_native_parameter_and_verifies_readback() -> None:
+    api = AiohttpChatwootAdminApi(base_url="http://example.test", account_id=3, access_token="test-token")
+    api._request = AsyncMock(side_effect=[{}, {"agent_bot": {"id": 9}}])
+
+    await api.attach_agent_bot(inbox_id=5, agent_bot_id=9)
+
+    assert api._request.await_args_list == [
+        call("POST", "/api/v1/accounts/3/inboxes/5/set_agent_bot", {"agent_bot": 9}),
+        call("GET", "/api/v1/accounts/3/inboxes/5/agent_bot"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attached", [None, {}, {"id": 4}])
+async def test_agent_attachment_rejects_success_without_matching_binding(attached) -> None:
+    api = AiohttpChatwootAdminApi(base_url="http://example.test", account_id=3, access_token="test-token")
+    api._request = AsyncMock(side_effect=[{}, {"agent_bot": attached}])
+
+    with pytest.raises(BootstrapApiError, match="inbox Agent Bot attachment"):
+        await api.attach_agent_bot(inbox_id=5, agent_bot_id=9)

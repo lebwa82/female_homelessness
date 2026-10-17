@@ -228,6 +228,57 @@ def create_yandex_client() -> AsyncOpenAI:
     )
 
 
+def create_llm_client() -> AsyncOpenAI:
+    if settings.llm_provider == "timeweb":
+        return AsyncOpenAI(
+            api_key=settings.timeweb_ai_api_key,
+            base_url="https://api.timeweb.ai/v1",
+            timeout=PROVIDER_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+    return create_yandex_client()
+
+
+def llm_is_configured() -> bool:
+    if settings.llm_provider == "timeweb":
+        return bool(settings.timeweb_ai_api_key and settings.timeweb_ai_model)
+    return bool(settings.yandex_ai_api_key)
+
+
+async def create_json_response(
+    client: AsyncOpenAI,
+    *,
+    instructions: str,
+    input_text: str,
+    response_format: dict[str, Any],
+    provider_settings: ProviderSettings = DEFAULT_PROVIDER_SETTINGS,
+) -> Any:
+    if settings.llm_provider == "timeweb":
+        # DeepSeek supports JSON mode, not Responses' JSON Schema parameter.
+        # Include the contract in the instruction and keep local validation.
+        json_instruction = instructions + "\n\nReturn only a JSON object."
+        if schema := response_format.get("schema"):
+            json_instruction += "\nJSON schema: " + json.dumps(schema, ensure_ascii=False)
+        return await client.chat.completions.create(
+            model=settings.timeweb_ai_model,
+            messages=[
+                {"role": "system", "content": json_instruction},
+                {"role": "user", "content": input_text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=provider_settings.temperature,
+            max_tokens=provider_settings.max_tokens,
+            reasoning_effort=provider_settings.reasoning_effort,
+        )
+    return await client.responses.create(
+        model=f"gpt://{settings.yandex_cloud_folder_id}/{settings.yandex_ai_model}",
+        instructions=instructions,
+        input=input_text,
+        text={"format": response_format},
+        **yandex_model_settings(provider_settings),
+    )
+
+
 def yandex_response_format(agent_name: str) -> dict[str, Any]:
     """Constrain provider generation, while retaining defensive local validation."""
     if agent_name not in {"risk", "support"}:
@@ -252,7 +303,10 @@ def yandex_response_format(agent_name: str) -> dict[str, Any]:
 
 
 def response_output_text(response: Any) -> str:
-    """Read Responses API message content without retaining the full provider response."""
+    """Read final message text, never reasoning content or the full response."""
+    if choices := getattr(response, "choices", None):
+        content = getattr(choices[0].message, "content", None)
+        return content if isinstance(content, str) else ""
     texts = [
         content.text
         for item in getattr(response, "output", ())
@@ -351,10 +405,11 @@ def provider_output_shape(raw_output: str) -> dict[str, bool | int]:
 def usage_audit(usage: Any) -> dict[str, int]:
     cached_tokens = getattr(usage, "cache_read_tokens", None)
     if not isinstance(cached_tokens, int):
-        cached_tokens = getattr(getattr(usage, "input_tokens_details", None), "cached_tokens", 0)
+        details = getattr(usage, "input_tokens_details", None) or getattr(usage, "prompt_tokens_details", None)
+        cached_tokens = getattr(details, "cached_tokens", 0)
     return {
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
+        "input_tokens": getattr(usage, "input_tokens", getattr(usage, "prompt_tokens", 0)),
+        "output_tokens": getattr(usage, "output_tokens", getattr(usage, "completion_tokens", 0)),
         "total_tokens": usage.total_tokens,
         "cached_tokens": cached_tokens if isinstance(cached_tokens, int) else 0,
     }
@@ -423,42 +478,49 @@ class YandexAgentGateway:
         return AgentCallResult(
             payload=result.payload,
             audit={
-                "provider": "yandex_ai_studio",
+                "provider": "timeweb_ai_gateway" if settings.llm_provider == "timeweb" else "yandex_ai_studio",
                 "agent": agent_name,
                 "input_hash": input_hash,
-                "request": self._provider_settings.audit_fields(),
+                "request": {
+                    **self._provider_settings.audit_fields(),
+                    # Timeweb does not document Yandex's data-logging switch.
+                    "data_logging_enabled": (
+                        None if settings.llm_provider == "timeweb"
+                        else self._provider_settings.data_logging_enabled
+                    ),
+                },
                 "pii_redaction": pii_audit,
                 **result.audit,
             },
         )
 
     async def _call_live(self, agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
-        if not settings.llm_enabled or not settings.yandex_ai_api_key:
+        if not settings.llm_enabled or not llm_is_configured():
             return AgentCallResult(payload={}, audit={"status": "not_configured"})
-        client = create_yandex_client()
+        client = create_llm_client()
         started = perf_counter()
         try:
-            response = await client.responses.create(
-                model=f"gpt://{settings.yandex_cloud_folder_id}/{settings.yandex_ai_model}",
+            response = await create_json_response(
+                client,
                 instructions=instructions,
-                input=input_text,
-                text={"format": yandex_response_format(agent_name)},
-                **yandex_model_settings(self._provider_settings),
+                input_text=input_text,
+                response_format=yandex_response_format(agent_name),
+                provider_settings=self._provider_settings,
             )
             output_text = response_output_text(response)
             output = parse_provider_json_object(output_text)
             format_retry_count = 0
             if not provider_payload_is_valid(agent_name, output):
                 format_retry_count = 1
-                response = await client.responses.create(
-                    model=f"gpt://{settings.yandex_cloud_folder_id}/{settings.yandex_ai_model}",
+                response = await create_json_response(
+                    client,
                     instructions=(
                         f"{instructions}\n\nТехническое повторение: верни полный JSON-объект, "
                         "содержащий все обязательные поля, без любого другого текста."
                     ),
-                    input=input_text,
-                    text={"format": yandex_response_format(agent_name)},
-                    **yandex_model_settings(self._provider_settings),
+                    input_text=input_text,
+                    response_format=yandex_response_format(agent_name),
+                    provider_settings=self._provider_settings,
                 )
                 output_text = response_output_text(response)
                 output = parse_provider_json_object(output_text)

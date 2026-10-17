@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_proxy_url: str = ""
+    telegram_proxy_ssh_tunnel: bool = False
     telegram_update_transport: Literal["webhook", "polling"] = "webhook"
     telegram_ingress_redis_url: str = "redis://redis:6379/0"
     app_env: Literal["development", "production", "test"] = Field(
@@ -21,6 +22,9 @@ class Settings(BaseSettings):
     build_version: str = "dev"
     database_url: str = "postgresql+asyncpg://helper:helper@localhost:5433/women_help"
     llm_enabled: bool = True
+    llm_provider: Literal["yandex", "timeweb"] = "yandex"
+    timeweb_ai_api_key: str = ""
+    timeweb_ai_model: str = ""
     yandex_ai_api_key: str = ""
     yandex_cloud_folder_id: str = DEFAULT_YANDEX_CLOUD_FOLDER_ID
     yandex_ai_model: str = "qwen3.6-35b-a3b"
@@ -38,6 +42,13 @@ class Settings(BaseSettings):
     chatwoot_duty_team_id: int = Field(default=0, ge=0)
     chatwoot_listen_host: str = "0.0.0.0"
     chatwoot_listen_port: int = Field(default=8080, ge=1, le=65535)
+    certificate_database_host: str = "postgres"
+    certificate_database_port: int = Field(default=5432, ge=1, le=65535)
+    certificate_database_user: str = "chatwoot"
+    certificate_database_name: str = "chatwoot"
+    certificate_database_sslmode: Literal[
+        "", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
+    ] = ""
     certificate_database_password: str = ""
     certificate_identity_key: str = ""
     certificate_s3_endpoint: str = "https://storage.yandexcloud.net"

@@ -29,11 +29,11 @@ from aiogram.types import Update
 from aiogram.utils.serialization import deserialize_telegram_object_to_python
 from redis.asyncio import Redis
 
+from app.chatwoot.telegram_healthcheck import LEASE_SECONDS, healthy
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 POLL_TIMEOUT = 30
-LEASE_SECONDS = 120
 
 
 class ChatwootUnavailable(RuntimeError):
@@ -130,6 +130,19 @@ async def keep_lease(lock) -> None:
         await lock.extend(LEASE_SECONDS, replace_ttl=True)
 
 
+async def prepare_until_ready(ingress: Ingress) -> None:
+    delay = 1
+    while True:
+        try:
+            await ingress.prepare()
+            return
+        except (TelegramNetworkError, TelegramServerError, aiohttp.ClientError,
+                TimeoutError, ChatwootUnavailable) as error:
+            logger.warning("Polling preparation retry kind=%s delay_s=%s", type(error).__name__, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+
+
 async def run() -> None:
     if settings.telegram_update_transport != "polling":
         raise RuntimeError("Polling transport is not enabled")
@@ -148,17 +161,8 @@ async def run() -> None:
                           blocking_timeout=5, thread_local=False)
         async with lock, asyncio.TaskGroup() as group:
             group.create_task(keep_lease(lock))
-            await ingress.prepare()
+            await prepare_until_ready(ingress)
             await ingress.poll_forever()
-
-
-async def healthy() -> bool:
-    # Probe only Redis metadata, never consume Telegram updates in a health check.
-    bot_id = int(settings.telegram_bot_token.split(":", 1)[0])
-    async with Redis.from_url(settings.telegram_ingress_redis_url,
-                              socket_timeout=5, socket_connect_timeout=5) as redis:
-        stamp = await redis.get(f"women-help:telegram-ingress:{bot_id}:last_poll")
-        return stamp is not None and 0 <= time.time() - int(stamp) < LEASE_SECONDS
 
 
 async def main() -> None:
