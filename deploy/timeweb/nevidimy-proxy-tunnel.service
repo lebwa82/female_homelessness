@@ -1,0 +1,21 @@
+[Unit]
+Description=Restricted SSH transport to the existing Amnezia SOCKS5 service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
+ExecStartPre=/usr/bin/test -s /opt/nevidimy/secrets/proxy-tunnel/id_ed25519
+ExecStartPre=/usr/bin/test -s /opt/nevidimy/certs/proxy-known_hosts
+ExecStart=/usr/bin/ssh -F /dev/null -N -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/nevidimy/certs/proxy-known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -i /opt/nevidimy/secrets/proxy-tunnel/id_ed25519 -L /opt/nevidimy/run/proxy-tunnel/socks.sock:127.0.0.1:40858 nevidimy-socks@64.188.93.185
+ExecStartPost=/usr/bin/python3 /opt/nevidimy/app/deploy/timeweb/proxy_tunnel_ready.py
+Restart=always
+RestartSec=5
+TimeoutStartSec=40
+TimeoutStopSec=20
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

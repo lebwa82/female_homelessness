@@ -73,8 +73,10 @@ class AgentBotBootstrap:
         return BootstrapResult(team_id=team_id, agent_bot_id=agent_bot_id, bot_token=token)
 
     async def _find_or_create_team(self) -> dict[str, Any]:
+        # Chatwoot normalizes team names with strip/downcase before validation.
+        name = self._settings.team_name.strip().lower()
         for team in await self._api.list_teams():
-            if team.get("name") == self._settings.team_name:
+            if team.get("name") == name:
                 return team
         return await self._api.create_team(self._settings.team_name)
 
@@ -106,7 +108,7 @@ class AiohttpChatwootAdminApi:
     @staticmethod
     def request_headers(token: str) -> dict[str, str]:
         return {
-            "api_access_token": token,
+            "Api-Access-Token": token,
             "Accept": "application/json",
             "Accept-Encoding": "identity",
         }
@@ -140,8 +142,12 @@ class AiohttpChatwootAdminApi:
         await self._request(
             "POST",
             self._path(f"/inboxes/{inbox_id}/set_agent_bot"),
-            {"agent_bot_id": agent_bot_id},
+            {"agent_bot": agent_bot_id},
         )
+        result = _object(await self._request("GET", self._path(f"/inboxes/{inbox_id}/agent_bot")))
+        attached = result.get("agent_bot")
+        if not isinstance(attached, dict) or attached.get("id") != agent_bot_id:
+            raise BootstrapApiError("inbox Agent Bot attachment was not confirmed")
 
     async def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None

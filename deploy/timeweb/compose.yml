@@ -1,0 +1,132 @@
+# Combine with deploy/chatwoot/compose.yml and compose.managed.yml.
+name: nevidimy-timeweb
+
+x-database-ca: &database-ca
+  type: bind
+  source: /opt/nevidimy/certs/postgresql-ca.crt
+  target: /run/certs/postgresql-ca.crt
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-agent-webhook: &agent-webhook
+  type: bind
+  source: ../timeweb/agent_webhook.rb
+  target: /app/config/initializers/nevidimy_agent_webhook.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-telegram-avatar: &telegram-avatar
+  type: bind
+  source: ../timeweb/telegram_avatar.rb
+  target: /app/config/initializers/nevidimy_telegram_avatar.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-telegram-avatar-job: &telegram-avatar-job
+  type: bind
+  source: ../timeweb/telegram_avatar_job.rb
+  target: /app/app/jobs/nevidimy_telegram_avatar_job.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  chatwoot:
+    image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
+    pull_policy: never
+    mem_limit: 1536m
+    environment:
+      PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+      WEB_CONCURRENCY: "1"
+      RAILS_MAX_THREADS: "2"
+      ENABLE_ACCOUNT_SIGNUP: "false"
+      http_proxy: ${TELEGRAM_HTTP_PROXY:-}
+      https_proxy: ${TELEGRAM_HTTP_PROXY:-}
+    volumes:
+      - *database-ca
+      - *agent-webhook
+      - *telegram-avatar
+      - *telegram-avatar-job
+    healthcheck:
+      # Rails enforces HTTPS; mirror the header set by the trusted proxy.
+      test:
+        - CMD
+        - ruby
+        - -rnet/http
+        - -e
+        - "u=URI('http://127.0.0.1:3000/api'); q=Net::HTTP::Get.new(u); q['X-Forwarded-Proto']='https'; exit(Net::HTTP.start(u.hostname,u.port){|h|h.request(q)}.code == '200' ? 0 : 1)"
+      interval: 15s
+      timeout: 5s
+      start_period: 90s
+      retries: 8
+
+  sidekiq:
+    image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
+    pull_policy: never
+    mem_limit: 768m
+    environment:
+      PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+      SIDEKIQ_CONCURRENCY: "2"
+      RAILS_MAX_THREADS: "2"
+      http_proxy: ${TELEGRAM_HTTP_PROXY:-}
+      https_proxy: ${TELEGRAM_HTTP_PROXY:-}
+    volumes:
+      - *database-ca
+      - *agent-webhook
+      - *telegram-avatar
+      - *telegram-avatar-job
+
+  agent-bot:
+    # The offline PII-model probe already peaks near 370 MiB before HTTP work.
+    mem_limit: 768m
+    environment:
+      PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+    volumes:
+      - *database-ca
+
+  certificate-admin-bot:
+    environment:
+      PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+    volumes:
+      - *database-ca
+
+  redis:
+    pull_policy: never
+    mem_limit: 256m
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+
+  caddy:
+    pull_policy: never
+    mem_limit: 128m
+    env_file: !reset []
+    environment:
+      CHATWOOT_HOSTNAME: ${CHATWOOT_HOSTNAME:?Set the Chatwoot hostname}
+      AGENT_HOSTNAME: ${AGENT_HOSTNAME:?Set the agent hostname}
+  # Telegram is a separate cutover; preparing the web UI must not start it.
+  telegram-proxy:
+    profiles: ["telegram"]
+    mem_limit: 64m
+    env_file: !override
+      - /etc/women-help-telegram-proxy.env
+    environment:
+      TELEGRAM_PROXY_SSH_TUNNEL: "true"
+    volumes:
+      - type: bind
+        source: /opt/nevidimy/run/proxy-tunnel
+        target: /run/nevidimy-proxy
+        read_only: true
+        bind:
+          create_host_path: false
+
+  telegram-ingress:
+    mem_limit: 256m
+    environment:
+      TELEGRAM_PROXY_URL: http://telegram-proxy:3128
+    depends_on:
+      telegram-proxy:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-m", "app.chatwoot.telegram_healthcheck"]

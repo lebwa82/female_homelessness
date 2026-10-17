@@ -1,0 +1,18 @@
+# Temporary isolated HTTP mode; append after the three Timeweb Compose files.
+# Reach it only through SSH forwarding, never by publishing 80/443 to the internet.
+services:
+  chatwoot:
+    environment:
+      FRONTEND_URL: http://127.0.0.1:18080
+      FORCE_SSL: "false"
+  sidekiq:
+    environment:
+      FRONTEND_URL: http://127.0.0.1:18080
+      FORCE_SSL: "false"
+  caddy:
+    ports: !override
+      - "127.0.0.1:18080:80"
+    volumes: !override
+      - ../timeweb/Caddyfile.http-local:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
