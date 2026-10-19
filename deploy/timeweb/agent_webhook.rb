@@ -2,6 +2,7 @@
 # Keep SafeFetch's global private-network protection enabled for every other URL.
 require 'net/http'
 require 'uri'
+require 'openssl'
 
 module NevidimyInternalAgentWebhook
   private
@@ -9,7 +10,7 @@ module NevidimyInternalAgentWebhook
   def perform_request
     expected = ENV['NEVIDIMY_AGENT_WEBHOOK_URL']
     return super unless @webhook_type == :agent_bot_webhook && expected == @url &&
-                        expected&.match?(%r{\Ahttp://agent-bot:8080/webhooks/chatwoot/agent/[A-Za-z0-9_-]{32,128}\z})
+                        expected&.match?(%r{\Ahttps?://agent-bot:8080/webhooks/chatwoot/agent/[A-Za-z0-9_-]{32,128}\z})
 
     unless @secret.is_a?(String) && !@secret.empty?
       raise SafeFetch::UnsafeUrlError, 'internal Agent Bot requires a signing secret'
@@ -21,6 +22,12 @@ module NevidimyInternalAgentWebhook
     request.body = body
     # Explicit nil disables environment proxies: this traffic must stay in Docker.
     http = Net::HTTP.new(uri.hostname, uri.port, nil)
+    if uri.scheme == 'https'
+      http.use_ssl = true
+      http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      http.ca_file = ENV.fetch('SSL_CERT_FILE')
+      http.min_version = OpenSSL::SSL::TLS1_2_VERSION
+    end
     http.open_timeout = webhook_timeout
     http.read_timeout = webhook_timeout
     http.write_timeout = webhook_timeout

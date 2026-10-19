@@ -46,7 +46,7 @@ from app.domain import (
     InboundExecutionKey,
     RiskAssessment,
 )
-from app.pii import redact_with_audit
+from app.pii import SAFE_PII_ENTITY_TYPES, redact_with_audit
 
 CALLBACK_PROCESSING_LEASE = timedelta(minutes=5)
 _AUDIT_FIELDS = frozenset({
@@ -484,12 +484,14 @@ def _validation_type_category(value: str) -> str:
 
 def _safe_pii_audit(value: dict[str, Any]) -> dict[str, Any]:
     counts = value.get("entity_counts", {})
-    allowed_entities = {"PERSON", "LOCATION", "PHONE_NUMBER", "EMAIL_ADDRESS", "CREDIT_CARD", "IP_ADDRESS", "URL", "TELEGRAM_HANDLE"}
-    safe_counts = {
-        (key if key in allowed_entities else "OTHER"): max(0, min(int(count), 10_000))
-        for key, count in counts.items()
-        if isinstance(key, str) and isinstance(count, int)
-    } if isinstance(counts, dict) else {}
+    safe_counts: dict[str, int] = {}
+    if isinstance(counts, dict):
+        for key, count in counts.items():
+            if isinstance(key, str) and isinstance(count, int):
+                category = key if key in SAFE_PII_ENTITY_TYPES else "OTHER"
+                safe_counts[category] = min(
+                    10_000, safe_counts.get(category, 0) + max(0, min(count, 10_000))
+                )
     return {
         "engine": "presidio" if value.get("engine") == "presidio" else "other",
         "language": "ru" if value.get("language") == "ru" else "other",

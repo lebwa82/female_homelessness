@@ -1,5 +1,9 @@
 # Telegram и Chatwoot: эксплуатация
 
+Актуальный production — Timeweb: см. раздел «Timeweb: новый контур» ниже.
+Инструкции Yandex/Podman и `just deploy-prod` ниже сохранены как исторические;
+к текущей VM их применять нельзя.
+
 Telegram подключён штатным каналом Chatwoot. Новая переписка хранится в БД
 Chatwoot; Python получает подписанные события и сохраняет ответы через API.
 Прежний `women-help-bot` после переключения должен быть остановлен и отключён
@@ -97,9 +101,9 @@ IP `158.160.16.252` закреплён за проектом как статич
 `e2l6noal4dnff3iin4tg`, `reserved=true`. Остановка и запуск VM больше не меняют
 этот адрес. Зарезервированный адрес тарифицируется и при остановленной VM.
 
-Источник истины для деплоя — ID VM `epdqi9moqfn8fqbe3g2n`, а не IP из документа.
+Для исторического Yandex-контура источником истины был ID VM `epdqi9moqfn8fqbe3g2n`, а не IP из документа.
 `just prod-host` получает актуальный SSH-адрес через Yandex Cloud. `just deploy-prod`
-разворачивает действующий Chatwoot-контур; перед загрузкой файлов сверяет ID
+разворачивает прежний Yandex Chatwoot-контур; перед загрузкой файлов сверяет ID
 машины через metadata по SSH, включая ручное переопределение адреса. При несовпадении
 операция останавливается. Старый `scripts/deploy_prod.sh` относится к отключённому
 standalone-боту и для текущего сервиса не используется.
@@ -442,3 +446,108 @@ Telegram SDK и завершался с 137; отдельно воспроизв
 healthy; у VM опубликован только loopback HTTP 18080, TLS БД включён. Сохранены
 все незакоммиченные изменения и файлы импорта. Прошли 134 целевых локальных теста,
 ruff и `git diff --check`; это не утверждение о прохождении всей тестовой базы.
+
+## Внутренний TLS: подготовленный режим
+
+Актуальный production — Timeweb, как описано выше и подтверждено пользователем
+20.10.2026. Для него PostgreSQL уже использует `verify-full` с CA провайдера;
+новый режим добавляет TLS к Redis, Chatwoot API и внутреннему Agent Bot webhook.
+Активация новых соединений на сервере ещё не выполнена.
+
+| Соединение после активации | Протокол и проверка |
+| --- | --- |
+| backend / Telegram ingress → Chatwoot | HTTPS / TCP 3000, CA и имя сервера |
+| Chatwoot / Sidekiq → backend | HTTPS / TCP 8080, CA и имя; существующий HMAC сохраняется |
+| Caddy → Chatwoot | HTTPS / TCP 3000, CA и имя сервера |
+| Chatwoot / Sidekiq / backend / ingress → Redis | `rediss://` / TCP 6379, CA и имя; plaintext listener выключен |
+| Chatwoot / Sidekiq / backend сертификатов → Managed PostgreSQL | существующий TLS / TCP 5432, `verify-full`, CA Timeweb |
+
+Redis проверяет серверный сертификат; mTLS и новая парольная политика этим
+режимом не включаются. Внутренние порты не публикуются. Локальный CONNECT на
+3128 сохраняется: данные Telegram идут внутри сквозного HTTPS, внешний переход
+прокси в записанном Timeweb-контуре защищён SSH. Этот управляющий локальный HTTP
+не следует описывать как отдельное HTTPS-соединение.
+
+### Штатный запуск Timeweb
+
+`nevidimy.service`, `nevidimy-agent.service`, `nevidimy-telegram.service` и
+`http-local.conf` используют общий `scripts/chatwoot_compose.py`. Он всегда
+выбирает базовый Compose, managed-overlay и Timeweb-overlay. Если установлен
+`/etc/systemd/system/nevidimy.service.d/http-local.conf`, все вызовы сохраняют
+SSH-only UI: `127.0.0.1:18080`, без открытия публичных 80/443. В TLS-режиме Caddy
+по-прежнему принимает локальный HTTP через SSH, а к Chatwoot подключается по
+проверенному HTTPS. Сохранённые ограничения UI не снимаются.
+
+Сертификаты генерируются на проверенной целевой VM, без вывода приватных ключей:
+
+```bash
+sudo python3 -m scripts.prepare_internal_tls --output-dir /opt/nevidimy/certs/internal-tls
+```
+
+В закрытом `/etc/women-help-chatwoot.env` сохраняются:
+
+```dotenv
+CHATWOOT_INTERNAL_TLS=1
+INTERNAL_TLS_DIR=/opt/nevidimy/certs/internal-tls
+POSTGRES_TLS_CA_FILE=/opt/nevidimy/certs/postgresql-ca.crt
+```
+
+Приватный CA приложения и существующий CA managed PostgreSQL не смешиваются.
+`compose.tls-postgres.yml` на Timeweb не используется; локальный PostgreSQL не
+запускается. Незакреплённые TLS-пути, неполный набор сертификатов, открытые права
+ключа или подмена CA managed-БД останавливают общий запуск без возврата к HTTP.
+Без новых TLS-настроек общий entrypoint сохраняет существующую конфигурацию.
+
+До активации нужно перевести `NEVIDIMY_AGENT_WEBHOOK_URL` в закрытом env и
+зарегистрированный `AgentBot.outgoing_url` в БД на HTTPS с тем же хостом,
+портом и секретным путём. Подпись HMAC и глобальный
+`SAFE_FETCH_ALLOW_PRIVATE_NETWORK=false` сохраняются. Значения URL и секретов
+не выводятся. Entry point отклоняет TLS-режим, если env всё ещё содержит HTTP
+webhook; совпадение с записью БД проверяется отдельно при live-приёмке.
+
+Перед перезапуском нужны backup env/units/drop-ins, текущих image IDs, ссылка
+на релиз и проверенный дамп managed-БД. Код и Python-образ с TLS поддержкой
+доставляются и проверяются заранее. Сохраняются закреплённый образ Chatwoot,
+`--pull never`, `--no-build`, тома и уже выбранный MVP Telegram-бот. Это изменение
+транспорта не требует обновления Chatwoot или запуска старых Yandex-команд.
+
+Проверка Compose без перезапуска (из `/opt/nevidimy/app`):
+
+```bash
+sudo python3 scripts/chatwoot_compose.py config --quiet
+```
+
+Для включения необходимо установить обновлённые Timeweb units и существующий
+HTTP-local drop-in, выполнить `daemon-reload` и согласованный перезапуск всех
+затронутых контейнеров. Не удалять volumes и не запускать параллельный poller.
+При откате восстанавливаются прежние env, units/drop-ins и образы с теми же
+томами; дамп БД автоматически не восстанавливается поверх новых сообщений.
+
+### Сертификаты и приёмка
+
+Leaf-сертификаты действуют 90 дней. Обновление сохраняет CA:
+
+```bash
+sudo python3 -m scripts.prepare_internal_tls --output-dir /opt/nevidimy/certs/internal-tls --renew
+```
+
+После выпуска контейнеры пересоздаются: процессы не подхватывают новые
+сертификаты автоматически. Ключ CA не монтируется в контейнеры.
+
+Локально проверены: HTTPS и отказ чужому CA/имени/plaintext; объединение Compose
+для managed PostgreSQL и Timeweb с сохранением SSH-only UI; Redis TLS PING
+и отказ plaintext; PostgreSQL TLS 1.3 и отказ plaintext; SQLAlchemy/asyncpg путь
+приложения с `verify-full`; Caddy-конфигурация.
+
+В изолированных контейнерах с пустой тестовой БД прошёл полный старт
+Chatwoot 4.18.0 (`docker.io/chatwoot/chatwoot@sha256:a4b7eea7353a9b585d0f29f2c57c7549710db961b119f7f1561b2fe964f48f65`):
+миграции, проверенный HTTPS Puma, отказ HTTP, Ruby healthcheck, TLS подключения
+Rails и Sidekiq к PostgreSQL и Redis. Исправлено создание `tmp/pids` перед Puma.
+Это не установление версии production и не проверка живой доставки Telegram.
+
+Развёртывание этих изменений выполняется с локального Mac по
+[инструкции деплоя](deploy-timeweb-from-mac.md). Облачная интеграция доступа
+отменена пользователем и не является предварительным условием. Yandex CLI
+не нужен. Серверный firewall и новые живые TLS-соединения ещё требуют приёмки.
+`architecture-2.png` отражает сохранённую Timeweb-конфигурацию; после live-приёмки
+новые внутренние подписи меняются на TLS с сохранением оформления.

@@ -1,13 +1,16 @@
 # Project agent rules
 
-## Deployment host
+## Deployment host — Timeweb (confirmed by the user, 2026-10-20)
 
-- The production VM is Yandex Cloud instance `epdqi9moqfn8fqbe3g2n`, folder `b1gepl5pmqr8f7hbu3bj`, SSH login `lebwa82`.
-- Resolve its current address with `just prod-host` or `uv run python -m scripts.resolve_prod_host`; never reuse an IP from old messages or another VM.
-- The current IP `158.160.16.252` is reserved (address resource `e2l6noal4dnff3iin4tg`). Canonical Chatwoot URL: `https://chatwoot.158-160-16-252.sslip.io/`.
-- Before a remote mutation, verify the SSH peer's metadata instance ID with `uv run python -m scripts.resolve_prod_host --verify-ssh HOST`. A mismatch or unavailable metadata must stop the operation.
-- `just deploy-prod` deploys the active Chatwoot contour. `scripts/deploy_prod.sh` is historical standalone-bot deployment code; do not run it against this VM or restart `women-help-bot.service`.
-- Do not use another VM for deployment or operational checks unless the user explicitly changes the project VM.
+- The active contour is Timeweb, not Yandex Cloud. VM `9351701` / `nevidimy-prod-app`, managed PostgreSQL `4221087` / `nevidimy-prod-pg`, project `3044129`, region `msk-1`. See `docs/chatwoot-operations.md`, section "Timeweb: новый контур".
+- Before remote operations, refresh and verify the VM's ID, name, project and current IP through the Timeweb API. Use the previously trusted SSH host key; do not guess an IP from old messages. Before mutations, also check `/etc/nevidimy-deployment-target` equals `timeweb-nevidimy-prod-app-msk-1`. The marker alone is not independent proof of identity. Missing API/SSH access blocks remote changes.
+- Runtime is Docker Compose in `/opt/nevidimy/app`. Core: `nevidimy.service`; backend: `nevidimy-agent.service`; Telegram: `nevidimy-telegram.service` and `nevidimy-proxy-tunnel.service`.
+- Compose order is `deploy/chatwoot/compose.yml`, `deploy/chatwoot/compose.managed.yml`, `deploy/timeweb/compose.yml`, followed by the explicitly active overlays. The recorded UI mode uses `compose.http-local.yml` and the `http-local.conf` systemd drop-in: loopback `127.0.0.1:18080` through SSH. Do not open public HTTP or silently remove that restriction. Inspect actual units/drop-ins before activation.
+- Managed PostgreSQL already requires `verify-full` and the provider CA at `/opt/nevidimy/certs/postgresql-ca.crt`. Never start local PostgreSQL or use the internal application CA as the managed database CA. Preserve pinned images, volumes, existing provider selection and credentials.
+- Only the MVP Telegram bot `@nevidima_bot_mvp_bot` was selected for this contour. Do not switch the main `@nevidima_bot` or attach imported history automatically. LLM is Timeweb AI Gateway / DeepSeek; legacy Yandex defaults are not the active provider.
+- `just prod-host`, `scripts.resolve_prod_host`, `just deploy-prod`, `scripts/deploy_chatwoot_test.sh`, `activate.py` and `women-help-*.service` are legacy Yandex/Podman tooling. Do not use them for active production operations. Do not restart `women-help-bot.service`.
+- Do not use another VM unless the user explicitly changes the project target. Current runtime access is separate from these project records; never claim that recorded deployment state proves live connectivity.
+- The user cancelled cloud-access integration on 2026-10-20. Deploy these changes from the user's Mac using its existing authorized API/SSH access; follow `docs/deploy-timeweb-from-mac.md`. Do not make cloud secret bindings, a new VM, or a VPN a prerequisite. Old access-handoff notes are task-local artifacts, not deployment instructions.
 
 - Default: perform implementation, review, and verification in the primary agent process; do not use sub-agents.
 - User-approved exception (2026-10-03): one isolated Chatwoot testing agent may prepare the test plan and run local, non-network tests. Start it with no inherited turns and a neutral technical brief. It may edit only its test-plan document; no credentials, customer data, runtime edits, remote mutations, deployment, or further delegation. The primary agent configures the CLI and performs authorized live tests in isolated test conversations. This exception does not authorize other delegated work.

@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     chatwoot_duty_team_id: int = Field(default=0, ge=0)
     chatwoot_listen_host: str = "0.0.0.0"
     chatwoot_listen_port: int = Field(default=8080, ge=1, le=65535)
+    chatwoot_tls_cert_file: str = ""
+    chatwoot_tls_key_file: str = ""
     certificate_database_host: str = "postgres"
     certificate_database_port: int = Field(default=5432, ge=1, le=65535)
     certificate_database_user: str = "chatwoot"

@@ -16,6 +16,7 @@ from app.chatwoot.event_queue import DurableEventQueue
 from app.chatwoot.followups import run as run_followups
 from app.chatwoot.service import ChatwootAgentService
 from app.config import settings
+from app.transport_tls import server_context
 
 
 def main() -> None:
@@ -85,6 +86,7 @@ def main() -> None:
         application,
         host=settings.chatwoot_listen_host,
         port=settings.chatwoot_listen_port,
+        ssl_context=server_context(settings.chatwoot_tls_cert_file, settings.chatwoot_tls_key_file),
         # The webhook's URL includes its route credential. Standard aiohttp
         # access logging would copy that credential into the container journal.
         access_log=None,

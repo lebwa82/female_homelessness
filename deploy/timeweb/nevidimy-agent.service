@@ -9,8 +9,8 @@ RemainAfterExit=yes
 WorkingDirectory=/opt/nevidimy/app
 ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
 ExecStartPre=/usr/bin/test -s /etc/women-help-agent.env
-ExecStart=/usr/bin/docker compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml -f deploy/chatwoot/compose.managed.yml -f deploy/timeweb/compose.yml --profile agent up -d --no-build --pull never --no-deps --wait --wait-timeout 180 agent-bot
-ExecStop=/usr/bin/docker compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml -f deploy/chatwoot/compose.managed.yml -f deploy/timeweb/compose.yml --profile agent stop agent-bot
+ExecStart=/usr/bin/python3 scripts/chatwoot_compose.py --profile agent up -d --no-build --pull never --no-deps --wait --wait-timeout 180 agent-bot
+ExecStop=/usr/bin/python3 scripts/chatwoot_compose.py --profile agent stop agent-bot
 TimeoutStartSec=240
 TimeoutStopSec=90
 

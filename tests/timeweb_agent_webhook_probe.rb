@@ -51,7 +51,8 @@ end
 require_relative '../deploy/timeweb/agent_webhook'
 
 class FakeHttp
-  attr_accessor :open_timeout, :read_timeout, :write_timeout, :max_retries
+  attr_accessor :open_timeout, :read_timeout, :write_timeout, :max_retries,
+                :use_ssl, :verify_mode, :ca_file, :min_version
   attr_reader :requests
 
   def initialize
@@ -93,6 +94,21 @@ trigger.execute
 verify(!trigger.fallback && $probe_http.requests.size == 1 && $probe_http.max_retries == 0)
 verify($probe_http.requests.first.path == '/webhooks/chatwoot/agent/' + 'a' * 48)
 verify($probe_http.requests.first['X-Chatwoot-Signature'] == 'sha256=test-only')
+
+https_approved = approved.sub('http:', 'https:')
+ENV['NEVIDIMY_AGENT_WEBHOOK_URL'] = https_approved
+ENV['SSL_CERT_FILE'] = '/run/tls/ca-bundle.pem'
+Webhooks::Trigger.new(https_approved).execute
+verify($probe_http.use_ssl && $probe_http.verify_mode == OpenSSL::SSL::VERIFY_PEER)
+verify($probe_http.ca_file == '/run/tls/ca-bundle.pem')
+verify($probe_http.min_version == OpenSSL::SSL::TLS1_2_VERSION)
+ENV.delete('SSL_CERT_FILE')
+begin
+  Webhooks::Trigger.new(https_approved).execute
+  raise 'missing CA accepted'
+rescue KeyError
+end
+ENV['NEVIDIMY_AGENT_WEBHOOK_URL'] = approved
 
 ['http://127.0.0.1:8080/', approved + '?next=private', approved.sub('a' * 48, 'b' * 48)].each do |url|
   trigger = Webhooks::Trigger.new(url)

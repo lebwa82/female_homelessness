@@ -9,8 +9,8 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/nevidimy/app
 ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
-ExecStart=/usr/bin/docker compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml -f deploy/chatwoot/compose.managed.yml -f deploy/timeweb/compose.yml up -d --no-build --pull never --wait --wait-timeout 240 redis chatwoot sidekiq caddy
-ExecStop=/usr/bin/docker compose --env-file /etc/women-help-chatwoot.env -f deploy/chatwoot/compose.yml -f deploy/chatwoot/compose.managed.yml -f deploy/timeweb/compose.yml stop
+ExecStart=/usr/bin/python3 scripts/chatwoot_compose.py up -d --no-build --pull never --wait --wait-timeout 240 redis chatwoot sidekiq caddy
+ExecStop=/usr/bin/python3 scripts/chatwoot_compose.py stop
 TimeoutStartSec=300
 TimeoutStopSec=90
 

@@ -1,0 +1,12 @@
+{
+    auto_https off
+}
+
+:80 {
+    encode zstd gzip
+    reverse_proxy https://chatwoot:3000 {
+        transport http {
+            tls_trust_pool file /run/tls/ca.crt
+        }
+    }
+}

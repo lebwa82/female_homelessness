@@ -1,0 +1,6 @@
+# Append after compose.http-local.yml AND compose.tls.yml. UI remains SSH-only;
+# Caddy -> Chatwoot uses verified HTTPS. Do not publish a new port.
+services:
+  caddy:
+    volumes:
+      - ../timeweb/Caddyfile.tls-http-local:/etc/caddy/Caddyfile:ro

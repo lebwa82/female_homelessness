@@ -1,0 +1,22 @@
+# Local PostgreSQL only; append after compose.tls.yml.
+services:
+  postgres:
+    entrypoint: ["/bin/sh", "/run/postgres-entrypoint.sh"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - ssl_cert_file=/run/postgres-tls/server.crt
+      - -c
+      - ssl_key_file=/run/postgres-tls/server.key
+      - -c
+      - hba_file=/run/postgres-tls/pg_hba.conf
+    tmpfs: ["/run/postgres-tls"]
+    volumes:
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/postgres.crt:/run/tls/server.crt:ro
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/postgres.key:/run/tls/server.key:ro
+      - ./tls/postgres-entrypoint.sh:/run/postgres-entrypoint.sh:ro
+      - ./tls/pg_hba.conf:/run/pg_hba.conf:ro

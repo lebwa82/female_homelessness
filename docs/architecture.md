@@ -5,14 +5,16 @@
 инвентаризация работающих интеграций: сейчас реализован Telegram-контур,
 коннекторы WhatsApp, VK и MAX ещё предстоит добавить.
 Связи действующего контура повторно сверены с обработчиками, API-клиентом,
-скриптами активации и `deploy/chatwoot/compose.yml` на 12 октября 2026 года.
+Timeweb Compose-файлами и сохранённой эксплуатационной конфигурацией на
+20 октября 2026 года; новый внутренний TLS ещё не активирован.
 Это прикладная схема обмена данными, не схема firewall: Caddy,
 Sidekiq и локальные тома не вынесены в отдельные блоки. Redis показан как
 общая зависимость трёх компонентов; его роль описана ниже.
 Доступность сервера этой схемой не подтверждается.
 
 GitHub отображает Mermaid ниже без плагинов. Для просмотра отдельной картинки:
-[SVG](diagrams/architecture-1.svg) · [PNG](diagrams/architecture-1.png).
+[SVG](diagrams/architecture-2.svg) · [PNG](diagrams/architecture-2.png).
+Исходная картинка сохранена как `architecture-1.png`.
 
 ```mermaid
 ---
@@ -52,25 +54,25 @@ flowchart TB
     S3["S3<br/>PDF сертификатов"]
     REDIS["Redis<br/>общий для сервисов"]
 
-    TG <-->|"Через прокси"| TRANSPORT
-    TRANSPORT <-->|"нативный канал"| CW
-    WA <-->|"Сообщения"| WA_CONNECTOR
-    VK <-->|"Сообщения"| VK_CONNECTOR
-    MAX <-->|"Сообщения"| MAX_CONNECTOR
-    WA_CONNECTOR <-->|"API / callback"| CW
-    VK_CONNECTOR <-->|"API / callback"| CW
-    MAX_CONNECTOR <-->|"API / callback"| CW
+    TG <-->|"Через SSH-прокси<br/>https · tcp/443"| TRANSPORT
+    TRANSPORT <-->|"нативный канал<br/>http · tcp/3000"| CW
+    WA <-->|"Сообщения<br/>https · tcp/443 · план"| WA_CONNECTOR
+    VK <-->|"Сообщения<br/>https · tcp/443 · план"| VK_CONNECTOR
+    MAX <-->|"Сообщения<br/>https · tcp/443 · план"| MAX_CONNECTOR
+    WA_CONNECTOR <-->|"API / callback<br/>https · tcp/443 · план"| CW
+    VK_CONNECTOR <-->|"API / callback<br/>https · tcp/443 · план"| CW
+    MAX_CONNECTOR <-->|"API / callback<br/>https · tcp/443 · план"| CW
 
-    CW -->|"webhook: события"| AGENT
-    AGENT -->|"API: история и ответы"| CW
-    CW <-->|"панель"| STAFF
-    CW <-->|"история и состояние"| PG
-    AGENT <-->|"учёт сертификатов"| PG
-    AGENT <-->|"маскированный контекст"| LLM
-    AGENT <-->|"загрузка PDF"| S3
-    CW <-->|"Sidekiq: фоновые задачи"| REDIS
-    AGENT <-->|"события и повторы"| REDIS
-    TRANSPORT <-->|"курсор и блокировка polling"| REDIS
+    CW -->|"подписанный webhook<br/>http · tcp/8080"| AGENT
+    AGENT -->|"API: история и ответы<br/>http · tcp/3000"| CW
+    CW <-->|"панель через SSH-туннель<br/>http · tcp/18080 · SSH tcp/22"| STAFF
+    CW <-->|"история и состояние<br/>TLS · tcp/5432 · verify-full"| PG
+    AGENT <-->|"учёт сертификатов<br/>TLS · tcp/5432 · verify-full"| PG
+    AGENT <-->|"маскированный контекст<br/>https · tcp/443"| LLM
+    AGENT <-->|"загрузка PDF<br/>https · tcp/443"| S3
+    CW <-->|"Sidekiq: фоновые задачи<br/>tcp/6379 · без TLS"| REDIS
+    AGENT <-->|"события и повторы<br/>tcp/6379 · без TLS"| REDIS
+    TRANSPORT <-->|"курсор и блокировка polling<br/>tcp/6379 · без TLS"| REDIS
 
     classDef default font-family:Arial,font-size:18px;
     classDef app fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
@@ -78,6 +80,24 @@ flowchart TB
     class CW,AGENT app;
     class PG,S3,REDIS storage;
 ```
+
+Подписи относятся к сохранённому Timeweb-контуру; повторная проверка живых
+соединений в этой сессии не проводилась. HTTPS до Telegram сохраняется внутри
+прокси-туннеля; внешний переход прокси защищён SSH. Панель открывается только
+на `127.0.0.1:18080` через SSH, Caddy передаёт запросы на HTTP:3000. Внутренний
+подписанный webhook идёт непосредственно на HTTP:8080. Managed PostgreSQL:5432
+уже использует `verify-full` с CA Timeweb; Redis:6379 пока использует `redis://`.
+S3 и LLM используют HTTPS endpoint. HTTPS для WhatsApp, VK и MAX — требование
+к будущим интеграциям, их конфигураций пока нет. Маскирование перед LLM
+не заменяет шифрование сетевых соединений.
+
+Подготовлен [режим внутреннего TLS](chatwoot-operations.md#внутренний-tls-подготовленный-режим)
+с единым выбором Compose для Timeweb systemd, с сохранением SSH-доступа к UI.
+Его активация на production
+не подтверждена: в текущем облачном окружении нет доступа к серверу.
+После live-проверки подписи внутренних соединений на этой же схеме нужно
+обновить на HTTPS и Redis TLS, сохранив оформление. PostgreSQL TLS уже включён
+в сохранённой конфигурации Timeweb.
 
 В Chatwoot видна вся переписка. Бот продолжает отвечать после уведомления команды
 и замолкает, когда разговор берёт человек. Ответы человека идут в тот же Telegram-чат.
@@ -196,9 +216,9 @@ Redis Streams временно содержат payload ожидающего с�
   о поддержке этих каналов «из коробки».
 - Целевой облачный контур: **одна VM с контейнерами + один Managed PostgreSQL**,
   S3 и оплачиваемый по токенам LLM API. Kubernetes для этой схемы не требуется.
-  Сейчас БД находится на VM, как в текущем Compose; перенос в managed
-  ещё не реализован. Перенос включает Chatwoot и учёт сертификатов: сейчас
-  `database_url()` последнего жёстко задаёт `postgres:5432/chatwoot`.
+  Действующий контур по подтверждению пользователя — Timeweb VM и Managed
+  PostgreSQL; он описан в эксплуатационной документации. Локальная БД в базовом
+  Compose относится к прежнему контуру, а Timeweb managed-overlay удаляет её.
 - Переход к Chat Completions согласован, но ещё не выполнен: в текущем коде
   основные LLM-вызовы и выбор команды используют Responses. Смена облака
   не меняет владение историей, очередями и интерфейсом специалиста.
@@ -211,13 +231,16 @@ SVG и PNG — генерируемые артефакты, их нужно об
 Из корня репозитория:
 
 ```bash
-npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i docs/architecture.md -o docs/diagrams/architecture.svg -b white --size 2200
-npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i docs/architecture.md -o docs/diagrams/architecture.png -b white --size 2200 -s 2
+npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i docs/architecture.md -o docs/diagrams/architecture-2.svg -b white --size 2200
+mv docs/diagrams/architecture-2-1.svg docs/diagrams/architecture-2.svg
+npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i docs/architecture.md -o docs/diagrams/architecture-2.png -b white --size 2200 -s 2
+mv docs/diagrams/architecture-2-1.png docs/diagrams/architecture-2.png
 ```
 
-CLI извлекает Mermaid из Markdown и создаёт `architecture-1.svg` и
-`architecture-1.png`. Внешнему сервису рендеринга диаграмма не отправляется.
-Проверка этой версии: Mermaid CLI успешно сгенерировал оба формата,
+CLI извлекает Mermaid из Markdown и добавляет номер диаграммы к имени файла;
+команды `mv` сохраняют результат как `architecture-2.svg` / `architecture-2.png`.
+Внешнему сервису рендеринга диаграмма не отправляется.
+Проверка этой версии: Mermaid и Chromium локально сгенерировали оба формата,
 SVG прошёл XML-проверку, PNG просмотрен на читаемость и пересечения.
 Это проверка документации; live-приёмка новых коннекторов не проводилась.
 

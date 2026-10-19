@@ -11,6 +11,9 @@ from typing import Any
 import tldextract
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer.predefined_recognizers import CreditCardRecognizer
+
+from app.pii_patterns import sensitive_matches
 
 NLP_CONFIGURATION = {
     "nlp_engine_name": "spacy",
@@ -25,7 +28,34 @@ _ENTITY_REPLACEMENTS = {
     "CREDIT_CARD": "[КАРТА]",
     "IP_ADDRESS": "[IP]",
     "URL": "[ССЫЛКА]",
+    "RU_SNILS": "[СНИЛС]",
+    "RU_INN": "[ИНН]",
+    "RU_PASSPORT": "[ПАСПОРТ]",
+    "RU_FOREIGN_PASSPORT": "[ПАСПОРТ]",
+    "RU_DRIVER_LICENSE": "[ВОДИТЕЛЬСКОЕ_УДОСТОВЕРЕНИЕ]",
+    "RU_MILITARY_ID": "[ВОЕННЫЙ_БИЛЕТ]",
+    "RU_BIRTH_CERTIFICATE": "[СВИДЕТЕЛЬСТВО_О_РОЖДЕНИИ]",
+    "RU_BANK_ACCOUNT": "[БАНКОВСКИЙ_СЧЁТ]",
+    "SECRET": "[СЕКРЕТ]",
 }
+SAFE_PII_ENTITY_TYPES = frozenset((*_ENTITY_REPLACEMENTS, "TELEGRAM_HANDLE"))
+_PLACEHOLDERS = re.compile(
+    r"(?<!\w)(?:"
+    + "|".join(
+        re.escape(value)
+        for value in sorted(
+            {
+                *_ENTITY_REPLACEMENTS.values(),
+                "[CONTACT]",
+                "[ПЕРСОНАЛЬНЫЕ_ДАННЫЕ]",
+                "[SENSITIVE_DELIVERY]",
+            },
+            key=len,
+            reverse=True,
+        )
+    )
+    + r")(?!\w)"
+)
 
 # Never let the PII path fetch or refresh the public suffix list.  The extractor is
 # deliberately constructed once with bundled data only, so a redaction request is
@@ -36,7 +66,10 @@ tld_extractor = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
 # about Telegram.  They are collected as spans on the original text and merged
 # with Presidio spans in one pass, so placeholders cannot be redetected as PII.
 _TELEGRAM_HANDLE = re.compile(r"(?<![\w@])@[A-Za-z0-9_]{5,32}\b")
-_URL_CANDIDATE = re.compile(r"(?i)\b(?:https?://)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[^\s<>()]*)?")
+_URL_CANDIDATE = re.compile(
+    r"""(?i)(?<!\w)(?:(?:[a-z][a-z0-9+.-]{1,20}://|mailto:)[^\s<>"'\x60]+"""
+    r"""|[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/?\x23][^\s<>"'\x60]*)?)"""
+)
 
 
 @dataclass(frozen=True)
@@ -48,14 +81,34 @@ class RedactionResult:
 @lru_cache(maxsize=1)
 def analyzer() -> AnalyzerEngine:
     provider = NlpEngineProvider(nlp_configuration=NLP_CONFIGURATION)
-    return AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["ru"])
+    engine = AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["ru"])
+    engine.registry.add_recognizer(
+        CreditCardRecognizer(
+            supported_language="ru", context=["карта", "карты", "карточка", "номер карты"]
+        )
+    )
+    return engine
 
 
 def redact_with_audit(text: str) -> RedactionResult:
     """Mask original-text spans once and return only non-sensitive audit data."""
+    protected = tuple(match.span() for match in _PLACEHOLDERS.finditer(text))
+    # Keep offsets stable while preventing NLP from treating marker labels as
+    # new names/entities. A non-whitespace filler also stops regex whitespace
+    # from skipping a marker and consuming an unrelated following field.
+    detection_text = _PLACEHOLDERS.sub(lambda match: "x" * len(match.group()), text)
     custom_spans = [
-        *_telegram_spans(text),
-        *_url_spans(text),
+        *_telegram_spans(detection_text),
+        *_url_spans(detection_text),
+        *(
+            _RedactionSpan(
+                match.start,
+                match.end,
+                match.entity_type,
+                _ENTITY_REPLACEMENTS[match.entity_type],
+            )
+            for match in sensitive_matches(detection_text)
+        ),
     ]
     presidio_spans = [
         _RedactionSpan(
@@ -64,10 +117,16 @@ def redact_with_audit(text: str) -> RedactionResult:
             result.entity_type,
             _ENTITY_REPLACEMENTS.get(result.entity_type, "[ПЕРСОНАЛЬНЫЕ_ДАННЫЕ]"),
         )
-        for result in analyzer().analyze(text=text, language="ru")
+        for result in analyzer().analyze(text=detection_text, language="ru")
     ]
-    # Custom contact/URL detection wins overlaps because it has a reviewed,
-    # stable replacement.  Presidio fills only the remaining original ranges.
+    custom_spans = [
+        part for span in custom_spans for part in _outside_placeholders(span, protected, text)
+    ]
+    presidio_spans = [
+        part for span in presidio_spans for part in _outside_placeholders(span, protected, text)
+    ]
+    # Merge the full covered ranges. Dropping an overlapping recognizer could
+    # leave the rest of an email, credential-bearing URL or document exposed.
     selected = _non_overlapping((*custom_spans, *presidio_spans), custom_count=len(custom_spans))
     pieces: list[str] = []
     position = 0
@@ -100,6 +159,25 @@ class _RedactionSpan:
     replacement: str
 
 
+def _outside_placeholders(
+    span: _RedactionSpan, protected: tuple[tuple[int, int], ...], text: str
+) -> tuple[_RedactionSpan, ...]:
+    """Preserve markers without discarding sensitive text on either side."""
+    if not any(span.start < end and start < span.end for start, end in protected):
+        return (span,)
+    pieces: list[_RedactionSpan] = []
+    start = span.start
+    for left, right in (*protected, (span.end, span.end)):
+        end = min(left, span.end)
+        # A regex may include JSON closing delimiters after an existing marker.
+        if start < end and text[start:end].strip(" \t\r\n,;:{}[]()\"'"):
+            pieces.append(_RedactionSpan(start, end, span.entity_type, span.replacement))
+        start = max(start, right)
+        if start >= span.end:
+            break
+    return tuple(pieces)
+
+
 def _telegram_spans(text: str) -> tuple[_RedactionSpan, ...]:
     return tuple(
         _RedactionSpan(match.start(), match.end(), "TELEGRAM_HANDLE", "[CONTACT]")
@@ -112,22 +190,44 @@ def _url_spans(text: str) -> tuple[_RedactionSpan, ...]:
     return tuple(
         _RedactionSpan(match.start(), match.end(), "URL", "[ССЫЛКА]")
         for match in _URL_CANDIDATE.finditer(text)
-        if tld_extractor(match.group()).suffix
+        if (
+            tld_extractor(match.group()).suffix
+            or "://" in match.group()
+            or match.group().lower().startswith("mailto:")
+        )
     )
 
 
 def _non_overlapping(
     spans: tuple[_RedactionSpan, ...], *, custom_count: int
 ) -> tuple[_RedactionSpan, ...]:
-    """Prefer custom spans, then retain only disjoint original-text Presidio spans."""
-    custom = sorted(spans[:custom_count], key=lambda span: (span.start, span.end))
+    """Union overlaps and retain a meaningful marker for each connected range."""
+    priority = {"SECRET": 100, "EMAIL_ADDRESS": 90, "URL": 80, "TELEGRAM_HANDLE": 80}
+    ranked = sorted(
+        (
+            (
+                span,
+                (
+                    priority.get(span.entity_type, 85 if span.entity_type.startswith("RU_") else 0),
+                    index < custom_count,
+                ),
+            )
+            for index, span in enumerate(spans)
+            if span.end > span.start
+        ),
+        key=lambda item: (item[0].start, item[0].end),
+    )
     selected: list[_RedactionSpan] = []
-    for span in custom:
-        if not any(span.start < item.end and item.start < span.end for item in selected):
+    current_rank = (-1, False)
+    for span, rank in ranked:
+        if not selected or span.start >= selected[-1].end:
             selected.append(span)
-    for span in sorted(spans[custom_count:], key=lambda span: (span.start, span.end)):
-        if span.end <= span.start:
+            current_rank = rank
             continue
-        if not any(span.start < item.end and item.start < span.end for item in selected):
-            selected.append(span)
-    return tuple(sorted(selected, key=lambda span: (span.start, span.end)))
+        current = selected[-1]
+        marker = span if rank > current_rank else current
+        selected[-1] = _RedactionSpan(
+            current.start, max(current.end, span.end), marker.entity_type, marker.replacement
+        )
+        current_rank = max(current_rank, rank)
+    return tuple(selected)

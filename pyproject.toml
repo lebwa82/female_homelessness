@@ -41,5 +41,10 @@ asyncio_mode = "auto"
 line-length = 100
 target-version = "py314"
 
+# VM entrypoints run with the host's system Python, outside the app venv.
+[tool.ruff.per-file-target-version]
+"scripts/chatwoot_compose.py" = "py310"
+"scripts/prepare_internal_tls.py" = "py310"
+
 [tool.uv.sources]
 ru-core-news-sm = { url = "https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.8.0/ru_core_news_sm-3.8.0-py3-none-any.whl" }

@@ -26,3 +26,15 @@ def test_health_failure_is_silent(monkeypatch, capsys, error):
     monkeypatch.setattr(healthcheck, "urlopen", open_probe)
     assert not healthcheck.is_healthy(8080)
     assert capsys.readouterr() == ("", "")
+
+
+def test_tls_healthcheck_uses_https_without_a_plaintext_retry(monkeypatch):
+    calls = []
+
+    def open_probe(url, timeout):
+        calls.append(url)
+        raise URLError("synthetic certificate rejection")
+
+    monkeypatch.setattr(healthcheck, "urlopen", open_probe)
+    assert not healthcheck.is_healthy(8080, tls=True)
+    assert calls == ["https://127.0.0.1:8080/healthz"]

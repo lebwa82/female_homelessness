@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,8 @@ def render(
         environment.pop("POSTGRES_HOST")
     command = [
         *compose_command,
+        "--project-directory",
+        str(ROOT / "deploy/chatwoot"),
         "--env-file",
         os.devnull,
         "-f",
@@ -74,15 +78,31 @@ def render(
             "json",
         ]
     )
-    return subprocess.run(
-        command,
-        cwd=ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+    # Config-only checks use synthetic test env files instead of VM credentials.
+    # Production Compose files and their required-file semantics stay intact.
+    with tempfile.TemporaryDirectory(prefix="chatwoot-compose-test-") as directory:
+        for index, argument in enumerate(command):
+            if index and command[index - 1] == "-f":
+                source = Path(argument).read_text()
+                def replace_env(match):
+                    path = Path(directory) / Path(match.group(2)).name
+                    marker = path.stem.replace("-", "_").upper()
+                    path.write_text(f"COMPOSE_ENV_PROBE_{marker}=1\n")
+                    return f"{match.group(1)}- {path}"
+
+                source = re.sub(r"(?m)^(\s*)- (/etc/women-help-[\w-]+\.env)$", replace_env, source)
+                copy = Path(directory) / f"{index}.yml"
+                copy.write_text(source)
+                command[index] = str(copy)
+        return subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
 
 
 def test_default_compose_keeps_local_postgres(compose_command) -> None:
@@ -140,7 +160,7 @@ def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None
         assert service["environment"]["PGSSLROOTCERT"] == "/run/certs/postgresql-ca.crt"
         ca = next(v for v in service["volumes"] if v["target"] == "/run/certs/postgresql-ca.crt")
         assert ca["read_only"] is True
-        assert ca["bind"]["create_host_path"] is False
+        assert ca["bind"].get("create_host_path", False) is False
         assert ca["source"] == "/opt/nevidimy/certs/postgresql-ca.crt"
     for name in ("chatwoot", "sidekiq"):
         assert services[name]["environment"]["PGSSLMODE"] == "verify-full"
@@ -150,7 +170,7 @@ def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None
         initializer = next(v for v in services[name]["volumes"]
                            if v["target"] == "/app/config/initializers/nevidimy_agent_webhook.rb")
         assert initializer["read_only"] is True
-        assert initializer["bind"]["create_host_path"] is False
+        assert initializer["bind"].get("create_host_path", False) is False
         assert initializer["source"] == str(ROOT / "deploy/timeweb/agent_webhook.rb")
         for filename, target in (
             ("telegram_avatar.rb", "/app/config/initializers/nevidimy_telegram_avatar.rb"),
@@ -159,7 +179,7 @@ def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None
         ):
             mount = next(v for v in services[name]["volumes"] if v["target"] == target)
             assert mount["read_only"] is True
-            assert mount["bind"]["create_host_path"] is False
+            assert mount["bind"].get("create_host_path", False) is False
             assert mount["source"] == str(ROOT / "deploy/timeweb" / filename)
     assert services["chatwoot"]["environment"]["ENABLE_ACCOUNT_SIGNUP"] == "false"
     assert int(services["agent-bot"]["mem_limit"]) == 768 * 1024 * 1024
@@ -183,14 +203,21 @@ def test_timeweb_telegram_is_explicit_and_uses_minimal_credentials(compose_comma
         assert services[name]["environment"]["http_proxy"] == "http://telegram-proxy:3128"
         assert services[name]["environment"]["https_proxy"] == "http://telegram-proxy:3128"
         assert services[name]["environment"]["PGSSLMODE"] == "verify-full"
-    proxy_files = services["telegram-proxy"]["env_file"]
-    assert [entry["path"] for entry in proxy_files] == ["/etc/women-help-telegram-proxy.env"]
+    # Some Compose builds resolve env_file even with --no-env-resolution.
+    # Distinct synthetic markers still verify that !override excludes agent env.
+    proxy_files = services["telegram-proxy"].get("env_file")
+    if proxy_files is not None:
+        assert [Path(entry["path"]).name for entry in proxy_files] == ["women-help-telegram-proxy.env"]
+    else:
+        markers = {key: value for key, value in services["telegram-proxy"]["environment"].items()
+                   if key.startswith("COMPOSE_ENV_PROBE_")}
+        assert markers == {"COMPOSE_ENV_PROBE_WOMEN_HELP_TELEGRAM_PROXY": "1"}
     proxy = services["telegram-proxy"]
     assert proxy["environment"]["TELEGRAM_PROXY_SSH_TUNNEL"] == "true"
     mount = next(v for v in proxy["volumes"] if v["target"] == "/run/nevidimy-proxy")
     assert mount["source"] == "/opt/nevidimy/run/proxy-tunnel"
     assert mount["read_only"] is True
-    assert mount["bind"]["create_host_path"] is False
+    assert mount["bind"].get("create_host_path", False) is False
     assert services["telegram-ingress"]["environment"]["TELEGRAM_PROXY_URL"] == "http://telegram-proxy:3128"
     assert services["telegram-ingress"]["depends_on"]["telegram-proxy"]["condition"] == "service_started"
     assert int(services["telegram-ingress"]["mem_limit"]) == 256 * 1024 * 1024
@@ -255,7 +282,7 @@ def test_http_local_systemd_drop_in_preserves_target_guard() -> None:
     assert "ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1" in base
     assert "ExecStartPre=" not in override
     start = next(line for line in override.splitlines() if line.startswith("ExecStart=/"))
-    assert "-f deploy/timeweb/compose.http-local.yml" in start
+    assert "scripts/chatwoot_compose.py" in start
     assert "--no-build --pull never --wait" in start
     assert start.endswith("redis chatwoot sidekiq caddy")
     assert "--profile" not in start
@@ -273,8 +300,7 @@ def test_timeweb_agent_unit_starts_only_agent_after_core_with_target_guard() -> 
     assert start.endswith("agent-bot")
     assert stop.endswith("--profile agent stop agent-bot")
     for line in (start, stop):
-        assert "compose.managed.yml" in line
-        assert "deploy/timeweb/compose.yml" in line
+        assert "scripts/chatwoot_compose.py" in line
         assert "telegram" not in line
     assert "WantedBy=multi-user.target" in unit
 

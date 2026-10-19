@@ -1,0 +1,124 @@
+# Append LAST. Provision certificates first. Internal ports stay unpublished.
+x-trust-env: &trust-env
+  SSL_CERT_FILE: /run/tls/ca-bundle.pem
+  REQUESTS_CA_BUNDLE: /run/tls/ca-bundle.pem
+  PGSSLROOTCERT: /run/tls/postgres-ca.crt
+
+x-trust-bundle: &trust-bundle
+  type: bind
+  source: ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/ca-bundle.pem
+  target: /run/tls/ca-bundle.pem
+  read_only: true
+  bind:
+    create_host_path: false
+x-root-ca: &root-ca
+  type: bind
+  source: ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/ca.crt
+  target: /run/tls/ca.crt
+  read_only: true
+  bind:
+    create_host_path: false
+x-postgres-ca: &postgres-ca
+  type: bind
+  source: ${POSTGRES_TLS_CA_FILE:?Set POSTGRES_TLS_CA_FILE to the database CA}
+  target: /run/tls/postgres-ca.crt
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  redis:
+    entrypoint: ["/bin/sh", "/run/redis-entrypoint.sh"]
+    command:
+      - redis-server
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /run/tls/server.crt
+      - --tls-key-file
+      - /run/redis-tls/server.key
+      - --tls-ca-cert-file
+      - /run/tls/ca.crt
+      - --tls-auth-clients
+      - "no"
+      - --tls-protocols
+      - TLSv1.2 TLSv1.3
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-128mb}
+      - --maxmemory-policy
+      - noeviction
+    tmpfs: ["/run/redis-tls"]
+    volumes:
+      - *root-ca
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/redis.crt:/run/tls/server.crt:ro
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/redis.key:/run/tls/server.key:ro
+      - ./tls/redis-entrypoint.sh:/run/redis-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--cacert", "/run/tls/ca.crt", "-h", "redis", "ping"]
+
+  chatwoot:
+    environment:
+      <<: *trust-env
+      PGSSLMODE: verify-full
+      REDIS_URL: rediss://redis:6379
+      REDIS_OPENSSL_VERIFY_MODE: peer
+    command: ["/bin/sh", "-c", "mkdir -p /app/tmp/pids && rm -f /app/tmp/pids/server.pid && exec bundle exec puma -C /run/puma-tls.rb"]
+    volumes:
+      - *trust-bundle
+      - *root-ca
+      - *postgres-ca
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/chatwoot.crt:/run/tls/server.crt:ro
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/chatwoot.key:/run/tls/server.key:ro
+      - ./tls/puma.rb:/run/puma-tls.rb:ro
+      - ./tls/healthcheck.rb:/run/tls-healthcheck.rb:ro
+    healthcheck:
+      test: ["CMD", "ruby", "/run/tls-healthcheck.rb"]
+      interval: 15s
+      timeout: 5s
+      start_period: 90s
+      retries: 8
+
+  sidekiq:
+    environment:
+      <<: *trust-env
+      PGSSLMODE: verify-full
+      REDIS_URL: rediss://redis:6379
+      REDIS_OPENSSL_VERIFY_MODE: peer
+    volumes: [*trust-bundle, *postgres-ca]
+
+  agent-bot:
+    environment:
+      <<: *trust-env
+      CHATWOOT_BASE_URL: https://chatwoot:3000
+      CHATWOOT_TLS_CERT_FILE: /run/tls/server.crt
+      CHATWOOT_TLS_KEY_FILE: /run/tls/server.key
+      CERTIFICATE_DATABASE_SSLMODE: verify-full
+      TELEGRAM_INGRESS_REDIS_URL: rediss://redis:6379/0?ssl_ca_certs=/run/tls/ca.crt&ssl_check_hostname=true&ssl_cert_reqs=required
+    volumes:
+      - *trust-bundle
+      - *root-ca
+      - *postgres-ca
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/agent-bot.crt:/run/tls/server.crt:ro
+      - ${INTERNAL_TLS_DIR:?Set INTERNAL_TLS_DIR}/agent-bot.key:/run/tls/server.key:ro
+
+  certificate-admin-bot:
+    environment:
+      <<: *trust-env
+      CERTIFICATE_DATABASE_SSLMODE: verify-full
+    volumes: [*trust-bundle, *postgres-ca]
+
+  telegram-ingress:
+    environment:
+      <<: *trust-env
+      CHATWOOT_BASE_URL: https://chatwoot:3000
+      TELEGRAM_INGRESS_REDIS_URL: rediss://redis:6379/0?ssl_ca_certs=/run/tls/ca.crt&ssl_check_hostname=true&ssl_cert_reqs=required
+    volumes: [*trust-bundle, *root-ca]
+
+  caddy:
+    volumes:
+      - ./tls/Caddyfile:/etc/caddy/Caddyfile:ro
+      - *root-ca
