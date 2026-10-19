@@ -60,8 +60,10 @@ class RecordedGateway(YandexAgentGateway):
 
 
 class Acceptance:
-    def __init__(self, mode, output, suites, limit=0):
+    def __init__(self, mode, output, suites, limit=0, *, inbox_name=None):
         self.mode, self.output, self.suites, self.limit = mode, Path(output), suites, limit
+        self.inbox_name = inbox_name or (
+            INBOX if mode == "candidate" else "Техническая проверка интеграции")
         self.run_id = str(uuid.uuid4())
         self.raw = AiohttpChatwootTransport(settings.chatwoot_base_url)
         self.transport = ScopedTransport(settings.chatwoot_base_url)
@@ -94,7 +96,7 @@ class Acceptance:
         if not settings.llm_enabled:
             raise RuntimeError("acceptance_requires_live_llm")
         inboxes = (await self.raw_request("GET", "/inboxes"))["payload"]
-        name = INBOX if self.mode == "candidate" else "Техническая проверка интеграции"
+        name = self.inbox_name
         inbox = next((i for i in inboxes if i.get("name") == name), None)
         if inbox is None and self.mode == "candidate":
             inbox = await self.raw_request("POST", "/inboxes", {

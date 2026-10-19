@@ -106,6 +106,25 @@ def resolve_turn(context: PolicyContext) -> ResolvedTurn:
                 fallback_reason="safety_diagnostic_unavailable",
             ),
         )
+    # Housing assistance is a resource scenario, not an automatic takeover by a
+    # person. Independent dangers and explicit human requests retain priority.
+    housing_only_risk = set(assessment.categories) <= {SafetyCategory.ACUTE_HOMELESSNESS}
+    if (context.support_status is DiagnosticStatus.COMPLETED and support is not None
+            and support.intent is SupportIntent.CONCRETE_NEED
+            and NeedKind.HOUSING in support.need_hints
+            and set(support.need_hints) <= {NeedKind.HOUSING, NeedKind.SUPPORT}
+            and context.state not in _FINITE_WORKFLOW_STATES
+            and housing_only_risk and assessment.level is not RiskLevel.CRITICAL
+            and (assessment.escalation is SafetyEscalation.NONE
+                 or SafetyCategory.ACUTE_HOMELESSNESS in assessment.categories)):
+        item_ids = _catalog_item_ids(NeedKind.HOUSING)
+        return _finalize_turn(context, ResolvedTurn(
+            text=_aid_offer_text(item_ids),
+            choice_set=ChoiceSet.AID_CATALOG,
+            catalog_item_ids=item_ids,
+            effect=PolicyEffect.OFFER_AID,
+            need=NeedKind.HOUSING,
+        ))
     if assessment.escalation is SafetyEscalation.HANDOFF or assessment.level is RiskLevel.CRITICAL:
         return _finalize_turn(context, safety_resolved_turn(context, assessment))
     if context.support_status is not DiagnosticStatus.COMPLETED or context.support is None:

@@ -301,8 +301,8 @@ async def test_model_need_hint_creates_a_button_but_never_an_aid_request() -> No
         gateway=FixedGateway(
             diagnostic_evaluation(
                 intent="concrete_need",
-                need_hints=(NeedKind.HOUSING,),
-                draft_text="Могу показать вариант помощи с жильём.",
+                need_hints=(NeedKind.LEGAL,),
+                draft_text="Могу показать вариант юридической помощи.",
             )
         ),
     )
@@ -310,10 +310,10 @@ async def test_model_need_hint_creates_a_button_but_never_an_aid_request() -> No
     turn = await service.handle_text(identity("мне хочется выговориться"))
 
     assert [choice.id for choice in turn.choices if not choice.id.startswith("back:")] == [
-        "need:housing",
+        "need:legal",
         "human",
     ]
-    assert turn.text == "Могу показать вариант помощи с жильём."
+    assert turn.text == "Могу показать вариант юридической помощи."
     assert store.aid_requests == []
     assert store.escalations == []
 

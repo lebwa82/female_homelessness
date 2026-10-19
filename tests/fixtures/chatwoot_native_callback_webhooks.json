@@ -1,0 +1,134 @@
+[
+  {
+    "id": 41,
+    "content": "Нажата кнопка: «Тестовый выбор».",
+    "content_attributes": {
+      "nevidimy_telegram_callback_data": "need:housing"
+    },
+    "message_type": "incoming",
+    "private": false,
+    "inbox": {
+      "id": 3,
+      "name": "In-memory contract probe"
+    },
+    "sender": {
+      "id": 7
+    },
+    "event": "message_created",
+    "conversation": {
+      "id": 23,
+      "channel": "Channel::Telegram"
+    },
+    "expected_action": "need:housing"
+  },
+  {
+    "id": 42,
+    "content": "Нажата кнопка: «Тестовый выбор».",
+    "content_attributes": {
+      "nevidimy_telegram_callback_data": "need:food_money"
+    },
+    "message_type": "incoming",
+    "private": false,
+    "inbox": {
+      "id": 3,
+      "name": "In-memory contract probe"
+    },
+    "sender": {
+      "id": 7
+    },
+    "event": "message_created",
+    "conversation": {
+      "id": 23,
+      "channel": "Channel::Telegram"
+    },
+    "expected_action": "need:food_money"
+  },
+  {
+    "id": 43,
+    "content": "Нажата кнопка: «Тестовый выбор».",
+    "content_attributes": {
+      "nevidimy_telegram_callback_data": "need:legal"
+    },
+    "message_type": "incoming",
+    "private": false,
+    "inbox": {
+      "id": 3,
+      "name": "In-memory contract probe"
+    },
+    "sender": {
+      "id": 7
+    },
+    "event": "message_created",
+    "conversation": {
+      "id": 23,
+      "channel": "Channel::Telegram"
+    },
+    "expected_action": "need:legal"
+  },
+  {
+    "id": 44,
+    "content": "Нажата кнопка: «Тестовый выбор».",
+    "content_attributes": {
+      "nevidimy_telegram_callback_data": "need:support"
+    },
+    "message_type": "incoming",
+    "private": false,
+    "inbox": {
+      "id": 3,
+      "name": "In-memory contract probe"
+    },
+    "sender": {
+      "id": 7
+    },
+    "event": "message_created",
+    "conversation": {
+      "id": 23,
+      "channel": "Channel::Telegram"
+    },
+    "expected_action": "need:support"
+  },
+  {
+    "id": 45,
+    "content": "Нажата кнопка: «Тестовый выбор».",
+    "content_attributes": {
+      "nevidimy_telegram_callback_data": "need:children"
+    },
+    "message_type": "incoming",
+    "private": false,
+    "inbox": {
+      "id": 3,
+      "name": "In-memory contract probe"
+    },
+    "sender": {
+      "id": 7
+    },
+    "event": "message_created",
+    "conversation": {
+      "id": 23,
+      "channel": "Channel::Telegram"
+    },
+    "expected_action": "need:children"
+  },
+  {
+    "id": 46,
+    "content": "Нажата кнопка: «Тестовый выбор».",
+    "content_attributes": {
+      "nevidimy_telegram_callback_data": "need:other"
+    },
+    "message_type": "incoming",
+    "private": false,
+    "inbox": {
+      "id": 3,
+      "name": "In-memory contract probe"
+    },
+    "sender": {
+      "id": 7
+    },
+    "event": "message_created",
+    "conversation": {
+      "id": 23,
+      "channel": "Channel::Telegram"
+    },
+    "expected_action": "need:other"
+  }
+]

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -326,7 +327,8 @@ async def test_survey_reply_lost_response_is_reconciled_without_second_message()
 
 
 @pytest.mark.asyncio
-async def test_returning_after_day_keeps_actual_answer(monkeypatch):
+@pytest.mark.parametrize("draft", ["Я рядом.", "Здравствуйте. Я рядом и готова поговорить."])
+async def test_returning_after_day_keeps_actual_answer_without_a_second_greeting(monkeypatch, draft):
     monkeypatch.setattr(settings, "llm_enabled", True)
     api = FakeChatwoot()
     now = datetime(2026, 10, 3, 10, tzinfo=UTC)
@@ -334,10 +336,13 @@ async def test_returning_after_day_keeps_actual_answer(monkeypatch):
                      "created_at": (now - timedelta(days=1)).timestamp()},)
     assert returning_after_day(api.messages, 41, now)
     assert not returning_after_day(api.messages, 41, now - timedelta(seconds=1))
-    service = ChatwootAgentService(api, gateway=StubGateway(ordinary_evaluation()))
+    evaluation = ordinary_evaluation()
+    evaluation = replace(evaluation,
+        support=evaluation.support.model_copy(update={"draft_text": draft}))
+    service = ChatwootAgentService(api, gateway=StubGateway(evaluation))
     service._scenario_effects.clock = lambda: now
     assert await service.process(event("Hello", 41))
-    assert ordinary_evaluation().support.draft_text in api.replies[-1]["text"]
+    assert api.replies[-1]["text"] == draft
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "i9"
 
 

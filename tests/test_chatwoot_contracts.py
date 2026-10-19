@@ -22,9 +22,10 @@ def _message_event(*, message_type: str = "incoming") -> dict[str, object]:
         "content": "test input",
         "message_type": message_type,
         "private": False,
-        "conversation": {"id": 23, "status": "pending", "custom_attributes": {}},
+        "conversation": {"id": 23, "channel": "Channel::Telegram", "status": "pending",
+                         "custom_attributes": {}},
         "sender": {"id": 7, "identifier": "telegram-user"},
-        "inbox": {"id": 3, "channel_type": "Channel::Telegram"},
+        "inbox": {"id": 3, "name": "Test Telegram"},
     }
 
 

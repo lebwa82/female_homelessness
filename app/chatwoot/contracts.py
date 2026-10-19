@@ -128,9 +128,11 @@ def parse_message_created(payload: object) -> IncomingChatwootMessage | None:
         return None
 
     # The timeline shows the clicked button's label; only the Telegram adapter
-    # supplies the original action for routing. Older raw-code events still work.
+    # supplies the original action for routing. Native webhooks expose the channel
+    # on conversation, not inbox; retain the older inbox hint for compatibility.
     attributes = payload.get("content_attributes")
-    if (inbox.get("channel_type") == "Channel::Telegram" and isinstance(attributes, dict)
+    channel = conversation.get("channel", inbox.get("channel_type"))
+    if (channel == "Channel::Telegram" and isinstance(attributes, dict)
             and "nevidimy_telegram_callback_data" in attributes):
         callback = attributes["nevidimy_telegram_callback_data"]
         if not isinstance(callback, str) or not callback.strip():

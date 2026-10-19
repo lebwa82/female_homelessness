@@ -96,9 +96,47 @@ def test_malformed_action_metadata_fails_closed(action):
 
 
 def test_other_channels_cannot_override_text_with_telegram_action_metadata():
-    payload = {**_message_event(), "inbox": {"id": 3, "channel_type": "Channel::Api"},
+    payload = {**_message_event(),
+               "conversation": {"id": 23, "channel": "Channel::Api"},
                "content_attributes": {ATTRIBUTE: "human"}}
     assert parse_message_created(payload).content == "test input"
+
+
+def test_native_conversation_channel_takes_precedence_over_legacy_inbox_hint():
+    payload = {**_message_event(),
+               "conversation": {"id": 23, "channel": "Channel::Api"},
+               "inbox": {"id": 3, "channel_type": "Channel::Telegram"},
+               "content_attributes": {ATTRIBUTE: "human"}}
+    assert parse_message_created(payload).content == "test input"
+
+
+def test_legacy_payload_with_inbox_channel_hint_is_still_supported():
+    payload = {**_message_event(), "conversation": {"id": 23},
+               "inbox": {"id": 3, "channel_type": "Channel::Telegram"},
+               "content_attributes": {ATTRIBUTE: "need:housing"}}
+    assert parse_message_created(payload).content == "need:housing"
+
+
+async def test_every_category_click_reaches_html_scenario_without_a_model_call():
+    from app.scenario import NEEDS, SCREENS
+
+    for screen, need in NEEDS.items():
+        api = FakeChatwoot()
+        gateway = StubGateway(ordinary_evaluation())
+        service = ChatwootAgentService(api, gateway=gateway, duty_team_id=9)
+        await service.process(event("/start", 42))
+        await service.process(event("continue", 43))
+        choice = next(c for c in api.replies[-1]["choices"] if c.id == f"need:{need.value}")
+        message, = ruby_outputs([callback_fixture(data=choice.id, keyboard=[[
+            {"text": choice.label, "callback_data": choice.id},
+        ]])])
+        parsed = parse_message_created({**_message_event(), **message, "id": 44})
+        assert await service.process(parsed)
+        assert api.conversation["custom_attributes"]["scenario"]["screen"] == screen
+        assert api.replies[-1]["text"] == SCREENS[screen]["texts"][0]
+        assert gateway.calls == 0
+        assert not await service.process(parsed)
+        assert len(api.replies) == 3
 
 
 def test_consultation_note_names_the_action_service_and_request_without_internal_keys():

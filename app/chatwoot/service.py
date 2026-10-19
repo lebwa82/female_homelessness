@@ -233,8 +233,9 @@ class ChatwootAgentService:
                 welcome = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)
                 choices = {c.id: c for c in (*welcome.choices, *turn.choices)
                            if not c.id.startswith("back:")}
-                turn = turn.model_copy(update={"text": welcome.text + "\n\n" + turn.text,
-                                                "choices": tuple(choices.values())})
+                # The model already answered the current text, possibly with a
+                # greeting. Restore the menu without prepending a second welcome.
+                turn = turn.model_copy(update={"choices": tuple(choices.values())})
                 turn = legacy_service._with_back_choice(seeded.record, turn)
 
         # A staff member may have claimed the conversation while Qwen was
