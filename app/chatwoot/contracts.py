@@ -127,6 +127,21 @@ def parse_message_created(payload: object) -> IncomingChatwootMessage | None:
     if not isinstance(content, str) or not content.strip():
         return None
 
+    # The timeline shows the clicked button's label; only the Telegram adapter
+    # supplies the original action for routing. Older raw-code events still work.
+    attributes = payload.get("content_attributes")
+    if (inbox.get("channel_type") == "Channel::Telegram" and isinstance(attributes, dict)
+            and "nevidimy_telegram_callback_data" in attributes):
+        callback = attributes["nevidimy_telegram_callback_data"]
+        if not isinstance(callback, str) or not callback.strip():
+            return None
+        try:
+            if len(callback.encode()) > 64:
+                return None
+        except UnicodeEncodeError:
+            return None
+        content = callback
+
     message_id = _positive_int(payload.get("id"))
     conversation_id = _positive_int(conversation.get("id"))
     contact_id = _positive_int(sender.get("id"))

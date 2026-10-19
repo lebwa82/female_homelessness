@@ -267,7 +267,8 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
     assert "TEST-CODE" in api.replies[-1]["text"]
     assert api.replies[-1]["sensitive_content"] == "certificate"
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s31b"
-    assert "contact=not_provided:not_provided" in api.notes[0]
+    assert "Вид помощи: Сертификат на продукты" in api.notes[0]
+    assert "Способ связи: не указан\nКонтакт: не указан\nМесто: не указано" in api.notes[0]
 
 
 @pytest.mark.asyncio

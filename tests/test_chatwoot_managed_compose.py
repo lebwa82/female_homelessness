@@ -155,6 +155,7 @@ def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None
         for filename, target in (
             ("telegram_avatar.rb", "/app/config/initializers/nevidimy_telegram_avatar.rb"),
             ("telegram_avatar_job.rb", "/app/app/jobs/nevidimy_telegram_avatar_job.rb"),
+            ("telegram_callback.rb", "/app/config/initializers/nevidimy_telegram_callback.rb"),
         ):
             mount = next(v for v in services[name]["volumes"] if v["target"] == target)
             assert mount["read_only"] is True

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.agents import YandexAgentGateway
+from app.catalog import get_aid_item
 from app.certificate_documents import CertificateObjectRef, CertificateObjectStore
 from app.chatwoot.client import BinaryAttachment
 from app.chatwoot.contracts import (
@@ -554,12 +555,18 @@ class ChatwootAgentService:
     ) -> None:
         """Keep operator-needed request details in a Chatwoot-private note only."""
         for request in seeded.store.aid_requests:
-            contact = request.contact_value or "not_provided"
-            method = request.contact_method or "not_provided"
-            location = request.city or request.district or "not_provided"
+            item = get_aid_item(request.aid_id)
+            contact = request.contact_value or "не указан"
+            method = {
+                "current_telegram": "этот чат Telegram", "other_telegram": "другой аккаунт Telegram",
+                "phone": "телефон", "email": "электронная почта", "later": "указать позже",
+            }.get(request.contact_method, "не указан")
+            location = request.city or request.district or "не указано"
             await self._api.add_private_note(
                 conversation_id,
-                f"Women-help aid request: {request.aid_id}; contact={method}:{contact}; location={location}.",
+                "Создана заявка на помощь\n"
+                f"Вид помощи: {item.label if item else 'неизвестный вид помощи'}\n"
+                f"Способ связи: {method}\nКонтакт: {contact}\nМесто: {location}",
                 event_key=f"aid-request:{request.request_key}" if request.request_key else None,
             )
 

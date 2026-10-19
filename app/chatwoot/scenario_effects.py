@@ -15,6 +15,39 @@ from app.scenario import CERTIFICATES
 MSK = ZoneInfo("Europe/Moscow")
 NOTIFY = {"consultation_requested", "consultation_retry", "other_request",
           "certificate_waitlist", "certificate_problem", "negative_feedback", "human_message"}
+EVENT_TITLES = {
+    "consultation_requested": "Создана заявка на консультацию",
+    "consultation_retry": "Повторный запрос по консультации",
+    "legal_topic": "Уточнена тема вопроса юристу",
+    "other_request": "Новый запрос на помощь",
+    "certificate_waitlist": "Запрос на сертификат: лист ожидания",
+    "certificate_problem": "Сообщение о проблеме с сертификатом",
+    "negative_feedback": "Отрицательная оценка консультации",
+    "human_message": "Сообщение для специалиста",
+    "survey_answer": "Получен ответ на опрос",
+    "survey_closed": "Опрос завершён",
+    "certificate_usage": "Уточнено использование сертификата",
+    "general_feedback": "Получен отзыв",
+    "consultation_feedback": "Получен отзыв о консультации",
+}
+
+
+def scenario_note(payload: dict) -> str:
+    """Staff-facing summary; routing and deduplication keep their original IDs."""
+    lines = [EVENT_TITLES.get(payload["kind"], "Служебное событие бота")]
+    if payload.get("aid_id"):
+        item = get_aid_item(payload["aid_id"])
+        lines.append(f"Вид помощи: {item.label if item else 'неизвестный вид помощи'}")
+    answer = payload.get("label") or payload.get("answer")
+    if isinstance(answer, str) and answer:
+        lines.append(f"Ответ: {answer}")
+    if payload.get("text"):
+        lines.append(f"Текст сообщения: {payload['text']}")
+    request_id = payload.get("request_id")
+    if payload["kind"] == "consultation_requested":
+        request_id = payload["key"]
+    lines.append(f"ID заявки: {request_id}" if request_id else f"ID события: {payload['key']}")
+    return "\n".join(lines)
 
 
 def daytime(value: datetime) -> datetime:
@@ -105,10 +138,8 @@ class ScenarioEffects:
             await self.api.set_custom_attributes(conversation_id, {
                 "scenario_requests": requests, "scenario_followups": jobs,
             })
-            details = {k: v for k, v in payload.items() if k not in {"key", "kind"} and v is not None}
             await self.api.add_private_note(
-                conversation_id, f"Сценарий: {event_kind}; запрос {key}\n"
-                + "\n".join(f"{k}: {v}" for k, v in details.items()), event_key=f"scenario:{key}",
+                conversation_id, scenario_note(payload), event_key=f"scenario:{key}",
             )
             if event_kind in NOTIFY:
                 if self.queues.default_id is None:
@@ -123,7 +154,7 @@ class ScenarioEffects:
                         conversation_id,
                         f"[Дежурные](mention://team/{self.queues.default_id}/queue) "
                         + (mention if event_kind == "consultation_retry" else "")
-                        + f"Требует внимания: {event_kind}; запрос {key}.",
+                        + "Требует внимания: " + scenario_note(payload),
                         event_key=f"scenario-alert:{key}",
                     )
                 else:

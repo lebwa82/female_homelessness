@@ -33,6 +33,14 @@ x-telegram-avatar-job: &telegram-avatar-job
   bind:
     create_host_path: false
 
+x-telegram-callback: &telegram-callback
+  type: bind
+  source: ../timeweb/telegram_callback.rb
+  target: /app/config/initializers/nevidimy_telegram_callback.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   chatwoot:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
@@ -50,6 +58,7 @@ services:
       - *agent-webhook
       - *telegram-avatar
       - *telegram-avatar-job
+      - *telegram-callback
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
       test:
@@ -78,6 +87,7 @@ services:
       - *agent-webhook
       - *telegram-avatar
       - *telegram-avatar-job
+      - *telegram-callback
 
   agent-bot:
     # The offline PII-model probe already peaks near 370 MiB before HTTP work.
