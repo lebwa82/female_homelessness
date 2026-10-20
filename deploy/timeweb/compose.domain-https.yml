@@ -1,0 +1,36 @@
+# Append instead of compose.http-local.yml. Only the Chatwoot UI is public.
+x-tls-offload: &tls-offload
+  type: bind
+  source: ../timeweb/tls_offload.rb
+  target: /app/config/initializers/nevidimy_tls_offload.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  chatwoot:
+    environment:
+      FRONTEND_URL: https://${CHATWOOT_HOSTNAME:?Set the Chatwoot hostname}
+      FORCE_SSL: "true"
+    volumes:
+      - *tls-offload
+  sidekiq:
+    environment:
+      FRONTEND_URL: https://${CHATWOOT_HOSTNAME:?Set the Chatwoot hostname}
+      FORCE_SSL: "true"
+    volumes:
+      - *tls-offload
+  caddy:
+    ports: !override
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes: !override
+      - ../timeweb/Caddyfile.domain-https:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: /opt/nevidimy/certs/chatwoot-https
+        target: /run/certs/chatwoot
+        read_only: true
+        bind:
+          create_host_path: false
+      - caddy_data:/data
+      - caddy_config:/config

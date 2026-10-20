@@ -1,0 +1,32 @@
+# Append to the three Timeweb Compose files, instead of compose.http-local.yml.
+x-tls-offload: &tls-offload
+  type: bind
+  source: ../timeweb/tls_offload.rb
+  target: /app/config/initializers/nevidimy_tls_offload.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  chatwoot:
+    environment:
+      FRONTEND_URL: https://${CHATWOOT_PUBLIC_IP:?Set the current Timeweb VM IPv4}
+      FORCE_SSL: "true"
+    volumes:
+      - *tls-offload
+  sidekiq:
+    environment:
+      FRONTEND_URL: https://${CHATWOOT_PUBLIC_IP:?Set the current Timeweb VM IPv4}
+      FORCE_SSL: "true"
+    volumes:
+      - *tls-offload
+  caddy:
+    environment:
+      CHATWOOT_PUBLIC_IP: ${CHATWOOT_PUBLIC_IP:?Set the current Timeweb VM IPv4}
+    ports: !override
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes: !override
+      - ../timeweb/Caddyfile.ip-https:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config

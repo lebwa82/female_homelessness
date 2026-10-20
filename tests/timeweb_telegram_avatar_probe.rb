@@ -162,7 +162,7 @@ $download_error = nil
 
 count = $jobs.size
 NevidimyTelegramAvatarJob.new.perform(999)
-$links[2] = link(2, 'nevidima_bot')
+$links[2] = link(2, 'unrelated_bot')
 NevidimyTelegramAvatarJob.new.perform(2)
 $links[3] = link(3, 'nevidima_bot_mvp_bot', true)
 Telegram::IncomingMessageService.new($links[3]).perform
@@ -171,7 +171,7 @@ verify($jobs.size == count)
 
 begin
   Telegram::IncomingMessageService.new($links[2]).perform
-  raise 'main bot behavior changed'
+  raise 'unrelated bot behavior changed'
 rescue RuntimeError => error
   verify(error.message == 'native-avatar-error')
 end
@@ -186,8 +186,19 @@ $enqueue_failure = true
 service.perform
 verify(service.stored && !$probe_log.string.include?('private-queue-credential'))
 
+$enqueue_failure = false
+$links[5] = link(5, 'nevidima_bot')
+production = Telegram::IncomingMessageService.new($links[5])
+lookups_before = $lookups
+production.perform
+verify(production.stored && $lookups == lookups_before)
+verify($jobs.last == [NevidimyTelegramAvatarJob, [5]])
+NevidimyTelegramAvatarJob.new.perform(5)
+verify($lookups == lookups_before + 1)
+
 puts JSON.generate(message_saved_without_lookup: true, avatar_deduplicated: true,
                    timeout_is_optional: true, queue_failure_is_optional: true,
                    total_deadline_enforced: true,
-                   native_download_reused: true, main_bot_unchanged: true,
+                   native_download_reused: true, production_avatar_is_optional: true,
+                   unrelated_bots_unchanged: true,
                    secrets_not_logged: true)

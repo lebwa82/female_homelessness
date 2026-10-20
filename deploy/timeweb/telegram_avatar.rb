@@ -1,13 +1,13 @@
 # Optional profile enrichment must not be part of accepting a Telegram message.
 module NevidimyTelegramAvatar
-  BOT_NAME = 'nevidima_bot_mvp_bot'.freeze
+  BOT_NAMES = %w[nevidima_bot_mvp_bot nevidima_bot].freeze
   COOLDOWN_SECONDS = 300
   LOOKUP_TIMEOUT_SECONDS = 5
 
   private
 
   def update_contact_avatar
-    return super unless inbox.channel.bot_name == BOT_NAME
+    return super unless BOT_NAMES.include?(inbox.channel.bot_name)
 
     enqueue_telegram_avatar
   end

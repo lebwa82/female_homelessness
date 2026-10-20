@@ -6,7 +6,7 @@ class NevidimyTelegramAvatarJob < Avatar::AvatarFromUrlJob
   def perform(contact_inbox_id)
     link = ContactInbox.find_by(id: contact_inbox_id)
     return unless link && link.inbox.channel_type == 'Channel::Telegram'
-    return unless link.inbox.channel.bot_name == NevidimyTelegramAvatar::BOT_NAME
+    return unless NevidimyTelegramAvatar::BOT_NAMES.include?(link.inbox.channel.bot_name)
     return if link.contact.avatar.attached?
 
     # Reuse Chatwoot's native metadata lookup. Its two read-only HTTP calls have

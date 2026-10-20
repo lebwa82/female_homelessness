@@ -8,7 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_optional_avatar_does_not_block_mvp_and_does_not_change_main_bot():
+def test_optional_avatar_does_not_block_approved_bots_and_leaves_other_bots_native():
     ruby = shutil.which("ruby")
     if not ruby:
         pytest.skip("Ruby is required for the Chatwoot adapter probe")

@@ -30,7 +30,8 @@ def compose_command() -> list[str]:
 
 def render(
     compose_command, *, managed: bool, missing_host: bool = False,
-    timeweb=False, http_local=False, telegram=False,
+    timeweb=False, http_local=False, telegram=False, ip_https=False, missing_ip=False,
+    domain_https=False,
 ):
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")
@@ -45,7 +46,10 @@ def render(
         POSTGRES_PASSWORD="test-only-not-a-real-password",
         CHATWOOT_IMAGE="docker.io/chatwoot/chatwoot:timeweb-verified-test",
         TELEGRAM_HTTP_PROXY="http://telegram-proxy:3128" if telegram else "",
+        CHATWOOT_PUBLIC_IP="192.0.2.10",
     )
+    if missing_ip:
+        environment.pop("CHATWOOT_PUBLIC_IP")
     if missing_host:
         environment.pop("POSTGRES_HOST")
     command = [
@@ -63,6 +67,10 @@ def render(
         command.extend(["-f", str(ROOT / "deploy/timeweb/compose.yml")])
     if http_local:
         command.extend(["-f", str(ROOT / "deploy/timeweb/compose.http-local.yml")])
+    if ip_https:
+        command.extend(["-f", str(ROOT / "deploy/timeweb/compose.ip-https.yml")])
+    if domain_https:
+        command.extend(["-f", str(ROOT / "deploy/timeweb/compose.domain-https.yml")])
     profiles = ("agent", "certificate-admin") if timeweb else (
         "agent", "certificate-admin", "polling"
     )
@@ -146,6 +154,123 @@ def test_managed_compose_fails_closed_when_database_host_is_missing(compose_comm
     result = render(compose_command, managed=True, missing_host=True)
     assert result.returncode != 0
     assert "Set the managed PostgreSQL host" in result.stderr
+
+
+def test_timeweb_ip_https_publishes_only_tls_proxy_and_preserves_internal_services(
+    compose_command,
+) -> None:
+    result = render(compose_command, managed=True, timeweb=True, ip_https=True)
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    assert "postgres" not in services
+    assert "telegram-ingress" not in services
+    for name, service in services.items():
+        if name != "caddy":
+            assert not service.get("ports")
+    caddy = services["caddy"]
+    assert {(p["host_ip"], p["published"], p["target"]) for p in caddy["ports"]} == {
+        ("0.0.0.0", "80", 80), ("0.0.0.0", "443", 443),
+    }
+    assert caddy["environment"]["CHATWOOT_PUBLIC_IP"] == "192.0.2.10"
+    assert not caddy.get("env_file")
+    assert {v["target"] for v in caddy["volumes"]} == {
+        "/etc/caddy/Caddyfile", "/data", "/config",
+    }
+    for name in ("chatwoot", "sidekiq"):
+        service = services[name]
+        assert service["environment"]["FRONTEND_URL"] == "https://192.0.2.10"
+        assert service["environment"]["FORCE_SSL"] == "true"
+        assert service["environment"]["PGSSLMODE"] == "verify-full"
+        mount = next(v for v in service["volumes"]
+                     if v["target"] == "/app/config/initializers/nevidimy_tls_offload.rb")
+        assert mount["read_only"] is True
+        assert mount["bind"]["create_host_path"] is False
+
+
+def test_timeweb_ip_https_requires_current_ip_and_automates_public_certificates(
+    compose_command,
+) -> None:
+    result = render(compose_command, managed=True, timeweb=True, ip_https=True, missing_ip=True)
+    assert result.returncode != 0
+    assert "Set the current Timeweb VM IPv4" in result.stderr
+    caddy = (ROOT / "deploy/timeweb/Caddyfile.ip-https").read_text()
+    assert "https://{$CHATWOOT_PUBLIC_IP}" in caddy
+    assert "default_sni {$CHATWOOT_PUBLIC_IP}" in caddy
+    assert "profile shortlived" in caddy
+    assert "dir https://acme-v02.api.letsencrypt.org/directory" in caddy
+    assert "redir https://{$CHATWOOT_PUBLIC_IP}{uri} 308" in caddy
+    assert "agent-bot" not in caddy
+    assert "tls internal" not in caddy
+    unit = (ROOT / "deploy/timeweb/ip-https.conf").read_text()
+    assert unit.count("-f deploy/timeweb/compose.ip-https.yml") == 2
+    assert "compose.http-local.yml" not in unit
+    assert "stop caddy sidekiq chatwoot redis" in unit
+    assert "telegram" not in unit
+
+
+def test_timeweb_tls_offload_keeps_native_ssl_protection() -> None:
+    ruby = shutil.which("ruby")
+    if not ruby:
+        pytest.skip("Ruby is required for the TLS offload initializer probe")
+    probe = """
+require 'ostruct'
+module Rails
+  def self.application
+    @app ||= OpenStruct.new(config: OpenStruct.new(force_ssl: true, assume_ssl: false))
+  end
+end
+load ARGV.fetch(0)
+abort 'TLS offload missing' unless Rails.application.config.assume_ssl
+abort 'SSL disabled' unless Rails.application.config.force_ssl
+"""
+    result = subprocess.run(
+        [ruby, "-e", probe, str(ROOT / "deploy/timeweb/tls_offload.rb")],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_timeweb_domain_https_exposes_only_chatwoot(compose_command) -> None:
+    result = render(compose_command, managed=True, timeweb=True, domain_https=True)
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    assert "postgres" not in services
+    assert "telegram-ingress" not in services
+    for name, service in services.items():
+        if name != "caddy":
+            assert not service.get("ports")
+    caddy = services["caddy"]
+    assert {(p["host_ip"], p["published"], p["target"]) for p in caddy["ports"]} == {
+        ("0.0.0.0", "80", 80), ("0.0.0.0", "443", 443),
+    }
+    assert not caddy.get("env_file")
+    certificate_mount = next(v for v in caddy["volumes"]
+                             if v["target"] == "/run/certs/chatwoot")
+    assert certificate_mount["read_only"] is True
+    assert certificate_mount["bind"].get("create_host_path", False) is False
+    for name in ("chatwoot", "sidekiq"):
+        service = services[name]
+        assert service["environment"]["FRONTEND_URL"] == "https://chatwoot.example.test"
+        assert service["environment"]["FORCE_SSL"] == "true"
+        assert service["environment"]["PGSSLMODE"] == "verify-full"
+        assert any(v["target"] == "/app/config/initializers/nevidimy_tls_offload.rb"
+                   and v["read_only"] for v in service["volumes"])
+
+
+def test_timeweb_domain_https_has_no_plaintext_ui_or_public_agent() -> None:
+    caddy = (ROOT / "deploy/timeweb/Caddyfile.domain-https").read_text()
+    assert "https://{$CHATWOOT_HOSTNAME}" in caddy
+    assert "tls /run/certs/chatwoot/fullchain.pem /run/certs/chatwoot/privkey.pem" in caddy
+    assert "redir @chatwoot https://{$CHATWOOT_HOSTNAME}{uri} 308" in caddy
+    assert "respond 404" in caddy
+    assert 'header >Strict-Transport-Security "max-age=31536000"' in caddy
+    assert "agent-bot" not in caddy
+    assert "tls internal" not in caddy
+    assert "includeSubDomains" not in caddy
+    unit = (ROOT / "deploy/timeweb/domain-https.conf").read_text()
+    assert unit.count("-f deploy/timeweb/compose.domain-https.yml") == 2
+    assert "compose.http-local.yml" not in unit
+    assert "telegram" not in unit
 
 
 def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None:

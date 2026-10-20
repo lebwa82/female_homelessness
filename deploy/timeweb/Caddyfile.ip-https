@@ -1,0 +1,20 @@
+{
+	# Browsers do not normally send SNI for an IP address.
+	default_sni {$CHATWOOT_PUBLIC_IP}
+}
+
+https://{$CHATWOOT_PUBLIC_IP} {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+			disable_http_challenge
+		}
+	}
+	encode zstd gzip
+	reverse_proxy chatwoot:3000
+}
+
+http://{$CHATWOOT_PUBLIC_IP} {
+	redir https://{$CHATWOOT_PUBLIC_IP}{uri} 308
+}
