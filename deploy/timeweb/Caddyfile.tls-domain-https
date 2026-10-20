@@ -1,0 +1,16 @@
+https://{$CHATWOOT_HOSTNAME} {
+    tls /run/certs/chatwoot/fullchain.pem /run/certs/chatwoot/privkey.pem
+    encode zstd gzip
+    header >Strict-Transport-Security "max-age=31536000"
+    reverse_proxy https://chatwoot:3000 {
+        transport http {
+            tls_trust_pool file /run/tls/ca.crt
+        }
+    }
+}
+
+http://:80 {
+    @chatwoot host {$CHATWOOT_HOSTNAME}
+    redir @chatwoot https://{$CHATWOOT_HOSTNAME}{uri} 308
+    respond 404
+}

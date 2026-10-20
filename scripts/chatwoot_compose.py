@@ -15,10 +15,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = Path("/etc/women-help-chatwoot.env")
 HTTP_LOCAL_DROPIN = Path("/etc/systemd/system/nevidimy.service.d/http-local.conf")
+DOMAIN_HTTPS_DROPIN = Path("/etc/systemd/system/nevidimy.service.d/public-domain-https.conf")
 POSTGRES_CA = Path("/opt/nevidimy/certs/postgresql-ca.crt")
 
 
-def compose_files(env_file: Path, *, http_local: bool = False) -> tuple[list[str], dict[str, str]]:
+def compose_files(
+    env_file: Path, *, http_local: bool = False, domain_https: bool = False
+) -> tuple[list[str], dict[str, str]]:
+    if http_local and domain_https:
+        raise ValueError("Select exactly one UI overlay")
     selectors = {"CHATWOOT_INTERNAL_TLS", "INTERNAL_TLS_DIR", "POSTGRES_TLS_CA_FILE"}
     values = {}
     webhook = ""
@@ -38,6 +43,8 @@ def compose_files(env_file: Path, *, http_local: bool = False) -> tuple[list[str
     ]
     if http_local:
         files.append("deploy/timeweb/compose.http-local.yml")
+    if domain_https:
+        files.append("deploy/timeweb/compose.domain-https.yml")
     if mode == "0":
         if values.get("INTERNAL_TLS_DIR") or values.get("POSTGRES_TLS_CA_FILE"):
             raise ValueError("TLS paths are configured but CHATWOOT_INTERNAL_TLS is not 1")
@@ -71,12 +78,19 @@ def compose_files(env_file: Path, *, http_local: bool = False) -> tuple[list[str
     files.append("deploy/chatwoot/compose.tls.yml")
     if http_local:
         files.append("deploy/timeweb/compose.tls-http-local.yml")
+    if domain_https:
+        files.append("deploy/timeweb/compose.tls-domain-https.yml")
     return files, values
 
 
 def main() -> int:
     try:
-        files, values = compose_files(ENV_FILE, http_local=HTTP_LOCAL_DROPIN.is_file())
+        domain_https = DOMAIN_HTTPS_DROPIN.is_file()
+        files, values = compose_files(
+            ENV_FILE,
+            http_local=HTTP_LOCAL_DROPIN.is_file() and not domain_https,
+            domain_https=domain_https,
+        )
         # Do not allow a caller to replace the persistent file selection.
         if any(
             arg.split("=", 1)[0] in {"-f", "--file", "--env-file", "--project-directory"}

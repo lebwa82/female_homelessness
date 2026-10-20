@@ -1,0 +1,6 @@
+# Append after the public-domain and internal-TLS overlays; keep the public
+# certificate, ports and CA mounts while encrypting Caddy -> Chatwoot.
+services:
+  caddy:
+    volumes:
+      - ../timeweb/Caddyfile.tls-domain-https:/etc/caddy/Caddyfile:ro

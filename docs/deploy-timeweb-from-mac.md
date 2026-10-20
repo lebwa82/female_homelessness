@@ -69,10 +69,13 @@ nevidimy_ssh=(ssh -p 22 -i "$nevidimy_identity" -o IdentitiesOnly=yes \
 units, drop-ins, Compose project `nevidimy-timeweb` и все четыре сервиса:
 `nevidimy`, `nevidimy-agent`, `nevidimy-telegram`, `nevidimy-proxy-tunnel`.
 Сохрани текущий закреплённый Chatwoot image/digest. Не обновляй его до `latest`.
-Дальнейшая последовательность рассчитана на действующий drop-in
+Для прежнего локального режима используется drop-in
 `/etc/systemd/system/nevidimy.service.d/http-local.conf`: UI остаётся доступен
-только через SSH на `127.0.0.1:18080`. Если фактический режим другой, сначала
-сопоставь его с конфигурацией; не открывай публичные 80/443/18080.
+только через SSH на `127.0.0.1:18080`. На проверке 20.10.2026 активен более поздний
+`public-domain-https.conf`: общий HTTPS `chatwoot.admin.nevidima.ru`. Сохраняй этот
+режим: обнови существующий public-domain drop-in из `domain-https.conf` и используй
+общий Compose entrypoint; он добавляет `compose.tls-domain-https.yml` после TLS.
+Не заменяй публичный сертификат внутренним и не публикуй внутренние порты.
 
 ## 3. Подготовить релиз и Python-образ до остановки сервисов
 
@@ -199,7 +202,9 @@ S3 и настройки managed-БД. Не включай `SAFE_FETCH_ALLOW_PRI
 3. Из нового релиза установи `deploy/timeweb/nevidimy.service`,
    `nevidimy-agent.service`, `nevidimy-telegram.service` в `/etc/systemd/system/`.
    Обнови **существующий** `nevidimy.service.d/http-local.conf` из
-   `deploy/timeweb/http-local.conf`, сохранив другие drop-ins. SSH proxy-tunnel
+   `deploy/timeweb/http-local.conf`; для действующего общего HTTPS также обнови
+   `public-domain-https.conf` из `deploy/timeweb/domain-https.conf`.
+   Сохрани остальные drop-ins. SSH proxy-tunnel
    unit не меняется.
 4. До запуска проверь:
 
@@ -237,10 +242,13 @@ env или реальные сообщения пользователей.
 - После успешного TLS PING обычный `redis-cli` без `--tls` должен получить
   отказ. HTTP к Chatwoot:3000 и backend:8080 должен отклоняться при работающих
   HTTPS healthchecks. Не исправляй ошибки отключением проверки CA/имени.
-- Через Mac SSH-туннель панель `http://127.0.0.1:18080` открывается, Caddy
+- В локальном режиме через Mac SSH-туннель панель `http://127.0.0.1:18080` открывается, Caddy
   подключается к Chatwoot по TLS. На VM опубликован только loopback 18080;
   внутренние 3000/8080/6379 наружу не доступны. С Mac проверь закрытость
-  VM:80/443/18080/3000/8080/6379. Отдельно сверь firewall managed-БД: 5432
+  VM:80/443/18080/3000/8080/6379. Для действующего общего HTTPS вместо этого проверь
+  настоящий публичный сертификат/имя, HTTP-редирект и доступность страницы входа;
+  опубликованы только Caddy:80/443, не 18080/3000/8080/6379.
+  Отдельно сверь firewall managed-БД: 5432
   разрешён только ожидаемой VM, проверка с Mac не должна подключаться.
 - Проверь нативный подписанный webhook в изолированном **Channel::Api** inbox
   без внешней доставки: синтетическое сообщение → backend → ответ в Chatwoot,
@@ -248,8 +256,9 @@ env или реальные сообщения пользователей.
   приёмщик — `scripts/chatwoot_regression_acceptance.py --mode webhook
   --inbox-name <точное согласованное имя API inbox> --output <закрытый отчёт>`.
   Не направляй его в Telegram inbox и не используй реальную переписку.
-- Для Telegram проверь `getMe` и восстановление polling только у
-  `@nevidima_bot_mvp_bot`. Основной `@nevidima_bot` не переключать. Реальные
+- Для Telegram проверь восстановление ровно одного существующего polling
+  без смены выбранного бота, токена и курсора. Не повторяй переключение на
+  `@nevidima_bot` или обратно на MVP в рамках обновления. Реальные
   сообщения третьим лицам не отправлять.
 
 Только после живой проверки обнови Mermaid-подписи в `docs/architecture.md`

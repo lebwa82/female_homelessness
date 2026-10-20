@@ -69,6 +69,8 @@ def prepare(directory: Path, *, days: int = 90, renew: bool = False) -> None:
                 "basicConstraints=critical,CA:TRUE",
                 "-addext",
                 "keyUsage=critical,keyCertSign,cRLSign",
+                "-addext",
+                "subjectKeyIdentifier=hash",
             )
             os.chmod(staging / "ca.key", 0o600)
             os.replace(staging / "ca.key", ca_key)
@@ -83,6 +85,8 @@ def prepare(directory: Path, *, days: int = 90, renew: bool = False) -> None:
             extensions = staging / f"{name}.ext"
             extensions.write_text(
                 "basicConstraints=critical,CA:FALSE\n"
+                "subjectKeyIdentifier=hash\n"
+                "authorityKeyIdentifier=keyid,issuer\n"
                 "keyUsage=critical,digitalSignature,keyEncipherment\n"
                 "extendedKeyUsage=serverAuth\n"
                 f"subjectAltName=DNS:{name},DNS:localhost,IP:127.0.0.1,IP:::1\n"

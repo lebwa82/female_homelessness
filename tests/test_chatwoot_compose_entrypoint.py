@@ -21,6 +21,7 @@ def tls_environment(tmp_path, monkeypatch):
     provider_ca.write_text("public-provider-test-certificate")
     monkeypatch.setattr(chatwoot_compose, "POSTGRES_CA", provider_ca)
     monkeypatch.setattr(chatwoot_compose, "HTTP_LOCAL_DROPIN", tmp_path / "http-local.conf")
+    monkeypatch.setattr(chatwoot_compose, "DOMAIN_HTTPS_DROPIN", tmp_path / "domain-https.conf")
     environment = tmp_path / "platform.env"
     environment.write_text(
         f"CHATWOOT_INTERNAL_TLS=1\nINTERNAL_TLS_DIR={directory}\n"
@@ -37,6 +38,7 @@ def test_timeweb_units_and_http_dropin_use_one_persistent_compose_selection():
         "nevidimy-agent.service",
         "nevidimy-telegram.service",
         "http-local.conf",
+        "domain-https.conf",
     ):
         unit = ROOT / "deploy/timeweb" / name
         commands = [
@@ -131,3 +133,32 @@ def test_existing_timeweb_http_mode_is_preserved_until_explicit_tls_activation(t
         "deploy/timeweb/compose.yml",
         "deploy/timeweb/compose.http-local.yml",
     ]
+
+
+def test_public_domain_overrides_old_local_dropin_and_preserves_tls(tmp_path, monkeypatch):
+    environment, _ = tls_environment(tmp_path, monkeypatch)
+    chatwoot_compose.HTTP_LOCAL_DROPIN.touch()
+    chatwoot_compose.DOMAIN_HTTPS_DROPIN.touch()
+    monkeypatch.setattr(chatwoot_compose, "ENV_FILE", environment)
+    monkeypatch.setattr(chatwoot_compose.sys, "argv", ["compose.py", "config", "--quiet"])
+    calls = []
+    monkeypatch.setattr(
+        chatwoot_compose.subprocess, "call", lambda args, **kwargs: calls.append(args) or 0
+    )
+    assert chatwoot_compose.main() == 0
+    files = [calls[0][i + 1] for i, arg in enumerate(calls[0]) if arg == "-f"]
+    assert files[-3:] == [
+        "deploy/timeweb/compose.domain-https.yml",
+        "deploy/chatwoot/compose.tls.yml",
+        "deploy/timeweb/compose.tls-domain-https.yml",
+    ]
+    assert "deploy/timeweb/compose.http-local.yml" not in files
+
+
+def test_public_domain_is_preserved_before_tls_and_conflicting_modes_are_rejected(tmp_path):
+    environment = tmp_path / "platform.env"
+    environment.write_text("CHATWOOT_HOSTNAME=example.test\n")
+    files, _ = chatwoot_compose.compose_files(environment, domain_https=True)
+    assert files[-1] == "deploy/timeweb/compose.domain-https.yml"
+    with pytest.raises(ValueError):
+        chatwoot_compose.compose_files(environment, domain_https=True, http_local=True)

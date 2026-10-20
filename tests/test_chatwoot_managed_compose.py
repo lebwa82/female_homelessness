@@ -268,7 +268,7 @@ def test_timeweb_domain_https_has_no_plaintext_ui_or_public_agent() -> None:
     assert "tls internal" not in caddy
     assert "includeSubDomains" not in caddy
     unit = (ROOT / "deploy/timeweb/domain-https.conf").read_text()
-    assert unit.count("-f deploy/timeweb/compose.domain-https.yml") == 2
+    assert unit.count("scripts/chatwoot_compose.py") == 2
     assert "compose.http-local.yml" not in unit
     assert "telegram" not in unit
 

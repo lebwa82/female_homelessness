@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import socket
 import ssl
 import subprocess
@@ -14,6 +13,9 @@ from redis.asyncio import Redis
 
 from app.transport_tls import server_context
 from scripts.prepare_internal_tls import SERVICES, prepare
+from tests import test_chatwoot_managed_compose as managed_compose
+
+compose_command = managed_compose.compose_command
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,6 +68,7 @@ def test_real_https_checks_ca_hostname_and_rejects_plaintext(certificates):
     thread.start()
     address = server.server_address
     trusted = ssl.create_default_context(cafile=str(certificates / "ca.crt"))
+    trusted.verify_flags |= ssl.VERIFY_X509_STRICT
     try:
         with urlopen(f"https://127.0.0.1:{address[1]}", context=trusted, timeout=3) as response:
             assert response.read() == b"ok"
@@ -109,14 +112,13 @@ def test_certificate_issuance_refuses_an_unrelated_directory(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("managed", "timeweb", "http_local"),
-    [(False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+    ("managed", "timeweb", "http_local", "domain_https"),
+    [(False, False, False, False), (True, False, False, False),
+     (True, True, False, False), (True, True, True, False), (True, True, False, True)],
 )
 def test_compose_tls_is_explicit_verified_and_does_not_publish_internal_ports(
-    tmp_path, certificates, managed, timeweb, http_local
+    tmp_path, certificates, compose_command, managed, timeweb, http_local, domain_https
 ):
-    if not shutil.which("docker"):
-        pytest.skip("Docker Compose is required")
     empty_env = tmp_path / "empty.env"
     empty_env.touch()
     compose_files = ["compose.yml"]
@@ -126,14 +128,17 @@ def test_compose_tls_is_explicit_verified_and_does_not_publish_internal_ports(
         compose_files.append("../timeweb/compose.yml")
     if http_local:
         compose_files.append("../timeweb/compose.http-local.yml")
+    if domain_https:
+        compose_files.append("../timeweb/compose.domain-https.yml")
     compose_files.append("compose.tls.yml")
     if http_local:
         compose_files.append("../timeweb/compose.tls-http-local.yml")
+    if domain_https:
+        compose_files.append("../timeweb/compose.tls-domain-https.yml")
     if not managed:
         compose_files.append("compose.tls-postgres.yml")
     command = [
-        "docker",
-        "compose",
+        *compose_command,
         "--project-directory",
         str(ROOT / "deploy/chatwoot"),
         "--env-file",
@@ -188,6 +193,20 @@ def test_compose_tls_is_explicit_verified_and_does_not_publish_internal_ports(
             v for v in services["caddy"]["volumes"] if v["target"] == "/etc/caddy/Caddyfile"
         )
         assert caddyfile["source"].endswith("/timeweb/Caddyfile.tls-http-local")
+    if domain_https:
+        caddy = services["caddy"]
+        assert {str(port["published"]) for port in caddy["ports"]} == {"80", "443"}
+        mounts = {volume["target"]: volume for volume in caddy["volumes"]}
+        assert mounts["/etc/caddy/Caddyfile"]["source"].endswith(
+            "/timeweb/Caddyfile.tls-domain-https"
+        )
+        assert mounts["/run/certs/chatwoot"]["read_only"] is True
+        assert mounts["/run/tls/ca.crt"]["read_only"] is True
+        configuration = (ROOT / "deploy/timeweb/Caddyfile.tls-domain-https").read_text()
+        assert "reverse_proxy https://chatwoot:3000" in configuration
+        assert "tls_trust_pool file /run/tls/ca.crt" in configuration
+        assert "tls_insecure_skip_verify" not in configuration
+        assert "agent-bot" not in configuration
     for name in ("chatwoot", "sidekiq"):
         env = services[name]["environment"]
         assert env["PGSSLMODE"] == "verify-full"
