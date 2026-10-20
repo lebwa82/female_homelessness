@@ -1,5 +1,10 @@
 # Project agent rules
 
+## Git delivery
+
+- Standing user authorization: after completing requested project changes and relevant checks, commit the in-scope changes and push them to `origin/main` without asking again. Preserve unrelated unfinished work, integrate remote updates non-destructively, and verify that the remote branch contains the delivered commits. Never force-push.
+- This authorization covers Git publication, not deployment or other production mutations; those retain their separate approval boundaries.
+
 ## Deployment host — Timeweb (confirmed by the user, 2026-10-20)
 
 - The active contour is Timeweb, not Yandex Cloud. VM `9351701` / `nevidimy-prod-app`, managed PostgreSQL `4221087` / `nevidimy-prod-pg`, project `3044129`, region `msk-1`. See `docs/chatwoot-operations.md`, section "Timeweb: новый контур".
