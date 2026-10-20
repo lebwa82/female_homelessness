@@ -5,9 +5,10 @@
 инвентаризация работающих интеграций: реализован Telegram-контур;
 код изолированных коннекторов WhatsApp и VK добавлен отдельно, MAX пока не реализован.
 Настройка и границы проверки новых каналов: [коннекторы](messenger-connectors.md).
-Связи действующего контура повторно сверены с обработчиками, API-клиентом,
-Timeweb Compose-файлами и сохранённой эксплуатационной конфигурацией на
-20 октября 2026 года; новый внутренний TLS ещё не активирован.
+Связи действующего контура сверены с обработчиками, API-клиентом и Timeweb
+Compose-файлами. Внутренний TLS активирован и проверен на сервере
+20 октября 2026 года; последующая проверка релиза `9c61ea5` подтвердила
+сохранность TLS-конфигурации и сертификатов.
 Это прикладная схема обмена данными, не схема firewall: Caddy,
 Sidekiq и локальные тома не вынесены в отдельные блоки. Redis показан как
 общая зависимость трёх компонентов; его роль описана ниже.
@@ -35,7 +36,7 @@ config:
 ---
 flowchart TB
     accTitle: Целевая архитектура приложения Невидимого фонда
-    accDescr: Telegram, WhatsApp, VK и MAX связаны с Chatwoot через логические блоки коннекторов. Telegram-транспорт работает через прокси. Chatwoot отправляет события бэкенду через webhook; бэкенд работает с Chatwoot API, LLM, S3 и учётом сертификатов в PostgreSQL. Общий Redis используется Chatwoot для фоновых задач Sidekiq, бэкендом для очереди событий и повторов, Telegram-коннектором для курсора и блокировки polling. Администратор отвечает через панель Chatwoot.
+    accDescr: Telegram, WhatsApp, VK и MAX связаны с Chatwoot через логические блоки коннекторов. Telegram-транспорт работает через SSH-прокси с сохранением HTTPS. Chatwoot отправляет события бэкенду через подписанный HTTPS webhook; бэкенд работает с Chatwoot API по HTTPS, с LLM и S3 по HTTPS и с PostgreSQL по TLS verify-full. Общий Redis с TLS используется Chatwoot для фоновых задач Sidekiq, бэкендом для очереди событий и повторов, Telegram-коннектором для курсора и блокировки polling. Администратор отвечает через публичную HTTPS-панель Chatwoot.
 
     TG["Telegram"]
     WA["WhatsApp"]
@@ -56,7 +57,7 @@ flowchart TB
     REDIS["Redis<br/>общий для сервисов"]
 
     TG <-->|"Через SSH-прокси<br/>https · tcp/443"| TRANSPORT
-    TRANSPORT <-->|"нативный канал<br/>http · tcp/3000"| CW
+    TRANSPORT <-->|"нативный канал<br/>https · tcp/3000"| CW
     WA <-->|"Сообщения<br/>https · tcp/443 · план"| WA_CONNECTOR
     VK <-->|"Сообщения<br/>https · tcp/443 · план"| VK_CONNECTOR
     MAX <-->|"Сообщения<br/>https · tcp/443 · план"| MAX_CONNECTOR
@@ -64,16 +65,16 @@ flowchart TB
     VK_CONNECTOR <-->|"API / callback<br/>https · tcp/443 · план"| CW
     MAX_CONNECTOR <-->|"API / callback<br/>https · tcp/443 · план"| CW
 
-    CW -->|"подписанный webhook<br/>http · tcp/8080"| AGENT
-    AGENT -->|"API: история и ответы<br/>http · tcp/3000"| CW
-    CW <-->|"панель через SSH-туннель<br/>http · tcp/18080 · SSH tcp/22"| STAFF
+    CW -->|"подписанный webhook<br/>https · tcp/8080"| AGENT
+    AGENT -->|"API: история и ответы<br/>https · tcp/3000"| CW
+    CW <-->|"панель через Caddy<br/>https · tcp/443"| STAFF
     CW <-->|"история и состояние<br/>TLS · tcp/5432 · verify-full"| PG
     AGENT <-->|"учёт сертификатов<br/>TLS · tcp/5432 · verify-full"| PG
     AGENT <-->|"маскированный контекст<br/>https · tcp/443"| LLM
     AGENT <-->|"загрузка PDF<br/>https · tcp/443"| S3
-    CW <-->|"Sidekiq: фоновые задачи<br/>tcp/6379 · без TLS"| REDIS
-    AGENT <-->|"события и повторы<br/>tcp/6379 · без TLS"| REDIS
-    TRANSPORT <-->|"курсор и блокировка polling<br/>tcp/6379 · без TLS"| REDIS
+    CW <-->|"Sidekiq: фоновые задачи<br/>TLS · tcp/6379"| REDIS
+    AGENT <-->|"события и повторы<br/>TLS · tcp/6379"| REDIS
+    TRANSPORT <-->|"курсор и блокировка polling<br/>TLS · tcp/6379"| REDIS
 
     classDef default font-family:Arial,font-size:18px;
     classDef app fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
@@ -82,24 +83,28 @@ flowchart TB
     class PG,S3,REDIS storage;
 ```
 
-Подписи относятся к сохранённому Timeweb-контуру; повторная проверка живых
-соединений в этой сессии не проводилась. HTTPS до Telegram сохраняется внутри
-прокси-туннеля; внешний переход прокси защищён SSH. Панель открывается только
-на `127.0.0.1:18080` через SSH, Caddy передаёт запросы на HTTP:3000. Внутренний
-подписанный webhook идёт непосредственно на HTTP:8080. Managed PostgreSQL:5432
-уже использует `verify-full` с CA Timeweb; Redis:6379 пока использует `redis://`.
-S3 и LLM используют HTTPS endpoint. HTTPS для WhatsApp, VK и MAX — требование
-к внешним интеграциям. Изолированные конфигурации WhatsApp и VK подготовлены,
-но каналы ещё не подключены; MAX остаётся планом. Маскирование перед LLM
-не заменяет шифрование сетевых соединений.
+Подписи отражают проверенный после включения TLS Timeweb-контур. HTTPS до
+Telegram сохраняется внутри прокси-туннеля; внешний переход прокси защищён SSH.
+Общая панель — [chatwoot.admin.nevidima.ru](https://chatwoot.admin.nevidima.ru/):
+браузер подключается к Caddy по HTTPS:443 без SSH-туннеля, а Caddy проверяет
+внутренний сертификат Chatwoot на HTTPS:3000. HTTP:80 только перенаправляет
+на HTTPS. Внутренние порты 3000, 8080 и 6379 наружу не опубликованы.
 
-Подготовлен [режим внутреннего TLS](chatwoot-operations.md#внутренний-tls-подготовленный-режим)
-с единым выбором Compose для Timeweb systemd, с сохранением SSH-доступа к UI.
-Его активация на production
-не подтверждена: в текущем облачном окружении нет доступа к серверу.
-После live-проверки подписи внутренних соединений на этой же схеме нужно
-обновить на HTTPS и Redis TLS, сохранив оформление. PostgreSQL TLS уже включён
-в сохранённой конфигурации Timeweb.
+Telegram ingress и бэкенд обращаются к Chatwoot по HTTPS:3000. Подписанный
+Agent Bot webhook идёт на HTTPS:8080; подпись сохранена дополнительно к TLS.
+Managed PostgreSQL:5432 использует `verify-full` с отдельным CA Timeweb;
+внутренний CA приложения его не заменяет. Rails/Sidekiq, бэкенд и Telegram
+ingress используют общий Redis:6379 по TLS (`rediss://`) с проверкой сертификата.
+При живой проверке незашифрованные подключения к внутренним HTTP-сервисам
+и Redis были отклонены.
+
+Действующий [режим внутреннего TLS](chatwoot-operations.md#внутренний-tls-подготовленный-режим)
+выбирается общим Compose entrypoint для ручных команд и systemd. Публичный
+сертификат панели и внутренние сертификаты — разные наборы. Их пути,
+ключи и значения секретов на схему не выносятся.
+S3 и LLM используют HTTPS endpoint. HTTPS для WhatsApp, VK и MAX — требование
+к внешним интеграциям: каналы WhatsApp и VK ещё не подключены, MAX остаётся
+планом. Маскирование перед LLM не заменяет шифрование сетевых соединений.
 
 В Chatwoot видна вся переписка. Бот продолжает отвечать после уведомления команды
 и замолкает, когда разговор берёт человек. Ответы человека идут в тот же Telegram-чат.
@@ -220,9 +225,10 @@ Redis Streams временно содержат payload ожидающего с�
   Действующий контур по подтверждению пользователя — Timeweb VM и Managed
   PostgreSQL; он описан в эксплуатационной документации. Локальная БД в базовом
   Compose относится к прежнему контуру, а Timeweb managed-overlay удаляет её.
-- Переход к Chat Completions согласован, но ещё не выполнен: в текущем коде
-  основные LLM-вызовы и выбор команды используют Responses. Смена облака
-  не меняет владение историей, очередями и интерфейсом специалиста.
+- В действующем Timeweb-контуре LLM — Timeweb AI Gateway / DeepSeek через
+  Chat Completions. Сохранившаяся Yandex-ветка кода использует Responses,
+  но не является активным провайдером production. Выбор провайдера не меняет
+  владение историей, очередями и интерфейсом специалиста.
 
 ## Обновление картинки
 
@@ -248,6 +254,9 @@ SVG прошёл XML-проверку, PNG просмотрен на читае�
 ## Основания
 
 - Реализация: [Compose](../deploy/chatwoot/compose.yml),
+  [внутренний TLS](../deploy/chatwoot/compose.tls.yml),
+  [публичный HTTPS и Caddy upstream](../deploy/timeweb/Caddyfile.tls-domain-https),
+  [единый выбор Compose overlays](../scripts/chatwoot_compose.py),
   [запуск Agent Bot](../app/chatwoot/__main__.py),
   [обработка диалогов](../app/chatwoot/service.py),
   [очередь событий](../app/chatwoot/event_queue.py),
