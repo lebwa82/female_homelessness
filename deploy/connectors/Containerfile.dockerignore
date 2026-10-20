@@ -1,0 +1,9 @@
+**
+!app/
+!app/__init__.py
+!app/connectors/
+!app/connectors/*.py
+!deploy/
+!deploy/connectors/
+!deploy/connectors/requirements.txt
+!deploy/connectors/Containerfile

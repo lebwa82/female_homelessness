@@ -40,6 +40,36 @@ logs:
 test:
     uv run pytest
 
+# Provider adapters: no bot, Chatwoot process, Telegram or external API calls.
+test-vk:
+    uv run pytest tests/connectors/test_vk.py -q --tb=short
+
+test-whatsapp:
+    uv run pytest tests/connectors/test_whatsapp.py -q --tb=short
+
+# Production/MVP profile isolation and credential readiness, without external accounts.
+test-connector-profiles:
+    uv run pytest tests/connectors/test_profiles.py -q --tb=short
+
+# Only prints profile names and missing field names; never credential values.
+connector-profiles-status:
+    uv run python -m scripts.connector_profiles status
+
+# Common standalone connector runtime: synthetic HTTP/Redis only.
+test-connectors:
+    uv run pytest tests/connectors -q --tb=short
+
+# Chatwoot API adapter and bot delivery contract, separate from provider tests.
+test-connector-chatwoot:
+    uv run pytest tests/connector_chatwoot tests/test_chatwoot_client.py -q --tb=short
+
+# Existing Chatwoot checks are independent of connector tests and credentials.
+test-chatwoot:
+    uv run pytest tests/test_chatwoot_*.py -q --tb=short
+
+test-telegram:
+    uv run pytest tests/test_telegram_*.py tests/test_timeweb_telegram_*.py -q --tb=short
+
 # Run the linter.
 lint:
     uv run ruff check .

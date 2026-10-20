@@ -1,0 +1,61 @@
+# Run once per provider with a DIFFERENT -p project and --env-file.
+# Deliberately standalone: never combine with Chatwoot/Telegram compose files.
+services:
+  connector:
+    image: ${CONNECTOR_IMAGE:?Set a versioned connector image}
+    build:
+      context: ../..
+      dockerfile: deploy/connectors/Containerfile
+    env_file:
+      - ${CONNECTOR_ENV_FILE:?Set an absolute provider-specific env file}
+    environment:
+      CONNECTOR_REDIS_URL: redis://redis:6379/0
+      CONNECTOR_LISTEN_HOST: 0.0.0.0
+      CONNECTOR_LISTEN_PORT: "8090"
+    ports:
+      - "127.0.0.1:${CONNECTOR_BIND_PORT:?Set a unique localhost port}:8090"
+    networks: [default, transport]
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m,mode=1777]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
+    restart: unless-stopped
+
+  redis:
+    image: docker.io/library/redis:7.4.10-alpine3.21
+    command: [redis-server, --appendonly, "yes", --maxmemory, 48mb, --maxmemory-policy, noeviction]
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 32
+    volumes:
+      - transport_data:/data
+    networks: [transport]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  default: {}
+  transport:
+    internal: true
+
+volumes:
+  transport_data: {}

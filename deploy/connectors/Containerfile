@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+FROM docker.io/library/python:3.14.7-slim
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY deploy/connectors/requirements.txt ./requirements.txt
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then \
+      PIP_CERT=/run/secrets/proxy_ca pip install --no-cache-dir -r requirements.txt; \
+    else pip install --no-cache-dir -r requirements.txt; fi
+COPY app/__init__.py ./app/__init__.py
+COPY app/connectors ./app/connectors
+# Workspace sources can be 0600/0700; the runtime UID must be able to read them.
+RUN chmod -R u=rwX,go=rX /app
+USER 65532:65532
+CMD ["python", "-m", "app.connectors"]
