@@ -317,8 +317,9 @@ class ChatwootClient:
         poll_interval_seconds: float = 0.25,
     ) -> None:
         conversation = await self.get_conversation(conversation_id)
+        api_channel = (conversation.get("meta") or {}).get("channel") == "Channel::Api"
         api_only = False
-        if (conversation.get("meta") or {}).get("channel") == "Channel::Api":
+        if api_channel:
             inbox = await self._transport.request(
                 "GET", self._path(f"/inboxes/{conversation['inbox_id']}"), self._read_token,
             )
@@ -326,10 +327,11 @@ class ChatwootClient:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         while True:
+            messages = await self.get_messages(conversation_id)
             message = next(
                 (
                     item
-                    for item in await self.get_messages(conversation_id)
+                    for item in messages
                     if item.get("id") == message_id
                 ),
                 None,
@@ -340,9 +342,32 @@ class ChatwootClient:
                 if (message.get("source_id") not in {None, ""}
                         or api_only and message.get("attachments")):
                     return
+                # Custom API connectors cannot PATCH source_id in Chatwoot.
+                # Their private acceptance receipt is written only after every
+                # external text/file part has a provider-generated message ID.
+                # Telegram continues to require its native source_id above.
+                if api_channel and any(_connector_receipt(item, message_id) for item in messages):
+                    return
             if loop.time() >= deadline:
                 raise ChatwootApiError("external_delivery", 504)
             await asyncio.sleep(poll_interval_seconds)
+
+
+def _connector_receipt(message: dict[str, Any], message_id: int) -> bool:
+    attributes = message.get("content_attributes")
+    receipt = attributes.get("connector_delivery_receipt") if isinstance(attributes, dict) else None
+    return (
+        message.get("private") is True
+        and message.get("message_type") in (1, "outgoing")
+        and isinstance(receipt, dict)
+        and type(receipt.get("message_id")) is int
+        and receipt.get("message_id") == message_id
+        and receipt.get("provider") in ("vk", "whatsapp")
+        and isinstance(receipt.get("external_ids"), list)
+        and bool(receipt["external_ids"])
+        and all(isinstance(value, str) and value for value in receipt["external_ids"])
+    )
+
 
 def _as_object(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
