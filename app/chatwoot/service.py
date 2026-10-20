@@ -178,8 +178,9 @@ class ChatwootAgentService:
                 f"Отвечает: {'специалист' if _human_assigned(conversation) else 'бот'}\n"
                 f"Статус: {conversation.get('status', 'неизвестно')}"
             ))
+        is_start_command = event.content.partition(" ")[0] == "/start"
         if not _bot_owns(conversation):
-            if event.content == "/start" or _is_callback(event.content):
+            if is_start_command or _is_callback(event.content):
                 return await self._control_reply(
                     event, "Сейчас разговор ведёт специалист. Можно написать ему здесь. "
                     "Кнопки бота снова станут доступны после завершения разговора со специалистом.",
@@ -218,7 +219,7 @@ class ChatwootAgentService:
         seeded = _seed_conversation(event, conversation, messages, self._certificate_claim)
         legacy_service = ConversationService(store=seeded.store, gateway=self._gateway,
                                              html_scenario=True)
-        if event.content == "/start":
+        if is_start_command:
             turn = await legacy_service.start(seeded.incoming)
             if returning_after_day(messages, event.message_id, self._scenario_effects.clock()):
                 turn = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)

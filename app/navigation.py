@@ -53,7 +53,16 @@ def previous_checkpoint(navigation: dict[str, Any]) -> int | None:
     cursor = navigation.get("cursor")
     if cursor is None:
         return None
-    return navigation["entries"][cursor]["previous"]
+    entries = navigation["entries"]
+    previous = entries[cursor]["previous"]
+    if entries[cursor]["workflow"].get("state") == "open_conversation":
+        # Resuming free text must not replay a closed survey's goodbye.
+        while (
+            previous is not None
+            and entries[previous]["workflow"].get("scenario", {}).get("screen") == "i2"
+        ):
+            previous = entries[previous]["previous"]
+    return previous
 
 
 def back_update(navigation: dict[str, Any], callback_id: str) -> dict[str, Any] | None:
