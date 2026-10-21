@@ -11,7 +11,7 @@ from redis.asyncio import Redis
 from app.certificate_documents import S3CertificateObjectStore
 from app.chatwoot.app import create_application
 from app.chatwoot.certificates import CertificateInventory, database_url
-from app.chatwoot.client import ChatwootClient
+from app.chatwoot.client import AiohttpChatwootTransport, ChatwootClient
 from app.chatwoot.event_queue import DurableEventQueue
 from app.chatwoot.followups import run as run_followups
 from app.chatwoot.service import ChatwootAgentService
@@ -40,11 +40,13 @@ def main() -> None:
         access_key_id=settings.certificate_s3_access_key_id,
         secret_access_key=settings.certificate_s3_secret_access_key,
     )
+    transport = AiohttpChatwootTransport(settings.chatwoot_base_url, reuse_connections=True)
     client = ChatwootClient(
         base_url=settings.chatwoot_base_url,
         account_id=settings.chatwoot_account_id,
         read_token=settings.chatwoot_read_token,
         bot_token=settings.chatwoot_bot_token,
+        transport=transport,
     )
     service = ChatwootAgentService(
         client,
@@ -78,6 +80,7 @@ def main() -> None:
             with suppress(asyncio.CancelledError):
                 await worker
             await event_queue.close()
+            await transport.aclose()
             await redis.aclose()
             await inventory.close()
 

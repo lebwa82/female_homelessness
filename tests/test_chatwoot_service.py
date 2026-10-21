@@ -82,10 +82,14 @@ class FakeChatwoot:
         self.conversation_reads += 1
         return self.conversation
 
-    async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]:
-        return self.messages
+    async def get_messages(
+        self, conversation_id: int, *, after_id: int | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        return tuple(m for m in self.messages if after_id is None or m["id"] > after_id)
 
-    async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool:
+    async def has_reply_for_turn(
+        self, conversation_id: int, turn_key: str, *, messages=None, after_id=None,
+    ) -> bool:
         return self.reply_exists or any(reply["turn_key"] == turn_key for reply in self.replies)
 
     async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None:

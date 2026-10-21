@@ -403,7 +403,9 @@ async def test_followup_sweep_handles_all_pages_and_isolates_one_failure():
 
     class Api:
         async def list_conversations(self, page):
-            return tuple({"id": i, "custom_attributes": {"scenario_followups": {"job": {}}}}
+            return tuple({"id": i, "custom_attributes": {"scenario_followups": {"job": {
+                "state": "pending", "due_at": "2026-10-21T09:00:00+00:00",
+            }}}}
                          for i in {1: [1, 2], 2: [3], 3: []}[page])
 
     class Service:
@@ -417,7 +419,7 @@ async def test_followup_sweep_handles_all_pages_and_isolates_one_failure():
             return True
 
     service = Service()
-    assert await sweep(Api(), service) == 2
+    assert await sweep(Api(), service, now=datetime(2026, 10, 22, 9, tzinfo=UTC)) == 2
     assert service.seen == [1, 2, 3]
 
 

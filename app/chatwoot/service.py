@@ -49,9 +49,14 @@ _WORKFLOW_ATTRS = (
 class ChatwootConversationApi(Protocol):
     async def get_conversation(self, conversation_id: int) -> dict[str, Any]: ...
 
-    async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]: ...
+    async def get_messages(
+        self, conversation_id: int, *, after_id: int | None = None,
+    ) -> tuple[dict[str, Any], ...]: ...
 
-    async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool: ...
+    async def has_reply_for_turn(
+        self, conversation_id: int, turn_key: str, *,
+        messages: tuple[dict[str, Any], ...] | None = None, after_id: int | None = None,
+    ) -> bool: ...
 
     async def reply_id_for_turn(self, conversation_id: int, turn_key: str) -> int | None: ...
 
@@ -190,7 +195,8 @@ class ChatwootAgentService:
         await self._queues.sync(conversation)
 
         turn_key = f"message:{event.message_id}"
-        if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
+        messages = await self._api.get_messages(event.conversation_id)
+        if await self._api.has_reply_for_turn(event.conversation_id, turn_key, messages=messages):
             await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
             pending = _custom_attributes(conversation).get("scenario_pending_input") or {}
             if pending.get("message_id") == event.message_id:
@@ -215,7 +221,6 @@ class ChatwootAgentService:
                     "workflow": {k: copy.deepcopy(attributes.get(k)) for k in _WORKFLOW_ATTRS},
                 },
             })
-        messages = await self._api.get_messages(event.conversation_id)
         seeded = _seed_conversation(event, conversation, messages, self._certificate_claim)
         legacy_service = ConversationService(store=seeded.store, gateway=self._gateway,
                                              html_scenario=True)
@@ -248,7 +253,8 @@ class ChatwootAgentService:
         # A public staff reply can arrive while the LLM holds our local lock,
         # before that reply's webhook has projected the visible assignment.
         staff = _latest_staff_message(
-            await self._api.get_messages(event.conversation_id), event.conversation_id,
+            await self._api.get_messages(event.conversation_id, after_id=event.message_id),
+            event.conversation_id,
             after=max(event.message_id, _epoch(_custom_attributes(before_side_effects).get(
                 "ownership_last_staff_message_id"))),
         )
@@ -279,7 +285,7 @@ class ChatwootAgentService:
         handoff = _requires_human_handoff(seeded)
         await self._scenario_effects.apply(event.conversation_id, event.message_id, seeded.store.actions)
         if handoff:
-            if not await self._notify_duty(event, seeded):
+            if not await self._notify_duty(event, seeded, messages):
                 return False
         else:
             await self._persist_workflow(event.conversation_id, seeded.record)
@@ -290,7 +296,9 @@ class ChatwootAgentService:
         current = await self._sync_owner(event.conversation_id)
         if not _bot_owns(current):
             return False
-        if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
+        if await self._api.has_reply_for_turn(
+            event.conversation_id, turn_key, after_id=event.message_id,
+        ):
             return False
         if turn.attachment is not None:
             if not await self._send_certificate(event.conversation_id, turn_key, turn):
@@ -487,10 +495,10 @@ class ChatwootAgentService:
         self, event: IncomingChatwootMessage, conversation: dict[str, Any]
     ) -> bool:
         turn_key = f"message:{event.message_id}"
-        if await self._api.has_reply_for_turn(event.conversation_id, turn_key):
+        messages = await self._api.get_messages(event.conversation_id)
+        if await self._api.has_reply_for_turn(event.conversation_id, turn_key, messages=messages):
             return False
         attrs = _custom_attributes(conversation)
-        messages = await self._api.get_messages(event.conversation_id)
         seeded = _seed_conversation(event, conversation, messages)
         # A retry after writing the reset but before sending its acknowledgement
         # must not increment the epoch a second time.
@@ -522,7 +530,8 @@ class ChatwootAgentService:
         return True
 
     async def _notify_duty(
-        self, event: IncomingChatwootMessage, seeded: _SeededConversation
+        self, event: IncomingChatwootMessage, seeded: _SeededConversation,
+        messages: tuple[dict[str, Any], ...],
     ) -> bool:
         """Native team mention creates Chatwoot bell notifications, not a takeover."""
         if self._duty_team_id is None:
@@ -530,7 +539,6 @@ class ChatwootAgentService:
         conversation = await self._sync_owner(event.conversation_id)
         if not _bot_owns(conversation):
             return False
-        messages = await self._api.get_messages(event.conversation_id)
         history = _history_after_epoch(messages, seeded.record.context_epoch, event.message_id)
         selected = await self._queues.route(
             conversation,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -50,9 +51,34 @@ class ChatwootTransport(Protocol):
 class AiohttpChatwootTransport:
     """HTTP-only transport kept separate from product conversation logic."""
 
-    def __init__(self, base_url: str, timeout_seconds: float = 10.0) -> None:
+    def __init__(
+        self, base_url: str, timeout_seconds: float = 10.0, *, reuse_connections: bool = False,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        self._reuse_connections = reuse_connections
+        self._session: aiohttp.ClientSession | None = None
+
+    @asynccontextmanager
+    async def _http_session(self):
+        # Short-lived callers retain automatic cleanup. The service explicitly
+        # owns its pool and closes it after all webhook/followup workers stop.
+        # No shared cookies: read and Agent Bot identities stay request-local.
+        if self._reuse_connections:
+            if self._session is None:
+                self._session = aiohttp.ClientSession(
+                    timeout=self._timeout, cookie_jar=aiohttp.DummyCookieJar(),
+                )
+            yield self._session
+        else:
+            async with aiohttp.ClientSession(
+                timeout=self._timeout, cookie_jar=aiohttp.DummyCookieJar(),
+            ) as session:
+                yield session
+
+    async def aclose(self) -> None:
+        if self._session is not None:
+            await self._session.close()
 
     @staticmethod
     def request_headers(token: str) -> dict[str, str]:
@@ -76,7 +102,7 @@ class AiohttpChatwootTransport:
     ) -> Any:
         try:
             async with (
-                aiohttp.ClientSession(timeout=self._timeout) as session,
+                self._http_session() as session,
                 session.request(
                     method,
                     f"{self._base_url}{path}",
@@ -113,7 +139,7 @@ class AiohttpChatwootTransport:
         )
         try:
             async with (
-                aiohttp.ClientSession(timeout=self._timeout) as session,
+                self._http_session() as session,
                 session.request(
                     method,
                     f"{self._base_url}{path}",
@@ -191,8 +217,21 @@ class ChatwootClient:
             {"assignee_id": user_id},
         )
 
-    async def get_messages(self, conversation_id: int) -> tuple[dict[str, Any], ...]:
+    async def get_messages(
+        self, conversation_id: int, *, after_id: int | None = None,
+    ) -> tuple[dict[str, Any], ...]:
         path = self._path(f"/conversations/{conversation_id}/messages")
+        if after_id is not None:
+            payload = await self._transport.request(
+                "GET", f"{path}?after={after_id}", self._read_token,
+            )
+            tail = _messages_from_payload(payload)
+            # Installed Chatwoot's `after` query filters IDs server-side, orders
+            # by created_at, and caps at 100. Never infer an ID watermark from
+            # that ordering: a saturated tail falls back to the full reader.
+            if len(tail) < 100:
+                return tail
+            return tuple(m for m in await self.get_messages(conversation_id) if m["id"] > after_id)
         messages: dict[int, dict[str, Any]] = {}
         before: int | None = None
         while True:
@@ -290,8 +329,12 @@ class ChatwootClient:
             )
         return _message_id(response)
 
-    async def has_reply_for_turn(self, conversation_id: int, turn_key: str) -> bool:
-        messages = await self.get_messages(conversation_id)
+    async def has_reply_for_turn(
+        self, conversation_id: int, turn_key: str, *,
+        messages: tuple[dict[str, Any], ...] | None = None, after_id: int | None = None,
+    ) -> bool:
+        if messages is None:
+            messages = await self.get_messages(conversation_id, after_id=after_id)
         return any(
             isinstance(message.get("content_attributes"), dict)
             and message["content_attributes"].get("bot_turn_key") == turn_key
