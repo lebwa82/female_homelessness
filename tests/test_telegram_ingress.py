@@ -17,6 +17,9 @@ def update(number=101, *, callback=False):
                "date": 1788742800, "text": "/system_info"}
     payload = {"update_id": number}
     if callback:
+        message["reply_markup"] = {"inline_keyboard": [[{
+            "text": "Назад", "callback_data": "back",
+        }]]}
         payload["callback_query"] = {"id": "test-click", "from": sender,
                                      "chat_instance": "test", "message": message, "data": "back"}
     else:
@@ -78,8 +81,9 @@ async def test_unready_receiver_does_not_disable_webhook():
 
 async def test_native_payload_and_restart_uses_persisted_cursor():
     redis = MemoryRedis()
-    ingress, _, http = setup(redis)
+    ingress, bot, http = setup(redis)
     await ingress.poll_once()
+    bot.answer_callback_query.assert_not_awaited()
     request = http.calls[0][1]
     message = request["json"]["telegram"]["message"]
     assert message["from"]["id"] == 9001
@@ -119,7 +123,55 @@ async def test_click_payload_is_forwarded_and_spinner_acknowledged():
     callback = http.calls[0][1]["json"]["telegram"]["callback_query"]
     assert callback["data"] == "back"
     assert callback["from"]["id"] == 9001
-    bot.answer_callback_query.assert_awaited_once_with("test-click", request_timeout=10)
+    bot.answer_callback_query.assert_awaited_once_with(
+        "test-click", text="Обрабатываю выбор…", request_timeout=2,
+    )
+
+
+async def test_click_progress_precedes_forward_and_preserves_original_keyboard(monkeypatch):
+    ingress, bot, _ = setup(callback=True)
+    original = update(callback=True).model_dump()
+
+    async def forward(received):
+        bot.answer_callback_query.assert_awaited_once_with(
+            "test-click", text="Обрабатываю выбор…", request_timeout=2,
+        )
+        assert received.model_dump() == original
+        assert f"{ingress.prefix}:offset" not in ingress.redis.data
+
+    monkeypatch.setattr(ingress, "forward", forward)
+    await ingress.poll_once()
+    assert ingress.redis.data[f"{ingress.prefix}:offset"] == 102
+
+
+async def test_click_progress_is_not_a_delivery_acknowledgement():
+    ingress, bot, http = setup(callback=True)
+    http.status = 503
+    with pytest.raises(ChatwootUnavailable):
+        await ingress.poll_once()
+    bot.answer_callback_query.assert_awaited_once()
+    assert f"{ingress.prefix}:offset" not in ingress.redis.data
+    http.status = 200
+    await ingress.poll_once()
+    assert ingress.redis.data[f"{ingress.prefix}:offset"] == 102
+    assert bot.answer_callback_query.await_count == 2
+
+
+async def test_already_forwarded_click_does_not_repeat_progress_or_delivery():
+    ingress, bot, http = setup(callback=True)
+    await ingress.poll_once()
+    await ingress.poll_once()
+    assert len(http.calls) == 1
+    bot.answer_callback_query.assert_awaited_once()
+
+
+async def test_callback_progress_timeout_does_not_block_forward(caplog):
+    ingress, bot, http = setup(callback=True)
+    bot.answer_callback_query.side_effect = TimeoutError("private exception content")
+    await ingress.poll_once()
+    assert len(http.calls) == 1
+    assert ingress.redis.data[f"{ingress.prefix}:offset"] == 102
+    assert "private exception content" not in caplog.text
 
 
 async def test_expired_callback_does_not_replay_click(caplog):

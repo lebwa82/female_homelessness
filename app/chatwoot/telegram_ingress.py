@@ -82,20 +82,21 @@ class Ingress:
             if offset is not None and update.update_id < offset:
                 continue
             started = time.monotonic()
+            if update.callback_query:
+                try:
+                    await self.bot.answer_callback_query(
+                        update.callback_query.id, text="Обрабатываю выбор…", request_timeout=2,
+                    )
+                except (TelegramAPIError, TimeoutError) as error:
+                    # Progress is best-effort, not an acknowledgement of delivery.
+                    # An expired toast or timeout must not prevent storing the click.
+                    logger.warning("Callback acknowledgement failed kind=%s", type(error).__name__)
             await self.forward(update)
             # A successful HTTP response means Rails has enqueued the native job.
             # Persist before requesting the next batch (Telegram's acknowledgement).
             await self.redis.set(f"{self.prefix}:offset", update.update_id + 1)
             logger.info("Update forwarded id=%s latency_ms=%s", update.update_id,
                         round((time.monotonic() - started) * 1000))
-            if update.callback_query:
-                try:
-                    await self.bot.answer_callback_query(
-                        update.callback_query.id, request_timeout=10
-                    )
-                except TelegramAPIError as error:
-                    # An expired spinner must not replay an already stored click.
-                    logger.warning("Callback acknowledgement failed kind=%s", type(error).__name__)
         await self.redis.set(f"{self.prefix}:last_poll", int(time.time()))
         return len(updates)
 
