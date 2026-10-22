@@ -13,6 +13,11 @@ module NevidimyTurnTiming
   LISTENER_SPANS = %i[ui_message_created ui_conversation_updated bot_message_created bot_conversation_updated].freeze unless const_defined?(:LISTENER_SPANS, false)
   SPANS = ([:message_builder] + CALLBACKS + LISTENER_SPANS).freeze unless const_defined?(:SPANS, false)
   SQL_KINDS = %i[schema cached uncached].freeze unless const_defined?(:SQL_KINDS, false)
+  TIMELINE_LIMIT = 64 unless const_defined?(:TIMELINE_LIMIT, false)
+
+  def self.wall_ms
+    (Time.now.to_f * 1000).to_i
+  end
 
   def self.monotonic
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -45,7 +50,7 @@ module NevidimyTurnTiming
 
   def self.start
     scope = {
-      started: monotonic,
+      started: monotonic, started_at_ms: wall_ms, timeline: [], timeline_dropped: 0,
       spans: SPANS.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] },
       sql: SQL_KINDS.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] }
     }
@@ -53,28 +58,68 @@ module NevidimyTurnTiming
     scope[:process_gc_started] = process_gc_time
     scope[:process_allocated_started] = process_allocated_objects
     scope
-  rescue StandardError
+  rescue StandardError, NotImplementedError
     nil
   end
 
   def self.measure(name)
     scope = Thread.current[SCOPE_KEY]
     started = monotonic if scope
-  rescue StandardError
+    snapshot = start_span(scope, name, started) if scope
+  rescue StandardError, NotImplementedError
     yield
   else
     begin
       yield
     ensure
-      record_span(scope, name, started) if scope
+      record_span(scope, name, started, snapshot) if scope
     end
   end
 
-  def self.record_span(scope, name, started)
+  def self.sql_totals(scope)
+    values = SQL_KINDS.map { |kind| scope.fetch(:sql).fetch(kind) }
+    [values.sum { |value| value.fetch(:count) }, values.sum { |value| value.fetch(:elapsed_ms) }]
+  end
+
+  def self.start_span(scope, name, started)
+    return unless SPANS.include?(name)
+    if scope.fetch(:timeline).length >= TIMELINE_LIMIT
+      scope[:timeline_dropped] += 1
+      return
+    end
+
+    offset = (started - scope.fetch(:started)) * 1000
+    raise ArgumentError unless offset.finite? && offset >= 0
+
+    entry = { span: name, start_ms: offset.round(3) }
+    snapshot = { entry: entry, cpu: thread_cpu_time, sql: sql_totals(scope) }
+    # Reserve in start order, so enclosing spans precede their nested work.
+    scope[:timeline] << entry
+    snapshot
+  rescue StandardError
+    scope[:timeline_dropped] += 1 if scope.is_a?(Hash) && scope[:timeline_dropped].is_a?(Integer)
+    nil
+  end
+
+  def self.record_span(scope, name, started, snapshot = nil)
+    finished = monotonic
+    elapsed = (finished - started) * 1000
+    return unless elapsed.finite? && elapsed >= 0
+
     bucket = scope[:spans].fetch(name)
     bucket[:count] += 1
-    bucket[:elapsed_ms] += (monotonic - started) * 1000
-  rescue StandardError
+    bucket[:elapsed_ms] += elapsed
+    return unless snapshot
+
+    cpu = counter_delta(snapshot[:cpu], thread_cpu_time, 1_000_000.0)
+    count, sql_elapsed = sql_totals(scope).zip(snapshot[:sql]).map { |current, previous| current - previous }
+    offset = (finished - scope.fetch(:started)) * 1000
+    return unless offset.finite? && offset.round(3) >= snapshot[:entry][:start_ms] &&
+                  count.is_a?(Integer) && count >= 0 && sql_elapsed.finite? && sql_elapsed >= 0
+
+    snapshot[:entry].merge!(end_ms: offset.round(3), sql_count: count, sql_elapsed_ms: sql_elapsed.round(3))
+    snapshot[:entry][:thread_cpu_ms] = cpu unless cpu.nil?
+  rescue StandardError, NotImplementedError
     # Telemetry must not replace a native return value or exception.
     nil
   end
@@ -115,18 +160,35 @@ module NevidimyTurnTiming
     end
   end
 
+  def self.timeline(scope)
+    scope.fetch(:timeline).first(TIMELINE_LIMIT).select do |entry|
+      entry.is_a?(Hash) && SPANS.include?(entry[:span]) &&
+        %i[start_ms end_ms sql_elapsed_ms].all? { |key| entry[key].is_a?(Numeric) && entry[key].finite? && entry[key] >= 0 } &&
+        entry[:end_ms] >= entry[:start_ms] && entry[:sql_count].is_a?(Integer) && entry[:sql_count] >= 0
+    end.map do |entry|
+      # Never export snapshot baselines or fields supplied by native work.
+      row = entry.slice(:span, :start_ms, :end_ms, :thread_cpu_ms, :sql_count, :sql_elapsed_ms)
+      cpu = row[:thread_cpu_ms]
+      row.delete(:thread_cpu_ms) unless cpu.is_a?(Numeric) && cpu.finite? && cpu >= 0
+      row
+    end
+  end
+
   def self.finish(scope, controller, completed:)
     thread_cpu_ms = counter_delta(scope[:thread_cpu_started], thread_cpu_time, 1_000_000.0)
     # These two counters cover the whole process, not just this request when
     # threads overlap. Do not enable/change GC accounting or trigger collection.
     process_gc_ms = counter_delta(scope[:process_gc_started], process_gc_time, 1_000_000.0)
     process_allocated = counter_delta(scope[:process_allocated_started], process_allocated_objects)
+    timeline = timeline(scope)
     # Reconstruct the event from fixed keys; never serialize request/model data.
     event = {
       event: scope[:input_job] == true ? 'nevidimy_telegram_input_timing' : 'nevidimy_atomic_turn_timing',
+      started_at_ms: scope.fetch(:started_at_ms), finished_at_ms: wall_ms,
       elapsed_ms: ((monotonic - scope.fetch(:started)) * 1000).round(3),
       spans: counters(scope.fetch(:spans), SPANS),
-      sql: counters(scope.fetch(:sql), SQL_KINDS)
+      sql: counters(scope.fetch(:sql), SQL_KINDS), timeline: timeline,
+      timeline_dropped: scope.fetch(:timeline_dropped) + scope.fetch(:timeline).length - timeline.length
     }
     event[:thread_cpu_ms] = thread_cpu_ms unless thread_cpu_ms.nil?
     event[:process_gc_ms] = process_gc_ms unless process_gc_ms.nil?
@@ -138,7 +200,7 @@ module NevidimyTurnTiming
     status = controller.response.status if completed && controller
     event[:http_status] = status if status.is_a?(Integer) && status.between?(100, 599)
     Rails.logger.info(event.to_json)
-  rescue StandardError
+  rescue StandardError, NotImplementedError
     nil
   end
 

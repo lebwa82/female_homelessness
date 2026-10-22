@@ -91,6 +91,7 @@ class NevidimyAtomicTurnLiveProbe
       if message.is_a?(String) && message.start_with?('{"event":"nevidimy_atomic_turn_timing"')
         event = JSON.parse(message)
         allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status
+                     started_at_ms finished_at_ms timeline timeline_dropped
                      thread_cpu_ms process_gc_ms process_allocated_objects]
         raise NevidimyAtomicTurnLiveProbe::Failure, 'timing_extra_fields' unless (event.keys - allowed).empty?
         events << event

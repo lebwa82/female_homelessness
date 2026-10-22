@@ -83,6 +83,27 @@ Telegram job с теми же SQL/CPU/GC-счётчиками и числовы�
 дельты всего процесса и при параллельных запросах включают работу других threads.
 Недоступные или некорректные счётчики пропускаются, настройки GC не меняются.
 
+Для восстановления waterfall у native timing event есть `started_at_ms` и
+`finished_at_ms` (Unix milliseconds). В `timeline` сохраняется не более 64
+вызовов из фиксированного списка spans: имя `span`, смещения `start_ms` /
+`end_ms` относительно начала root scope, `sql_count`, `sql_elapsed_ms` и,
+если доступен, `thread_cpu_ms`. Переполнение учитывается в `timeline_dropped`.
+Смещения и длительности основаны на monotonic clock; абсолютное время нужно
+только для связи с другими процессами. Записи упорядочены по началу.
+
+Вложенные spans, их SQL и CPU inclusive: их **нельзя складывать** с родителем.
+Разность wall time и thread CPU — не доказанное I/O: туда могут входить
+планирование, ожидание блокировок/GVL и другие паузы. Текст SQL, параметры,
+сообщения, URL, headers и credentials в эти поля не попадают.
+
+Один trace сопоставляется по техническим incoming/outgoing message IDs с
+ingress timestamp, существующими enqueue/start/finish логами ActiveJob и
+`nevidimy_telegram_send`. `Message.created_at` — момент создания строки, а
+не доказательство завершённого commit/callbacks или постановки доставки.
+Поэтому интервал от этой метки до Telegram accepted нельзя целиком называть
+очередью. Сравнивать следует одну и ту же границу для одного события;
+сумма медиан отдельных этапов не является реальным waterfall.
+
 Нативный Telegram sender переиспользует проверенные HTTPS-соединения через
 существующий прокси, без автоматического повтора неоднозначного POST. Его
 content-free лог `nevidimy_telegram_send` отдельно показывает `http_elapsed_ms`,

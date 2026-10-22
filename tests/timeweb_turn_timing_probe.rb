@@ -294,11 +294,20 @@ report[:reload_idempotency] = true
 
 class << NevidimyTurnTiming
   alias_method :probe_real_monotonic, :monotonic
+  alias_method :probe_real_wall_ms, :wall_ms
 
   def monotonic
     raise 'PRIVATE_SENTINEL' if Thread.current[:probe_clock_failure]
+    return Thread.current[:probe_monotonic_values].shift if Thread.current[:probe_monotonic_values]
 
     probe_real_monotonic
+  end
+
+  def wall_ms
+    raise Thread.current[:probe_wall_failure] if Thread.current[:probe_wall_failure]
+    return Thread.current[:probe_wall_values].shift if Thread.current[:probe_wall_values]
+
+    probe_real_wall_ms
   end
 end
 Thread.current[:probe_clock_failure] = true
@@ -321,6 +330,23 @@ ensure
   Thread.current[:probe_clock_failure] = nil
 end
 verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'active clock failure scope leaked')
+[RuntimeError.new('PRIVATE_SENTINEL'), NotImplementedError.new('PRIVATE_SENTINEL')].each do |wall_failure|
+  before = Rails.logger.events.length
+  Thread.current[:probe_wall_failure] = wall_failure
+  wall_failed = controller_class.new
+  verify(wall_failed.create == :native_controller_return && wall_failed.calls == 1, 'wall clock failure changed native return')
+  Thread.current[:probe_wall_failure] = nil
+  begin
+    controller_class.new(failure: failure, fail_at: :send_reply,
+                         gate: -> { Thread.current[:probe_wall_failure] = wall_failure }).create
+  rescue ProbeFailure => caught
+    verify(caught.equal?(failure), 'wall clock failure replaced native exception')
+  ensure
+    Thread.current[:probe_wall_failure] = nil
+  end
+  verify(Rails.logger.events.length == before && Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?,
+         'wall clock failure logged or leaked scope')
+end
 report[:clock_failure_is_optional] = true
 
 previous = Object.new
@@ -346,7 +372,8 @@ report[:thread_scope_isolation] = true
 
 module ProbeResourceCounters
   def self.read(name)
-    value = Thread.current[:probe_resource_counters].fetch(name).shift
+    samples = Thread.current[:probe_resource_counters].fetch(name)
+    value = samples.length > 1 ? samples.shift : samples.first
     raise value if value.is_a?(Exception)
 
     value
@@ -357,6 +384,9 @@ class << Process
   alias_method :probe_native_clock_gettime, :clock_gettime
 
   def clock_gettime(clock, *units)
+    if clock == Process::CLOCK_THREAD_CPUTIME_ID && Thread.current[:probe_cpu_reads]
+      Thread.current[:probe_cpu_reads] += 1
+    end
     if clock == Process::CLOCK_THREAD_CPUTIME_ID && Thread.current[:probe_resource_counters]
       return ProbeResourceCounters.read(:cpu)
     end
@@ -432,7 +462,8 @@ verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'resource failure lea
 report[:resource_apis_and_failures_are_optional] = true
 
 Thread.current[:probe_resource_counters] = {
-  cpu: [100_000_000, 120_000_000, 150_000_000, 200_000_000],
+  cpu: [100_000_000, 120_000_000] + Array.new(16, 120_000_000) + [150_000_000] +
+       Array.new(16, 150_000_000) + [200_000_000],
   gc: [1_000_000_000, 1_100_000_000, 1_120_000_000, 1_200_000_000],
   allocations: [1000, 1100, 1120, 1200]
 }
@@ -456,7 +487,8 @@ invalid_status = controller_class.new
 invalid_status.response.status = 'PRIVATE_SENTINEL'
 invalid_status.create
 verify(!Rails.logger.events.last.key?('http_status'), 'invalid status logged')
-allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status thread_cpu_ms process_gc_ms process_allocated_objects]
+allowed = %w[event started_at_ms finished_at_ms elapsed_ms spans sql timeline timeline_dropped
+             outgoing_message_id http_status thread_cpu_ms process_gc_ms process_allocated_objects]
 verify(Rails.logger.events.all? { |event| (event.keys - allowed).empty? &&
                                       event['event'] == 'nevidimy_atomic_turn_timing' }, 'event allowlist')
 verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'sensitive sentinel logged')
@@ -540,5 +572,128 @@ verify(Rails.logger.events.all? { |event| (event.keys - allowed).empty? &&
        %w[nevidimy_atomic_turn_timing nevidimy_telegram_input_timing].include?(event['event']) }, 'input event allowlist')
 verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'input sensitive sentinel logged')
 report[:input_nesting_and_content_free_allowlist] = true
+
+Thread.current[:probe_monotonic_values] = [10.0, 10.1, 10.2, 10.4, 10.7, 11.0]
+Thread.current[:probe_wall_values] = [1_700_000_000_000, 1_700_000_001_000]
+Thread.current[:probe_resource_counters] = {
+  cpu: [1_000_000_000, 1_010_000_000, 1_020_000_000, 1_040_000_000, 1_070_000_000, 1_100_000_000],
+  gc: [0, 0], allocations: [0, 0]
+}
+scope = NevidimyTurnTiming.start
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+begin
+  result = NevidimyTurnTiming.measure(:message_builder) do
+    ActiveSupport::Notifications.emit(ProbeSqlPayload.new, 0.001)
+    NevidimyTurnTiming.measure(:ui_message_created) do
+      ActiveSupport::Notifications.emit(ProbeSqlPayload.new('SCHEMA'), 0.002)
+      :nested_return
+    end
+  end
+  verify(result == :nested_return, 'timeline changed nested return')
+ensure
+  Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+end
+NevidimyTurnTiming.finish(scope, nil, completed: true)
+waterfall = Rails.logger.events.last
+parent, child = waterfall['timeline']
+verify(waterfall['started_at_ms'] == 1_700_000_000_000 && waterfall['finished_at_ms'] == 1_700_000_001_000 &&
+       waterfall['elapsed_ms'] == 1000.0, 'absolute correlation or monotonic root duration changed')
+verify(parent == { 'span' => 'message_builder', 'start_ms' => 100.0, 'end_ms' => 700.0,
+                   'thread_cpu_ms' => 60.0, 'sql_count' => 2, 'sql_elapsed_ms' => 3.0 } &&
+       child == { 'span' => 'ui_message_created', 'start_ms' => 200.0, 'end_ms' => 400.0,
+                  'thread_cpu_ms' => 20.0, 'sql_count' => 1, 'sql_elapsed_ms' => 2.0 },
+       'nested timeline ordering, inclusive CPU or SQL deltas changed')
+verify(waterfall['spans']['message_builder'] == { 'count' => 1, 'elapsed_ms' => 600.0 } &&
+       waterfall['spans']['ui_message_created'] == { 'count' => 1, 'elapsed_ms' => 200.0 } &&
+       waterfall['thread_cpu_ms'] == 100.0 && waterfall['timeline_dropped'].zero?, 'nested metrics summed or aggregate schema changed')
+Thread.current[:probe_monotonic_values] = nil
+Thread.current[:probe_wall_values] = nil
+Thread.current[:probe_resource_counters] = nil
+report[:timeline_has_absolute_root_times_and_ordered_inclusive_span_deltas] = true
+
+Thread.current[:probe_cpu_reads] = 0
+scope = NevidimyTurnTiming.start
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+begin
+  (NevidimyTurnTiming::TIMELINE_LIMIT + 3).times do
+    NevidimyTurnTiming.measure(:send_reply) { ActiveSupport::Notifications.emit(ProbeSqlPayload.new) }
+  end
+ensure
+  Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+end
+NevidimyTurnTiming.finish(scope, nil, completed: true)
+bounded = Rails.logger.events.last
+verify(bounded['timeline'].length == 64 && bounded['timeline_dropped'] == 3 &&
+       bounded['spans']['send_reply']['count'] == 67 && bounded['sql']['uncached']['count'] == 67,
+       'timeline overflow lost native aggregates or exceeded bound')
+verify(Thread.current[:probe_cpu_reads] == 130, 'timeline overflow kept sampling extra resource counters')
+Thread.current[:probe_cpu_reads] = nil
+report[:timeline_limit_drops_only_detail_and_bounds_resource_sampling] = true
+
+scope = NevidimyTurnTiming.start
+scope[:timeline].freeze
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+begin
+  verify(NevidimyTurnTiming.measure(:send_reply) { :native_return } == :native_return, 'timeline allocation failure changed return')
+  begin
+    NevidimyTurnTiming.measure(:send_reply) { raise failure }
+  rescue ProbeFailure => caught
+    verify(caught.equal?(failure), 'timeline failure replaced native exception')
+  end
+ensure
+  Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+end
+NevidimyTurnTiming.finish(scope, nil, completed: true)
+verify(Rails.logger.events.last['timeline'].empty? && Rails.logger.events.last['timeline_dropped'] == 2 &&
+       Rails.logger.events.last['spans']['send_reply']['count'] == 2, 'failed detail lost original span aggregates')
+
+scope = NevidimyTurnTiming.start
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+begin
+  verify(NevidimyTurnTiming.measure(:send_reply) { scope[:timeline].last.freeze; :native_return } == :native_return,
+         'timeline recording failure changed return')
+  begin
+    NevidimyTurnTiming.measure(:send_reply) { scope[:timeline].last.freeze; raise failure }
+  rescue ProbeFailure => caught
+    verify(caught.equal?(failure), 'timeline recording failure replaced native exception')
+  end
+  verify(NevidimyTurnTiming.measure('PRIVATE_SENTINEL') { :native_return } == :native_return, 'unknown span changed return')
+ensure
+  Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+end
+NevidimyTurnTiming.finish(scope, nil, completed: true)
+verify(Rails.logger.events.last['timeline'].empty? && Rails.logger.events.last['timeline_dropped'] == 2 &&
+       Rails.logger.events.last['spans']['send_reply']['count'] == 2, 'partial or unknown detail was exported')
+report[:timeline_failure_and_unknown_spans_never_change_native_work] = true
+
+scope = NevidimyTurnTiming.start
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+begin
+  NevidimyTurnTiming.measure(:send_reply) { :native_return }
+ensure
+  Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+end
+scope[:timeline].first[:unsafe] = opaque
+scope[:timeline].first[:thread_cpu_ms] = Float::NAN
+scope[:timeline] << { span: :send_reply, start_ms: 0.0, end_ms: Float::INFINITY, sql_count: 0, sql_elapsed_ms: 0.0 }
+NevidimyTurnTiming.finish(scope, nil, completed: true)
+sanitized = Rails.logger.events.last
+verify(sanitized['timeline'].length == 1 && sanitized['timeline_dropped'] == 1 &&
+       !sanitized['timeline'].first.key?('thread_cpu_ms') && !sanitized['timeline'].first.key?('unsafe'),
+       'malformed or unrecognized detail was exported')
+
+timeline_fields = %w[span start_ms end_ms sql_count sql_elapsed_ms thread_cpu_ms]
+verify(Rails.logger.events.all? { |event|
+  event['started_at_ms'].is_a?(Integer) && event['finished_at_ms'].is_a?(Integer) &&
+    event['started_at_ms'].positive? && event['finished_at_ms'].positive? &&
+    event['timeline'].length <= 64 && event['timeline_dropped'].is_a?(Integer) && event['timeline_dropped'] >= 0 &&
+    event['timeline'].all? { |row|
+      (row.keys - timeline_fields).empty? && NevidimyTurnTiming::SPANS.map(&:to_s).include?(row['span']) &&
+        row.reject { |key, _value| key == 'span' }.values.all? { |value| value.is_a?(Numeric) && value.finite? && value >= 0 } &&
+        row['sql_count'].is_a?(Integer) && row['end_ms'] >= row['start_ms'] && row['end_ms'] <= event['elapsed_ms']
+    }
+}, 'timeline numeric or fixed-key allowlist')
+verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'timeline exposed sensitive metadata')
+report[:timeline_exports_only_bounded_fixed_names_and_safe_numbers] = true
 
 puts JSON.generate(report)
