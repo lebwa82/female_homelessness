@@ -1,5 +1,22 @@
 # Project agent rules
 
+## Delivery and verification
+
+- Answer in the user's language, concisely; use feminine forms in Russian. Distinguish verified results, inference and remaining work. Report local checks, Git publication and live production verification separately.
+- For implementation, finish the smallest in-scope change, relevant regression checks and final diff/status. Diagnosis or review alone does not authorize implementation. Preserve unrelated dirty and untracked work.
+- Prefer maintained project tools and installed skills. Repair only prerequisites needed for the requested outcome; optional tooling or an unavailable knowledge base must not block independent work.
+- Retain background operation IDs, await completion and inspect results. Read back uncertain external writes before retrying.
+
+## Local workflow and skills
+
+- This checkout is a standalone Python project on macOS. Use scoped `ya tool ast-index` for unfamiliar symbols when available, then scoped `rg` for literals, configuration or an empty symbol lookup. Inspect an outline before reading a slice of a source file over 500 lines. Arcadia VCS/build instructions apply only in an actual Arcadia checkout.
+- Run project Python commands through `uv run`. Choose deterministic tests that cover changed behavior and business invariants; use `-q --tb=short` for safety-sensitive tests. Check available targets in `justfile`, keeping its legacy deployment targets subject to the Timeweb rules below.
+- For Chatwoot acceptance, read `~/.codex/skills/chatwoot-bot-testing/SKILL.md`; for deployment, read `docs/deploy-timeweb-from-mac.md`; for runtime operations, read `docs/chatwoot-operations.md`. Read only references relevant to the requested work.
+- Skills imported from Betelgeuse are user-level tools. Follow this project's execution and safety boundaries when a skill has broader instructions. Installing a skill does not authorize its hooks, telemetry, daemon, automatic memory writes or external effects; preserve existing opt-ins and disabled skills.
+- Betelgeuse (`betelgeuse.klg.yp-c.yandex.net`) is a development VM and the skill source. It is separate from the Timeweb production target below. Use existing SSH access for requested VM files; local `/Users/lebwa82/...` paths remain on the Mac.
+- Protect secrets through maintained helpers and read `~/.stefania/agent-core/references/safety.md` before credential handling. Keep local MCP, authentication and integration settings; transfer skill packages without credentials. Verify agent or MCP configuration changes in a fresh process before claiming they work.
+- For notes or past decisions, read `~/.codex/instructions/notes.md`. Self-contained code or configuration edits do not require unrelated history research. Personal memory writes require an explicit user request.
+
 ## Git delivery
 
 - Standing user authorization: after completing requested project changes and relevant checks, commit the in-scope changes and push them to `origin/main` without asking again. Preserve unrelated unfinished work, integrate remote updates non-destructively, and verify that the remote branch contains the delivered commits. Never force-push.
@@ -16,6 +33,8 @@
 - `just prod-host`, `scripts.resolve_prod_host`, `just deploy-prod`, `scripts/deploy_chatwoot_test.sh`, `activate.py` and `women-help-*.service` are legacy Yandex/Podman tooling. Do not use them for active production operations. Do not restart `women-help-bot.service`.
 - Do not use another VM unless the user explicitly changes the project target. Current runtime access is separate from these project records; never claim that recorded deployment state proves live connectivity.
 - The user cancelled cloud-access integration on 2026-10-20. Deploy these changes from the user's Mac using its existing authorized API/SSH access; follow `docs/deploy-timeweb-from-mac.md`. Do not make cloud secret bindings, a new VM, or a VPN a prerequisite. Old access-handoff notes are task-local artifacts, not deployment instructions.
+
+## Agent execution and sensitive material
 
 - Default: perform implementation, review, and verification in the primary agent process; do not use sub-agents.
 - User-approved exception (2026-10-03): one isolated Chatwoot testing agent may prepare the test plan and run local, non-network tests. Start it with no inherited turns and a neutral technical brief. It may edit only its test-plan document; no credentials, customer data, runtime edits, remote mutations, deployment, or further delegation. The primary agent configures the CLI and performs authorized live tests in isolated test conversations. This exception does not authorize other delegated work.
