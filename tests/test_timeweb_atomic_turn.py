@@ -21,4 +21,4 @@ def test_atomic_turn_initializer_with_synthetic_controller_and_orm_contracts():
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert len(report) == 11 and all(report.values())
+    assert len(report) == 12 and all(report.values())

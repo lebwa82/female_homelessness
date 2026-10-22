@@ -22,8 +22,16 @@ module NevidimyAtomicTurn
   end
 
   def self.reply(conversation, input_id)
+    # Native Chatwoot uses `store ... coder: JSON`: on the installed version
+    # the jsonb value is a JSON *string*, not an object. Read through the model
+    # coder instead of querying a JSON key that silently misses that encoding.
+    # Only outgoing rows newer than this input can belong to its turn; do not
+    # reload the conversation history or depend on a particular DB encoding.
     conversation.messages.where(message_type: :outgoing, private: false)
-                .where("content_attributes ->> 'bot_turn_key' = ?", "message:#{input_id}").pick(:id)
+                .where('id > ?', input_id).select(:id, :content_attributes).detect do |message|
+      attributes = message.content_attributes
+      attributes.is_a?(Hash) && attributes['bot_turn_key'] == "message:#{input_id}"
+    end&.id
   end
 
   def self.eligible?(conversation, input_id)

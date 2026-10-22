@@ -81,6 +81,8 @@ class AgentBotInbox
 end
 
 class Relation
+  include Enumerable
+
   def initialize(messages)
     @messages = messages
   end
@@ -90,8 +92,6 @@ class Relation
                  @messages.select do |message|
                    filter.all? { |key, value| message.public_send(key).to_s == value.to_s }
                  end
-               elsif filter == "content_attributes ->> 'bot_turn_key' = ?"
-                 @messages.select { |message| message.content_attributes['bot_turn_key'] == argument }
                elsif filter == 'id > ?'
                  @messages.select { |message| message.id > argument }
                else
@@ -106,6 +106,15 @@ class Relation
 
   def first
     @messages.first
+  end
+
+  def select(*fields)
+    verify(fields == [:id, :content_attributes], 'reply lookup fetched unnecessary columns')
+    self
+  end
+
+  def each(&block)
+    @messages.each(&block)
   end
 
   def exists?
@@ -451,6 +460,24 @@ duplicate = commit(successful, payload(successful, version: 'stale')).response.f
 verify(duplicate == { id: created[:id], outcome: 'duplicate' }, 'duplicate was not idempotent before stale/eligibility checks')
 verify(successful.writes == before_writes && successful.rows.size == before_rows, 'duplicate partially mutated conversation')
 report['duplicate_delivery_is_idempotent'] = true
+
+encoded = Conversation.new
+decoded = message(14, :outgoing, false, 'AgentBot', 'message:10')
+# The production store coder exposes a Hash even though the raw jsonb kind is
+# string. The relation deliberately has no raw JSON-key predicate support.
+decoded.raw_content_attributes = JSON.generate(decoded.content_attributes)
+decoded.define_singleton_method(:content_attributes) { JSON.parse(raw_content_attributes) }
+encoded.rows.concat([
+  message(9, :outgoing, false, 'AgentBot', 'message:10'),
+  message(11, :outgoing, true, 'AgentBot', 'message:10'),
+  message(12, :incoming, false, 'Contact', 'message:10'),
+  message(13, :outgoing, false, 'AgentBot', 'message:other'),
+  decoded
+])
+verify(NevidimyAtomicTurn.reply(encoded, 10) == 14, 'encoded store reply was missed or wrong turn matched')
+decoded.raw_content_attributes = 'null'
+verify(NevidimyAtomicTurn.reply(encoded, 10).nil?, 'non-object decoded metadata matched a turn')
+report['serialized_store_reply_lookup_is_scoped_and_decoded'] = true
 
 failed = Conversation.new
 before_attributes, before_version = failed.custom_attributes.dup, failed.updated_at
