@@ -190,6 +190,7 @@ class AgentContext:
     catalog: tuple[dict[str, Any], ...] = ()
     knowledge: tuple[str, ...] = ()
     pending_offer: str | None = None
+    new_certificates_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -582,9 +583,19 @@ def format_safety_context(context: AgentContext, current_user_text: str) -> str:
 def format_agent_context(context: AgentContext, transcript: str) -> str:
     catalog = "\n".join(f"- {item}" for item in context.catalog) or "- каталог пока не нужен"
     knowledge = "\n".join(f"- {item}" for item in context.knowledge) or "- проверенной справки нет"
+    availability = (
+        "Сейчас новые сертификаты недоступны. "
+        "Не предлагай новый сертификат и не обещай его выдачу или сроки. "
+        "Уже отправленный сертификат можно обсуждать. "
+        "Не предлагай автоматически повторную выдачу или повторную заявку. "
+        "Учитывай сообщения об уже оказанной помощи. "
+        "Благодарность или просьба о дальнейшей поддержке не означает новую заявку. "
+        "Не утверждай получение или использование только по наличию PDF.\n\n"
+        if context.new_certificates_unavailable else ""
+    )
     return (
         f"Состояние диалога: {context.state}\npending_offer: {context.pending_offer or 'none'}\n\n"
-        f"Доступная помощь:\n{catalog}\n\n"
+        f"{availability}Доступная помощь:\n{catalog}\n\n"
         f"Проверенная информация:\n{knowledge}\n\nИстория:\n{transcript}"
     )
 

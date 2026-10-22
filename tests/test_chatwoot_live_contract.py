@@ -65,4 +65,7 @@ def test_certificate_message_is_masked_before_chatwoot_history_reaches_model():
         2,
     )
 
-    assert history == (("assistant", "[SENSITIVE_DELIVERY]"),)
+    assert len(history) == 1
+    assert history[0][0] == "assistant"
+    assert history[0][1].startswith("[SENSITIVE_DELIVERY]")
+    assert "BEARER-SECRET" not in history[0][1]

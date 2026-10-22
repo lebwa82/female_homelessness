@@ -4,10 +4,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from test_chatwoot_service import StubGateway, ordinary_evaluation
 
+from app.catalog import CERTIFICATE_AID_IDS
 from app.chatwoot.certificates import CertificateInventory
 from app.domain import IncomingMessage, PolicyEffect, ResolvedTurn
 from app.scenario import AIDS, SCREENS, render
-from app.service import ConversationService
+from app.service import ConversationService, available_catalog
 from app.store import CertificateClaimResult, InMemoryConversationStore, StoredCertificate
 
 PAUSED_TEXT = (
@@ -37,6 +38,43 @@ async def flow():
     await service.start(incoming(1, "/start"))
     record = await store.get(incoming(1))
     return service, record, store
+
+
+@pytest.mark.parametrize("html_scenario,selected_certificate", (
+    (False, False), (True, False), (True, True),
+))
+async def test_model_context_respects_new_certificate_pause(
+    monkeypatch, html_scenario, selected_certificate,
+):
+    store = InMemoryConversationStore()
+    gateway = StubGateway(ordinary_evaluation())
+    contexts = []
+
+    async def evaluate(context):
+        contexts.append(context)
+        return gateway.result
+
+    monkeypatch.setattr(gateway, "evaluate", evaluate)
+    service = ConversationService(store=store, gateway=gateway, html_scenario=html_scenario)
+    await service.start(incoming(1, "/start"))
+    if selected_certificate:
+        await service.handle_callback(incoming(2), "continue")
+        await service.handle_callback(incoming(3), "need:food_money")
+        paused = await service.handle_callback(incoming(4), "aid:food_card")
+        assert paused.text == PAUSED_TEXT
+
+    await service.handle_text(incoming(5, "Расскажите о доступной помощи."))
+
+    assert len(contexts) == 1
+    context = contexts[0]
+    assert context.catalog == tuple(
+        item.model_dump(mode="json") for item in available_catalog()
+        if not html_scenario or item.fulfillment != "certificate"
+    )
+    certificate_ids = {item["id"] for item in context.catalog if item["fulfillment"] == "certificate"}
+    assert certificate_ids == (set() if html_scenario else CERTIFICATE_AID_IDS)
+    assert context.new_certificates_unavailable is html_scenario
+    assert not store.aid_requests
 
 
 @pytest.mark.parametrize("need,aid_id", (
