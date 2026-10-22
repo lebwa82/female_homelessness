@@ -356,7 +356,7 @@ def test_timeweb_telegram_is_explicit_and_uses_minimal_credentials(compose_comma
     assert mount["bind"].get("create_host_path", False) is False
     assert services["telegram-ingress"]["environment"]["TELEGRAM_PROXY_URL"] == "http://telegram-proxy:3128"
     assert services["telegram-ingress"]["depends_on"]["telegram-proxy"]["condition"] == "service_started"
-    assert int(services["telegram-ingress"]["mem_limit"]) == 256 * 1024 * 1024
+    assert int(services["telegram-ingress"]["mem_limit"]) == 512 * 1024 * 1024
     assert services["telegram-ingress"]["healthcheck"]["test"][-1] == "app.chatwoot.telegram_healthcheck"
     for name in ("telegram-proxy", "telegram-ingress"):
         assert not services[name].get("ports")

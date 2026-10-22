@@ -216,7 +216,7 @@ services:
           create_host_path: false
 
   telegram-ingress:
-    mem_limit: 256m
+    mem_limit: 512m
     environment:
       TELEGRAM_PROXY_URL: http://telegram-proxy:3128
     depends_on:
