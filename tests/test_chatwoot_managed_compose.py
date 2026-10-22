@@ -304,6 +304,7 @@ def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None
             ("atomic_turn.rb", "/app/config/initializers/nevidimy_atomic_turn.rb"),
             ("telegram_transport.rb", "/app/config/initializers/nevidimy_telegram_transport.rb"),
             ("turn_timing.rb", "/app/config/initializers/nevidimy_turn_timing.rb"),
+            ("webhook_presenter_fast_path.rb", "/app/config/initializers/nevidimy_webhook_presenter_fast_path.rb"),
         ):
             mount = next(v for v in services[name]["volumes"] if v["target"] == target)
             assert mount["read_only"] is True

@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
-from app.chatwoot.contracts import ConversationChanged, parse_conversation_changed
+from app.chatwoot.app import AgentBotWebhook
+from app.chatwoot.contracts import (
+    ConversationChanged,
+    MessageDeliveryChanged,
+    parse_conversation_changed,
+    parse_message_delivery_changed,
+)
+from app.chatwoot.service import ChatwootAgentService
+from tests.test_chatwoot_app import FakeRequest
 
 
 def _delta(previous: object, current: object) -> dict[str, object]:
@@ -19,6 +32,74 @@ def _event(previous: object, current: object) -> dict[str, object]:
         "id": 23,
         "changed_attributes": [{"custom_attributes": _delta(previous, current)}],
     }
+
+
+@pytest.mark.parametrize("status", ["sent", "unknown", "queued"])
+def test_noop_and_unknown_delivery_statuses_do_not_become_work(status):
+    payload = {
+        "event": "message_updated",
+        "id": 91,
+        "message_type": "outgoing",
+        "status": status,
+        "conversation": {"id": 23},
+    }
+    assert parse_message_delivery_changed(payload) is None
+
+
+@pytest.mark.parametrize("status", ["delivered", "read", "failed"])
+def test_actionable_delivery_statuses_keep_message_identity(status):
+    payload = {
+        "event": "message_updated",
+        "id": 91,
+        "message_type": "outgoing",
+        "status": status,
+        "conversation": {"id": 23},
+    }
+    assert parse_message_delivery_changed(payload) == MessageDeliveryChanged(91, 23, status)
+
+
+async def test_sent_update_never_enqueues_or_locks_but_failure_still_runs_callback():
+    class CountingLock(asyncio.Lock):
+        acquisitions = 0
+
+        async def acquire(self):
+            self.acquisitions += 1
+            return await super().acquire()
+
+    mark_failed = AsyncMock()
+    mark_delivered = AsyncMock()
+    service = ChatwootAgentService(
+        object(),
+        gateway=object(),
+        certificate_mark_delivery_failed=mark_failed,
+        certificate_mark_delivered=mark_delivered,
+    )
+    lock = CountingLock()
+    service._locks[23] = lock
+    queue = SimpleNamespace(enqueue=AsyncMock())
+    webhook = AgentBotWebhook(service, route_secret="route", event_queue=queue)
+    payload = {
+        "event": "message_updated",
+        "id": 91,
+        "message_type": "outgoing",
+        "status": "sent",
+        "conversation": {"id": 23},
+    }
+    assert (await webhook.handle(FakeRequest(json.dumps(payload).encode(), {}))).status == 204
+    assert queue.enqueue.await_count == 0
+    assert lock.acquisitions == 0
+    assert mark_failed.await_count == 0
+    assert mark_delivered.await_count == 0
+
+    payload["status"] = "failed"
+    assert (await webhook.handle(FakeRequest(json.dumps(payload).encode(), {}))).status == 204
+    assert queue.enqueue.await_count == 1
+    failed = queue.enqueue.await_args.args[0]
+    assert failed == MessageDeliveryChanged(91, 23, "failed")
+    assert not await service.process(failed)
+    assert lock.acquisitions == 1
+    mark_failed.assert_awaited_once_with(91)
+    assert mark_delivered.await_count == 0
 
 
 @pytest.mark.parametrize(

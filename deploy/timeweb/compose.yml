@@ -65,6 +65,14 @@ x-turn-timing: &turn-timing
   bind:
     create_host_path: false
 
+x-webhook-presenter-fast-path: &webhook-presenter-fast-path
+  type: bind
+  source: ../timeweb/webhook_presenter_fast_path.rb
+  target: /app/config/initializers/nevidimy_webhook_presenter_fast_path.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   chatwoot:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
@@ -86,6 +94,7 @@ services:
       - *telegram-transport
       - *atomic-turn
       - *turn-timing
+      - *webhook-presenter-fast-path
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
       test:
@@ -118,6 +127,7 @@ services:
       - *telegram-transport
       - *atomic-turn
       - *turn-timing
+      - *webhook-presenter-fast-path
 
   agent-bot:
     # The offline PII-model probe already peaks near 370 MiB before HTTP work.

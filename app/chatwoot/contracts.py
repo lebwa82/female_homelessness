@@ -74,7 +74,8 @@ def parse_message_delivery_changed(payload: object) -> MessageDeliveryChanged | 
         return None
     status = payload.get("status")
     conversation = payload.get("conversation")
-    if status not in {"sent", "delivered", "read", "failed"} or not isinstance(
+    # "sent" has no service-side effect; ignore it before durable enqueue/locks.
+    if status not in {"delivered", "read", "failed"} or not isinstance(
         conversation, dict
     ):
         return None

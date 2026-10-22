@@ -171,15 +171,15 @@ async def test_signed_assignment_event_reaches_owner_synchronization(name: str) 
     assert service.events == [ConversationChanged(23)]
 
 
-async def test_each_delivery_status_is_processed_once_in_legacy_mode():
+async def test_each_actionable_delivery_status_is_processed_once_in_legacy_mode():
     service = RecordingService()
     webhook = AgentBotWebhook(service, route_secret="route")
-    for status in ("sent", "delivered", "read", "read"):
+    for status in ("sent", "failed", "delivered", "read", "read"):
         payload = {**_payload(), "event": "message_updated", "message_type": "outgoing",
                    "status": status}
         await webhook.handle(FakeRequest(json.dumps(payload).encode(), {}))
     await webhook.shutdown(None)
-    assert [e.status for e in service.events] == ["sent", "delivered", "read"]
+    assert [e.status for e in service.events] == ["failed", "delivered", "read"]
 
 
 async def test_failed_delivery_is_not_marked_as_success_and_can_be_redelivered(monkeypatch):
