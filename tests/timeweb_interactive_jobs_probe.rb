@@ -144,10 +144,18 @@ Sidekiq.send(:remove_const, :VERSION)
 Sidekiq.const_set(:VERSION, '7.3.10')
 report['unknown_or_custom_configuration_retains_native_processing'] = true
 
+# The pinned sidekiq_alive gem registers its own two-thread capsule in an
+# earlier startup hook, after application initializers configured the workers.
+config.capsule('sidekiq-alive') do |health|
+  health.queues = ['sidekiq-alive']
+  health.concurrency = 2
+end
 config.hooks.fetch(:startup).call
 event = config.logger.instance_variable_get(:@last)
 verify(event.keys.sort == %w[background_concurrency concurrency event interactive_concurrency isolated pid], 'unsafe startup metadata')
-verify(event['isolated'] && event['concurrency'] == 2 && event['pid'] == Process.pid, 'invalid startup proof')
+verify(event['isolated'] && event['concurrency'] == 4 && event['background_concurrency'] == 1 &&
+       event['interactive_concurrency'] == 1 && event['pid'] == Process.pid, 'invalid startup proof')
+verify(config.capsules.fetch('sidekiq-alive').concurrency == 2, 'native health workers changed')
 report['startup_reports_actual_process_configuration_without_payloads'] = true
 
 Rails::RELOADER.prepare
