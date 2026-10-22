@@ -19,6 +19,7 @@ from app.chatwoot.contracts import (
     MessageDeliveryChanged,
     StaffMessage,
     parse_staff_message,
+    validated_button_snapshot,
 )
 from app.chatwoot.fast_buttons import (
     CAPABILITY,
@@ -188,16 +189,22 @@ class ChatwootAgentService:
                 lock.release()
 
     async def _process_fast_button(self, event: IncomingChatwootMessage) -> bool | None:
-        for _ in range(2):
-            snapshot = await self._api.button_snapshot(event.conversation_id, event.message_id)
+        supplied = validated_button_snapshot(event.button_snapshot, event)
+        if supplied and supplied["conversation"]["custom_attributes"].get("scenario_pending_input"):
+            supplied = None  # Legacy partial sends require authoritative receipt/cleanup reads.
+        for attempt in range(2):
+            optimistic = supplied is not None and attempt == 0
+            snapshot = supplied if optimistic else await self._api.button_snapshot(
+                event.conversation_id, event.message_id,
+            )
             if snapshot.get("capability") != CAPABILITY:
                 return None
             # Legacy partial sends can still need their pending checkpoint cleared.
-            if snapshot.get("reply_id") and not (
+            if not optimistic and snapshot.get("reply_id") and not (
                 (snapshot.get("conversation") or {}).get("custom_attributes") or {}
             ).get("scenario_pending_input"):
                 return False
-            if not snapshot.get("eligible"):
+            if not optimistic and not snapshot.get("eligible"):
                 return None
             conversation = snapshot.get("conversation")
             if (not isinstance(conversation, dict) or conversation.get("id") != event.conversation_id
@@ -217,12 +224,18 @@ class ChatwootAgentService:
             try:
                 planned = await candidate._process_locked(event)
             except UnsupportedFastButton:
+                if optimistic:
+                    continue  # Untrusted freshness: reread before any fallback.
                 return None  # Everything so far was an in-memory, effect-free plan.
             if not planned or buffered.reply is None:
+                if optimistic:
+                    continue  # Never acknowledge from a queued snapshot alone.
                 return None
             notes = buffered.notes
             if notes and (not isinstance(snapshot.get("features"), list)
                           or PRIVATE_NOTES_FEATURE not in snapshot["features"]):
+                if optimistic:
+                    continue
                 return None
             try:
                 message_id = await self._api.commit_button(

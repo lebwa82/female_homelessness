@@ -72,6 +72,29 @@ class AgentBot
   def webhook_data
     { id: id }
   end
+
+  def secret
+    'neutral-test-signing-secret'
+  end
+end
+
+module AgentBots
+  class WebhookJob
+    class << self
+      attr_accessor :jobs, :queue, :failure
+
+      def set(queue:)
+        self.queue = queue
+        self
+      end
+
+      def perform_later(*args, **options)
+        raise failure if failure
+
+        (self.jobs ||= []) << { args: args, options: options, queue: queue }
+      end
+    end
+  end
 end
 
 class BaseListener
@@ -234,6 +257,55 @@ Dir.mktmpdir('conversation-projection-') do |directory|
     end
   end
   ENV[projection::OPT_IN] = '1'
+  # Waiting-timer events remain durable, signed jobs; only their queue changes.
+  # Other deltas and recipients must retain native high-priority delivery.
+  ENV[projection::BACKGROUND_WAITING] = '1'
+  now, later = Time.utc(2026, 10, 22, 10), Time.utc(2026, 10, 22, 11)
+  valid = { 'waiting_since' => [now, nil], 'updated_at' => [now, later] }
+  variants = [valid, valid.merge('waiting_since' => [nil, now])]
+  variants.each do |delta|
+    conversation = Conversation.new([internal, external])
+    event = OpenStruct.new(data: { conversation: conversation, changed_attributes: delta })
+    listener.jobs.clear
+    AgentBots::WebhookJob.jobs = []
+    listener.conversation_updated(event)
+    verify(listener.jobs.length == 1 && listener.jobs.first[:bot_id] == external.id, 'external_priority_changed')
+    captured = AgentBots::WebhookJob.jobs
+    verify(captured.length == 1 && captured.first[:queue] == :medium, 'waiting_job_missing_or_wrong_queue')
+    job = captured.first
+    verify(job[:args][0] == approved && job[:args][2] == :agent_bot_webhook, 'waiting_target_or_type_changed')
+    verify(job[:options][:secret] == internal.secret && job[:options][:delivery_id].match?(/\A[0-9a-f-]{36}\z/), 'waiting_signature_identity_changed')
+    verify(job[:args][1] == { id: conversation.display_id, event: 'conversation_updated',
+                            changed_attributes: listener.send(:extract_changed_attributes, event) }, 'waiting_payload_changed')
+  end
+  rejected = [nil, {}, valid.reject { |key, _| key == 'updated_at' },
+              valid.merge('status' => ['pending', 'open']), valid.merge('team_id' => [nil, 7]),
+              valid.merge('assignee_id' => [nil, 9]), valid.merge('unknown' => [false, true]),
+              valid.merge('custom_attributes' => [{}, { 'reply_owner' => 'human' }]),
+              valid.merge('waiting_since' => [now, later]), valid.merge('waiting_since' => [nil, nil]),
+              valid.merge('waiting_since' => ['not-a-time', nil]), valid.merge('updated_at' => [nil, later])]
+  rejected.each do |delta|
+    listener.jobs.clear
+    AgentBots::WebhookJob.jobs = []
+    listener.conversation_updated(OpenStruct.new(data: { conversation: Conversation.new([internal]), changed_attributes: delta }))
+    verify(listener.jobs.length == 1 && AgentBots::WebhookJob.jobs.empty?, 'unknown_or_important_delta_reprioritized')
+  end
+  verify(!projection.waiting_only?([{ 'waiting_since' => { previous_value: now, current_value: nil } }] * 2), 'duplicate_delta_reprioritized')
+  %w[0 1].each do |enabled|
+    ENV[projection::BACKGROUND_WAITING] = enabled
+    listener.jobs.clear
+    AgentBots::WebhookJob.jobs = []
+    AgentBots::WebhookJob.failure = 'enqueue_failed' if enabled == '1'
+    begin
+      listener.conversation_updated(OpenStruct.new(data: { conversation: Conversation.new([internal]), changed_attributes: valid }))
+      verify(enabled == '0' && listener.jobs.length == 1, 'enqueue_failure_swallowed')
+    rescue RuntimeError => error
+      verify(error.message == 'enqueue_failed' && listener.jobs.empty? && AgentBots::WebhookJob.jobs.empty?, 'enqueue_retried_or_failure_changed')
+    ensure
+      AgentBots::WebhookJob.failure = nil
+    end
+  end
+  ENV[projection::BACKGROUND_WAITING] = '0'
   fallback = Conversation.new([internal])
   fallback.define_singleton_method(:webhook_data) { super() }
   listener.conversation_updated(OpenStruct.new(data: { conversation: fallback }))
