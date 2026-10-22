@@ -554,27 +554,32 @@ async def test_private_notification_falls_back_without_speculative_live_effects(
     assert gateway.calls == 0
 
 
-async def test_certificate_claim_occurs_only_once_in_normal_fallback(fast_runtime):
+async def test_certificate_resume_occurs_only_once_in_normal_fallback(fast_runtime):
     api, service, gateway = fast_runtime
-    api.fast_buttons = False
-    await service.process(event("need:food_money", 43))
-    await service.process(event("aid:food_card", 44))
+    api.conversation["custom_attributes"].update(
+        workflow_state="certificate_preview", pending_aid_id="food_card",
+        scenario={"screen": "s31", "variant": 0},
+    )
     api.legacy_calls.clear()
     api.fast_buttons = True
-    claims = []
+    resumes = []
 
-    async def claim(aid_id, issuance_key, recipient_id):
+    async def resume(aid_id, issuance_key, recipient_id):
         assert "history" in api.legacy_calls  # The established path has begun.
-        claims.append((aid_id, issuance_key, recipient_id))
+        resumes.append((aid_id, issuance_key, recipient_id))
         return CertificateClaimResult("unavailable")
 
-    service._certificate_claim = claim
+    async def forbidden_claim(*args):
+        raise AssertionError("new certificate claim must not run")
+
+    service._certificate_claim = forbidden_claim
+    service._certificate_resume = resume
     before_replies = len(api.replies)
     assert await service.process(event("certificate:confirm", 45))
     assert api.snapshot_calls == [(23, 45)]
     assert not api.commits
-    assert len(claims) == 1
-    assert claims[0][0] == "food_card" and claims[0][2] == 7
+    assert len(resumes) == 1
+    assert resumes[0][0] == "food_card" and resumes[0][2] == 7
     assert api.legacy_calls.count("reply") == 1
     assert len(api.replies) == before_replies + 1
     assert gateway.calls == 0

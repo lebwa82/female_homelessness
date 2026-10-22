@@ -174,6 +174,7 @@ class InMemoryConversationStore:
     aid_requests: list[StoredAidRequest] = field(default_factory=list)
     certificates: list[StoredCertificate] = field(default_factory=list)
     certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None
+    certificate_resume: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None
     escalations: list[StoredEscalation] = field(default_factory=list)
     followup_jobs: list[StoredFollowupJob] = field(default_factory=list)
     agent_runs: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
@@ -395,6 +396,23 @@ class InMemoryConversationStore:
         escalation = StoredEscalation(record.id, request)
         self.escalations.append(escalation)
         return escalation
+
+    async def resume_aid_request(
+        self, record: ConversationRecord, aid_id: str, request_key: str | None,
+    ) -> StoredAidRequest:
+        """Recover a persisted certificate request; never create a new reservation."""
+        if request_key is not None:
+            for request in self.aid_requests:
+                if request.conversation_id == record.id and request.request_key == request_key:
+                    return request
+        result = CertificateClaimResult("unavailable")
+        if self.certificate_resume is not None and request_key is not None:
+            result = await self.certificate_resume(aid_id, request_key, record.platform_user_id)
+        return StoredAidRequest(
+            id=0, conversation_id=record.id, aid_id=aid_id,
+            contact_method=None, contact_value=None, request_key=request_key,
+            certificate=result.certificate, certificate_status=result.status,
+        )
 
     async def create_aid_request(
         self,

@@ -36,6 +36,7 @@ from app.navigation import back_update, checkpoint_update, previous_checkpoint
 from app.policy import HUMAN_HANDOFF_PROMPT, POLICY_VERSION, model_risk_assessment, resolve_turn
 from app.scenario import (
     AID_SCREENS,
+    CERTIFICATES,
     HUMAN,
     NEEDS,
     ScenarioFlow,
@@ -849,15 +850,20 @@ class ConversationService:
         if aid_id is None or get_aid_item(aid_id) is None:
             return await self._state_turn(record)
         contact_method = method.value if method else record.pending_contact_method
-        request = await self.store.create_aid_request(
-            record,
-            aid_id,
-            contact_method,
-            contact_value,
-            city=record.pending_city,
-            district=record.pending_district,
-            request_key=request_key,
-        )
+        if self.scenario_flow and aid_id in CERTIFICATES:
+            request = await self.store.resume_aid_request(record, aid_id, request_key)
+            if request.certificate_status in {"unavailable", "review_required"}:
+                return await self.scenario_flow.show(record, "i8", certificate_paused=True)
+        else:
+            request = await self.store.create_aid_request(
+                record,
+                aid_id,
+                contact_method,
+                contact_value,
+                city=record.pending_city,
+                district=record.pending_district,
+                request_key=request_key,
+            )
         if request.certificate_status == "already_issued":
             if self.scenario_flow:
                 return await self.scenario_flow.show(record, "i9", variant=1)

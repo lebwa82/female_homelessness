@@ -24,6 +24,15 @@ CONSULTATION_IDS = ("psychologist_3_sessions", "legal_consultation", "peer_consu
 TEXT_TARGETS = {"s35d": "s35c", "s36": "s36b", "s511": "s52", "s57": "s57",
                 "s6": "s61", "s74": "s75", "i1": "i1"}
 HUMAN = Choice(id="human", label="💬 Поговорить с человеком")
+CERTIFICATE_PAUSED_TEXT = (
+    "За последние сутки мы получили больше обращений, чем можем обработать и пока что, "
+    "к сожалению, сертификаты недоступны. Из того, что можно выбрать прямо сейчас:"
+)
+CERTIFICATE_PAUSED_CONSULTATIONS = (
+    ("Консультация психолога", "s34"),
+    ("Консультация юриста", "s35"),
+    ("Разговор с консультанткой по теме зависимости/созависимости", "s38"),
+)
 
 
 def copy_text(screen: str, variant: int = 0) -> str:
@@ -63,6 +72,13 @@ def button_indices(screen: str, variant: int) -> range:
 def render(screen: str, *, revision: int = 0, context: dict | None = None,
            variant: int | None = None) -> AgentTurn:
     context = context or {}
+    if screen == "i8" and context.get("certificate_paused"):
+        choices = tuple(
+            Choice(id=f"sc:i8:{index}:{revision}", label=label)
+            for index, (label, _) in enumerate(CERTIFICATE_PAUSED_CONSULTATIONS)
+        )
+        return AgentTurn(text=CERTIFICATE_PAUSED_TEXT, choices=(*choices, HUMAN),
+                         audit={"scenario_screen": screen})
     variant = variant_for(screen, context) if variant is None else variant
     texts = SCREENS[screen]["texts"]
     body = copy_text(screen, variant)
@@ -103,7 +119,12 @@ class ScenarioFlow:
         self.store = service.store
 
     async def show(self, record, screen: str, *, variant: int | None = None, **context):
+        if screen in AIDS and AIDS[screen] in CERTIFICATES:
+            screen, variant = "i8", 0
+            context = {**context, "certificate_paused": True}
         data = {**record.scenario, **context, "screen": screen, "awaiting_text": False}
+        if screen != "i8":
+            data.pop("certificate_paused", None)
         data["variant"] = variant_for(screen, data) if variant is None else variant
         state = ConversationState.SCENARIO.value
         if screen in NEEDS and screen != "s36":
@@ -141,6 +162,9 @@ class ScenarioFlow:
             if not screen or callback not in {c.id for c in self.current(record).choices}:
                 return await self.service._state_turn(record)
             index = int(callback.split(":")[2])
+            if screen == "i8" and data.get("certificate_paused"):
+                target = CERTIFICATE_PAUSED_CONSULTATIONS[index][1]
+                return await self.show(record, target, draft_key=request_key, job_key=None)
             button = SCREENS[screen]["buttons"][index]
             target, label = button["target"], button["label"]
             if data.get("job_key"):
@@ -159,8 +183,7 @@ class ScenarioFlow:
                 await self.store.update(record, scenario={**data, "awaiting_text": True})
                 return self.current(record)
             if screen == "i8" and index == 0:
-                await self.event(record, "certificate_waitlist", request_key, aid_id=data.get("aid_id"))
-                return await self.show(record, "i8", variant=1, submitted=True)
+                return await self.show(record, "i8", variant=0, certificate_paused=True)
             if target == "s561":
                 await self.event(record, "consultation_retry", request_key,
                                  request_id=data.get("request_key"), aid_id=data.get("aid_id"))
@@ -201,6 +224,12 @@ class ScenarioFlow:
                 return await self.show(record, target, draft_key=request_key, job_key=None)
         if callback == "support:psychologist" and record.pending_offer == "psychologist":
             return await self.show(record, "s34", draft_key=request_key, job_key=None)
+        if callback == "certificate:request" and (
+            screen == "i8" or record.state == ConversationState.CERTIFICATE_UNAVAILABLE.value
+        ):
+            if screen == "i8" and (data.get("submitted") or data.get("variant") == 1):
+                return self.current(record)
+            return await self.show(record, "i8", variant=0, certificate_paused=True)
         if callback == "human":
             await self.service._human_turn(record, "button", request_key=request_key)
             return await self.show(record, "i1")

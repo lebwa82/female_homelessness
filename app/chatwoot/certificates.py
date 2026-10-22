@@ -138,24 +138,9 @@ class CertificateInventory:
                 text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key}
             )
             params = {"issuance_key": issuance_key, "recipient_hash": recipient_hash}
-            existing = (await connection.execute(text("""
-                SELECT c.*, p.provider FROM women_help_pdf_certificates c
-                JOIN women_help_certificate_pools p ON p.id = c.pool_id
-                WHERE c.issuance_key = :issuance_key AND c.recipient_hash = :recipient_hash
-            """), params)).mappings().first()
+            existing = await self._existing_claim(connection, params)
             if existing is not None:
-                return CertificateClaimResult("issued", _certificate(existing))
-            prior = (await connection.execute(text("""
-                SELECT c.*, p.provider FROM women_help_pdf_certificates c
-                JOIN women_help_certificate_pools p ON p.id = c.pool_id
-                WHERE c.recipient_hash = :recipient_hash LIMIT 1
-            """), params)).mappings().first()
-            if prior is not None:
-                # A transport failure must be retryable with the same bearer
-                # document, never by taking another certificate from the pool.
-                if prior["status"] in {"reserved", "failed"}:
-                    return CertificateClaimResult("issued", _certificate(prior))
-                return CertificateClaimResult("already_issued")
+                return existing
             row = (await connection.execute(text("""
                 SELECT c.id FROM women_help_pdf_certificates c
                 JOIN women_help_certificate_pool_aids a ON a.pool_id = c.pool_id
@@ -179,6 +164,40 @@ class CertificateInventory:
                 RETURNING c.*, p.provider
             """), {"id": row.id, "aid_id": aid_id, **params})).mappings().one()
             return CertificateClaimResult("issued", _certificate(issued))
+
+    async def resume(
+        self, aid_id: str, issuance_key: str, recipient_id: int,
+    ) -> CertificateClaimResult:
+        """Read an existing delivery without reserving any new inventory."""
+        params = {"issuance_key": issuance_key,
+                  "recipient_hash": self._recipient_hash(recipient_id)}
+        async with self._engine.connect() as connection:
+            existing = await self._existing_claim(connection, params, exact_only=True)
+            return existing or CertificateClaimResult("unavailable")
+
+    async def _existing_claim(
+        self, connection, params: dict[str, str], *, exact_only: bool = False,
+    ) -> CertificateClaimResult | None:
+        existing = (await connection.execute(text("""
+            SELECT c.*, p.provider FROM women_help_pdf_certificates c
+            JOIN women_help_certificate_pools p ON p.id = c.pool_id
+            WHERE c.issuance_key = :issuance_key AND c.recipient_hash = :recipient_hash
+        """), params)).mappings().first()
+        if existing is not None:
+            return CertificateClaimResult("issued", _certificate(existing))
+        if exact_only:
+            return None
+        prior = (await connection.execute(text("""
+            SELECT c.*, p.provider FROM women_help_pdf_certificates c
+            JOIN women_help_certificate_pools p ON p.id = c.pool_id
+            WHERE c.recipient_hash = :recipient_hash LIMIT 1
+        """), params)).mappings().first()
+        if prior is not None:
+            # A transport failure must reuse the existing bearer document.
+            if prior["status"] in {"reserved", "failed"}:
+                return CertificateClaimResult("issued", _certificate(prior))
+            return CertificateClaimResult("already_issued")
+        return None
 
     async def mark_submitted(self, issuance_key: str, message_id: int) -> None:
         async with self._engine.begin() as connection:

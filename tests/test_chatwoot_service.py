@@ -237,15 +237,17 @@ async def test_bot_owned_conversation_replies_through_chatwoot_with_human_button
 
 
 @pytest.mark.asyncio
-async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() -> None:
+async def test_reserved_certificate_is_resumed_and_delivered_directly_through_chatwoot() -> None:
     api = FakeChatwoot()
     api.conversation["custom_attributes"].update(
-        workflow_state="choosing_aid", workflow_need="food_money"
+        workflow_state="certificate_preview", workflow_need="food_money",
+        pending_aid_id="food_card", scenario={"screen": "s31", "variant": 0},
     )
-    claimed: list[tuple[str, str]] = []
+    resumed: list[tuple[str, str]] = []
+    api.notes.append("existing certificate request")
 
-    async def claim(aid_id: str, issuance_key: str, recipient_id: int) -> CertificateClaimResult:
-        claimed.append((aid_id, issuance_key))
+    async def resume(aid_id: str, issuance_key: str, recipient_id: int) -> CertificateClaimResult:
+        resumed.append((aid_id, issuance_key))
         assert recipient_id == 7
         certificate = StoredCertificate(
             aid_id=aid_id,
@@ -257,22 +259,18 @@ async def test_certificate_is_claimed_and_delivered_directly_through_chatwoot() 
         )
         return CertificateClaimResult("issued", certificate)
 
-    service = ChatwootAgentService(api, certificate_claim=claim)
-    preview = await service.process(event("aid:food_card"))
-    assert preview is True
-    assert len(claimed) == 0
+    service = ChatwootAgentService(api, certificate_resume=resume)
     handled = await service.process(
         event("certificate:confirm", 42)
     )
 
     assert handled is True
-    assert len(claimed) == 1
-    assert claimed[0][0] == "food_card"
+    assert len(resumed) == 1
+    assert resumed[0][0] == "food_card"
     assert "TEST-CODE" in api.replies[-1]["text"]
     assert api.replies[-1]["sensitive_content"] == "certificate"
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s31b"
-    assert "Вид помощи: Сертификат на продукты" in api.notes[0]
-    assert "Способ связи: не указан\nКонтакт: не указан\nМесто: не указано" in api.notes[0]
+    assert api.notes == ["existing certificate request"]
 
 
 @pytest.mark.asyncio
@@ -282,7 +280,8 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
 ) -> None:
     api = FakeChatwoot()
     api.conversation["custom_attributes"].update(
-        workflow_state="choosing_aid", workflow_need="food_money"
+        workflow_state="certificate_preview", workflow_need="food_money",
+        pending_aid_id="food_card", scenario={"screen": "s31", "variant": 0},
     )
     payload = b"%PDF-1.7 test"
 
@@ -299,7 +298,7 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
         async def delete(self, ref):  # pragma: no cover - protocol completeness
             raise AssertionError
 
-    async def claim(aid_id: str, issuance_key: str, recipient_id: int):
+    async def resume(aid_id: str, issuance_key: str, recipient_id: int):
         return CertificateClaimResult("issued", StoredCertificate(
             aid_id=aid_id, provider="Пятёрочка", nominal_rubles=250,
             activation_code="TEST-NUMBER", serial_number="TEST-NUMBER",
@@ -319,12 +318,10 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
     api.wait_for_external_delivery = delivery
     service = ChatwootAgentService(
         api,
-        certificate_claim=claim,
+        certificate_resume=resume,
         certificate_store=Store(),
         certificate_mark_submitted=lambda key, message_id: _append(submitted, key, message_id),
     )
-    await service.process(event("aid:food_card", 41))
-    api.replies.clear()
     handled = await service.process(event("certificate:confirm", 42))
 
     if takeover:
@@ -366,25 +363,25 @@ async def test_certificate_delivery_webhook_updates_only_by_message_id() -> None
 
 
 @pytest.mark.asyncio
-async def test_chatwoot_certificate_limit_survives_clear_and_allows_legal_help() -> None:
+async def test_chatwoot_certificate_pause_survives_clear_and_allows_legal_help() -> None:
     api = FakeChatwoot()
     api.conversation["custom_attributes"].update(
-        workflow_state="choosing_aid", workflow_need="food_money"
+        workflow_state="certificate_preview", workflow_need="food_money",
+        pending_aid_id="food_card", scenario={"screen": "s31", "variant": 0},
     )
-    recipients: set[int] = set()
+    recipients: set[int] = {7}
+    resumed = []
 
-    async def claim(aid_id: str, _key: str, recipient_id: int) -> CertificateClaimResult:
-        if recipient_id in recipients:
-            return CertificateClaimResult("already_issued")
-        recipients.add(recipient_id)
+    async def resume(aid_id: str, key: str, recipient_id: int) -> CertificateClaimResult:
+        assert recipient_id in recipients
+        resumed.append(key)
         return CertificateClaimResult("issued", StoredCertificate(
             aid_id=aid_id, provider="Test", nominal_rubles=300,
             activation_code="TEST-FIRST", expires_at=datetime.now(UTC) + timedelta(days=30),
             serial_number="TEST-SERIAL",
         ))
 
-    service = ChatwootAgentService(api, certificate_claim=claim)
-    await service.process(event("aid:food_card", 50))
+    service = ChatwootAgentService(api, certificate_resume=resume)
     await service.process(event("certificate:confirm", 51))
     await service.process(event("/clear", 52))
     await service.process(event("continue", 53))
@@ -393,8 +390,9 @@ async def test_chatwoot_certificate_limit_survives_clear_and_allows_legal_help()
     await service.process(event("certificate:confirm", 56))
 
     assert len(recipients) == 1
-    assert api.conversation["custom_attributes"]["scenario"]["screen"] == "i9"
-    assert api.conversation["custom_attributes"]["scenario"]["variant"] == 1
+    assert len(resumed) == 1
+    assert api.conversation["custom_attributes"]["scenario"]["screen"] == "i8"
+    assert api.conversation["custom_attributes"]["scenario"]["certificate_paused"] is True
     assert "TEST-FIRST" not in api.replies[-1]["text"]
     await service.process(event("extra:legal", 57))
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s35"

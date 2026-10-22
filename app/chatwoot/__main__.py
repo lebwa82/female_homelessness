@@ -54,7 +54,7 @@ def main() -> None:
     service = ChatwootAgentService(
         client,
         duty_team_id=settings.chatwoot_duty_team_id,
-        certificate_claim=inventory.claim,
+        certificate_resume=inventory.resume,
         certificate_store=certificate_store,
         certificate_mark_submitted=inventory.mark_submitted,
         certificate_mark_failed=inventory.mark_failed,

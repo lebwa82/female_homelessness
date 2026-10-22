@@ -11,6 +11,7 @@ from app.config import settings
 from app.domain import IncomingMessage
 from app.scenario import (
     AIDS,
+    CERTIFICATE_PAUSED_TEXT,
     CERTIFICATES,
     CONSULTATION_IDS,
     SCREENS,
@@ -116,13 +117,14 @@ async def test_write_button_does_not_submit_an_empty_request(flow, screen, targe
 
 
 @pytest.mark.asyncio
-async def test_waitlist_is_opt_in_and_ack_has_no_repeat_submission(flow):
+async def test_old_unsent_waitlist_draft_shows_paused_availability_without_submission(flow):
     service, record, store = flow
     turn = await service.scenario_flow.show(record, "i8", aid_id="food_card")
     assert not store.actions
     reply = await service.scenario_flow.callback(record, choice_for(turn, "i8"), "submit")
-    assert store.actions[0][3]["kind"] == "certificate_waitlist"
-    assert not any(c.id.startswith("sc:") for c in reply.choices)
+    assert not store.actions
+    assert reply.text == CERTIFICATE_PAUSED_TEXT
+    assert record.scenario["certificate_paused"] is True
 
 
 @pytest.mark.asyncio

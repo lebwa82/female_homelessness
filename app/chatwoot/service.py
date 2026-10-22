@@ -123,6 +123,7 @@ class ChatwootAgentService:
         duty_team_id: int | None = None,
         queue_router: QueueRouter | None = None,
         certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
+        certificate_resume: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
         certificate_store: CertificateObjectStore | None = None,
         certificate_mark_submitted: Callable[[str, int], Awaitable[None]] | None = None,
         certificate_mark_failed: Callable[[str], Awaitable[None]] | None = None,
@@ -136,6 +137,7 @@ class ChatwootAgentService:
         self._scenario_effects = ScenarioEffects(api, self._queues, can_route=_bot_owns)
         self._locks: dict[int, asyncio.Lock] = {}
         self._certificate_claim = certificate_claim
+        self._certificate_resume = certificate_resume
         self._certificate_store = certificate_store
         self._certificate_mark_submitted = certificate_mark_submitted
         self._certificate_mark_failed = certificate_mark_failed
@@ -210,6 +212,7 @@ class ChatwootAgentService:
                 buffered, candidate._queues, clock=self._scenario_effects.clock, can_route=_bot_owns,
             )
             candidate._certificate_claim = no_external_effect
+            candidate._certificate_resume = no_external_effect
             candidate._send_certificate = no_external_effect
             try:
                 planned = await candidate._process_locked(event)
@@ -300,7 +303,9 @@ class ChatwootAgentService:
                     "workflow": {k: copy.deepcopy(attributes.get(k)) for k in _WORKFLOW_ATTRS},
                 },
             })
-        seeded = _seed_conversation(event, conversation, messages, self._certificate_claim)
+        seeded = _seed_conversation(
+            event, conversation, messages, self._certificate_claim, self._certificate_resume,
+        )
         legacy_service = ConversationService(store=seeded.store, gateway=self._gateway,
                                              html_scenario=True)
         with timed_stage("scenario"):
@@ -712,6 +717,7 @@ def _seed_conversation(
     conversation: dict[str, Any],
     messages: tuple[dict[str, Any], ...],
     certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
+    certificate_resume: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
 ) -> _SeededConversation:
     attributes = _custom_attributes(conversation)
     incoming = IncomingMessage(
@@ -739,7 +745,8 @@ def _seed_conversation(
         scenario=attributes.get("scenario") or {},
     )
     store = InMemoryConversationStore(
-        conversations={event.contact_id: record}, certificate_claim=certificate_claim
+        conversations={event.contact_id: record}, certificate_claim=certificate_claim,
+        certificate_resume=certificate_resume,
     )
     for role, content in _history_after_epoch(messages, record.context_epoch, event.message_id):
         store.messages.append((record.id, role, content, {"context_epoch": record.context_epoch}))
