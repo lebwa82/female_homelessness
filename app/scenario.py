@@ -155,6 +155,16 @@ class ScenarioFlow:
                                       {"key": key, "kind": kind, **payload}, effect_key=key)
         return key
 
+    async def _select_aid(self, record, target: str, request_key: str):
+        aid_id = AIDS[target]
+        if aid_id in CERTIFICATES:
+            # Capture the validated selection before show replaces the preview
+            # with the paused screen and clears pending_aid_id. This action is
+            # in memory; the channel adapter commits it after ownership guards.
+            await self.event(record, "certificate_requested", request_key,
+                             aid_id=aid_id, reason="paused")
+        return await self.show(record, target, draft_key=request_key, job_key=None)
+
     async def callback(self, record, callback: str, request_key: str) -> AgentTurn | None:
         data = record.scenario
         screen = data.get("screen")
@@ -197,9 +207,9 @@ class ScenarioFlow:
             if target == "i2":
                 await self.event(record, "survey_closed", request_key, job_key=data.get("job_key"))
                 return await self.show(record, target, variant=int(not data.get("aid_id")))
-            return await self.show(record, target, **(
-                {"draft_key": request_key, "job_key": None} if target in AIDS else {}
-            ))
+            if target in AIDS:
+                return await self._select_aid(record, target, request_key)
+            return await self.show(record, target)
         if callback == "continue" and record.state == ConversationState.GREETING.value:
             return await self.show(record, "s2")
         if callback == "pause" and record.state == ConversationState.GREETING.value:
@@ -215,7 +225,7 @@ class ScenarioFlow:
             if not screen:
                 screen = next((k for k, v in NEEDS.items() if v.value == record.need), "s2")
             allowed = {b["target"] for b in SCREENS.get(screen, {}).get("buttons", [])}
-            return (await self.show(record, target, draft_key=request_key, job_key=None)
+            return (await self._select_aid(record, target, request_key)
                     if target in allowed else await self.show(record, screen))
         if callback.startswith("extra:"):
             # Migrate already-rendered buttons without creating an immediate request.

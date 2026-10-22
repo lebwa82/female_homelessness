@@ -14,6 +14,9 @@ from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.certificate_documents import CertificateObjectRef, ParsedCertificatePdf
+from app.chatwoot.certificate_requests import initialize_schema as initialize_requests_schema
+from app.chatwoot.certificate_requests import record_request
+from app.chatwoot.certificate_schema import SCHEMA_LOCK_KEY, initialize_schema
 from app.config import settings
 from app.store import CertificateClaimResult, StoredCertificate
 
@@ -30,6 +33,36 @@ class CertificatePoolStock:
     available: int
     total: int
     nearest_expiry: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalCertificateIssuance:
+    """Observed Chatwoot acceptance; never proof of document delivery or reading."""
+
+    account_id: int
+    contact_id: int
+    conversation_id: int
+    source_message_id: int
+    accepted_at: datetime
+    provider_slug: str | None = None
+    aid_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.account_id, self.contact_id, self.conversation_id, self.source_message_id,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError("historical issuance identifiers must be positive integers")
+        if self.accepted_at.tzinfo is None or self.accepted_at.utcoffset() is None:
+            raise ValueError("historical acceptance timestamp must include a timezone")
+        if self.provider_slug is not None and self.provider_slug not in POOL_AIDS:
+            raise ValueError("unknown historical certificate provider")
+        known_aids = {aid for _, aids in POOL_AIDS.values() for aid in aids}
+        if self.aid_id is not None and self.aid_id not in known_aids:
+            raise ValueError("unknown historical certificate aid")
+        if (self.provider_slug is not None and self.aid_id is not None
+                and self.aid_id not in POOL_AIDS[self.provider_slug][1]):
+            raise ValueError("historical certificate provider does not match aid")
 
 
 def database_url(password: str) -> str:
@@ -56,6 +89,9 @@ class CertificateInventory:
 
     async def initialize(self) -> None:
         async with self._engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": SCHEMA_LOCK_KEY}
+            )
             await connection.execute(text("""
                 CREATE TABLE IF NOT EXISTS women_help_certificate_pools (
                     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -110,6 +146,7 @@ class CertificateInventory:
                 ON women_help_pdf_certificates (pool_id, expires_at, id)
                 WHERE status = 'available'
             """))
+            await initialize_schema(connection)
             for slug, (provider, aid_ids) in POOL_AIDS.items():
                 pool_id = (await connection.execute(text("""
                     INSERT INTO women_help_certificate_pools (slug, provider)
@@ -122,10 +159,29 @@ class CertificateInventory:
                         INSERT INTO women_help_certificate_pool_aids (pool_id, aid_id)
                         VALUES (:pool_id, :aid_id) ON CONFLICT DO NOTHING
                     """), {"pool_id": pool_id, "aid_id": aid_id})
+            await initialize_requests_schema(connection)
 
     def _recipient_hash(self, recipient_id: int) -> str:
         identity = f"{self._account_id}:{recipient_id}".encode()
         return hmac.new(self._identity_key, identity, hashlib.sha256).hexdigest()
+
+    async def record_request(
+        self, aid_id: str, request_key: str, recipient_id: int,
+        conversation_id: int, source_message_id: int, reason: str,
+    ) -> bool:
+        """Persist certificate demand without reserving or sending a document."""
+        recipient_hash = self._recipient_hash(recipient_id)
+        lock_key = int.from_bytes(bytes.fromhex(recipient_hash[:16]), "big", signed=True)
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key}
+            )
+            return await record_request(
+                connection, account_id=self._account_id, recipient_hash=recipient_hash,
+                contact_id=recipient_id, aid_id=aid_id, request_key=request_key,
+                conversation_id=conversation_id, source_message_id=source_message_id,
+                reason=reason,
+            )
 
     async def claim(
         self, aid_id: str, issuance_key: str, recipient_id: int
@@ -144,7 +200,8 @@ class CertificateInventory:
             row = (await connection.execute(text("""
                 SELECT c.id FROM women_help_pdf_certificates c
                 JOIN women_help_certificate_pool_aids a ON a.pool_id = c.pool_id
-                WHERE a.aid_id = :aid_id AND c.status = 'available'
+                WHERE a.aid_id = :aid_id AND c.record_kind = 'certificate'
+                  AND c.status = 'available'
                   AND (c.valid_from IS NULL OR c.valid_from <= now())
                   AND c.expires_at > now()
                   AND (c.is_test OR (c.nominal_rubles = 3000
@@ -182,6 +239,7 @@ class CertificateInventory:
             SELECT c.*, p.provider FROM women_help_pdf_certificates c
             JOIN women_help_certificate_pools p ON p.id = c.pool_id
             WHERE c.issuance_key = :issuance_key AND c.recipient_hash = :recipient_hash
+              AND c.record_kind = 'certificate'
         """), params)).mappings().first()
         if existing is not None:
             return CertificateClaimResult("issued", _certificate(existing))
@@ -189,10 +247,12 @@ class CertificateInventory:
             return None
         prior = (await connection.execute(text("""
             SELECT c.*, p.provider FROM women_help_pdf_certificates c
-            JOIN women_help_certificate_pools p ON p.id = c.pool_id
+            LEFT JOIN women_help_certificate_pools p ON p.id = c.pool_id
             WHERE c.recipient_hash = :recipient_hash LIMIT 1
         """), params)).mappings().first()
         if prior is not None:
+            if prior["record_kind"] == "historical_issuance":
+                return CertificateClaimResult("already_issued")
             # A transport failure must reuse the existing bearer document.
             if prior["status"] in {"reserved", "failed"}:
                 return CertificateClaimResult("issued", _certificate(prior))
@@ -206,7 +266,7 @@ class CertificateInventory:
                 SET status = CASE WHEN status = 'delivered' THEN status ELSE 'submitted' END,
                     chatwoot_message_id = :message_id,
                     submitted_at = COALESCE(submitted_at, now())
-                WHERE issuance_key = :issuance_key
+                WHERE issuance_key = :issuance_key AND record_kind = 'certificate'
                   AND status IN ('reserved','submitted','delivered','failed')
             """), {"issuance_key": issuance_key, "message_id": message_id})
 
@@ -215,7 +275,7 @@ class CertificateInventory:
             await connection.execute(text("""
                 UPDATE women_help_pdf_certificates
                 SET status = 'delivered', delivered_at = COALESCE(delivered_at, now())
-                WHERE chatwoot_message_id = :message_id
+                WHERE chatwoot_message_id = :message_id AND record_kind = 'certificate'
                   AND status IN ('submitted','delivered','failed')
             """), {"message_id": message_id})
 
@@ -223,15 +283,85 @@ class CertificateInventory:
         async with self._engine.begin() as connection:
             await connection.execute(text("""
                 UPDATE women_help_pdf_certificates SET status = 'failed'
-                WHERE chatwoot_message_id = :message_id AND status = 'submitted'
+                WHERE chatwoot_message_id = :message_id AND record_kind = 'certificate'
+                  AND status = 'submitted'
             """), {"message_id": message_id})
 
     async def mark_failed(self, issuance_key: str) -> None:
         async with self._engine.begin() as connection:
             await connection.execute(text("""
                 UPDATE women_help_pdf_certificates SET status = 'failed'
-                WHERE issuance_key = :issuance_key AND status = 'reserved'
+                WHERE issuance_key = :issuance_key AND record_kind = 'certificate'
+                  AND status = 'reserved'
             """), {"issuance_key": issuance_key})
+
+    async def import_historical_issuances(
+        self, issuances: Iterable[HistoricalCertificateIssuance],
+    ) -> tuple[int, int]:
+        """Atomically import evidence, accepting only exact repeats of prior imports."""
+        records = tuple(issuances)
+        if any(record.account_id != self._account_id for record in records):
+            raise ValueError("historical issuance belongs to another Chatwoot account")
+        imported = duplicates = 0
+        async with self._engine.begin() as connection:
+            # Same lock as claim(), ordered for repeatable multi-recipient imports.
+            hashes = {self._recipient_hash(record.contact_id) for record in records}
+            for lock_key in sorted(
+                int.from_bytes(bytes.fromhex(value[:16]), "big", signed=True) for value in hashes
+            ):
+                await connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key}
+                )
+            for record in records:
+                values = {
+                    "account_id": record.account_id, "contact_id": record.contact_id,
+                    "conversation_id": record.conversation_id,
+                    "source_message_id": record.source_message_id,
+                    "accepted_at": record.accepted_at, "provider_slug": record.provider_slug,
+                    "selected_aid_id": record.aid_id,
+                    "recipient_hash": self._recipient_hash(record.contact_id),
+                }
+                prior = (await connection.execute(text("""
+                    SELECT c.*, p.slug AS provider_slug
+                    FROM women_help_pdf_certificates c
+                    LEFT JOIN women_help_certificate_pools p ON p.id = c.pool_id
+                    WHERE c.recipient_hash = :recipient_hash
+                       OR (c.account_id = :account_id AND c.source_message_id = :source_message_id)
+                    FOR UPDATE OF c
+                """), values)).mappings().all()
+                if prior:
+                    if (len(prior) != 1 or prior[0]["record_kind"] != "historical_issuance"
+                            or any(prior[0][key] != value for key, value in values.items())):
+                        raise ValueError("historical issuance conflicts with existing inventory")
+                    duplicates += 1
+                    continue
+                result = await connection.execute(text("""
+                    INSERT INTO women_help_pdf_certificates
+                        (record_kind, status, pool_id, recipient_hash, account_id, contact_id,
+                         conversation_id, source_message_id, accepted_at, selected_aid_id)
+                    SELECT 'historical_issuance', 'accepted', p.id, :recipient_hash,
+                           :account_id, :contact_id, :conversation_id, :source_message_id,
+                           :accepted_at, :selected_aid_id
+                    FROM (SELECT 1) AS evidence
+                    LEFT JOIN women_help_certificate_pools p ON p.slug = :provider_slug
+                    WHERE :provider_slug IS NULL OR p.id IS NOT NULL
+                    ON CONFLICT DO NOTHING RETURNING id
+                """), values)
+                if result.first() is None:
+                    raise ValueError("historical issuance conflicts with existing inventory")
+                imported += 1
+            # Requests may have arrived between deploying tracking and backfill.
+            # Reconcile them under the same locks and transaction as the history.
+            for recipient_hash in sorted(hashes):
+                await connection.execute(text("""
+                    UPDATE women_help_certificate_requests r
+                    SET status = 'fulfilled', fulfilled_certificate_id = c.id
+                    FROM women_help_pdf_certificates c
+                    WHERE r.recipient_hash = :recipient_hash AND r.status = 'waiting'
+                      AND c.recipient_hash = r.recipient_hash
+                      AND c.record_kind = 'historical_issuance'
+                """), {"recipient_hash": recipient_hash})
+        return imported, duplicates
 
     async def import_documents(
         self, documents: Iterable[tuple[ParsedCertificatePdf, CertificateObjectRef]]
@@ -336,9 +466,9 @@ class CertificateInventory:
         async with self._engine.connect() as connection:
             row = (await connection.execute(text("""
                 SELECT 1 FROM women_help_pdf_certificates
-                WHERE activation_code = :activation_code
+                WHERE record_kind = 'certificate' AND (activation_code = :activation_code
                    OR serial_number = :serial_number
-                   OR pdf_sha256 = :pdf_sha256
+                   OR pdf_sha256 = :pdf_sha256)
                 LIMIT 1
             """), {
                 "activation_code": parsed.activation_code,
@@ -363,7 +493,8 @@ class CertificateInventory:
                           AND c.expires_at > now()
                     ) AS nearest_expiry
                 FROM women_help_certificate_pools p
-                LEFT JOIN women_help_pdf_certificates c ON c.pool_id = p.id
+                LEFT JOIN women_help_pdf_certificates c
+                    ON c.pool_id = p.id AND c.record_kind = 'certificate'
                 GROUP BY p.id, p.slug, p.provider ORDER BY p.slug
             """))).mappings()
             return tuple(CertificatePoolStock(**row) for row in rows)
@@ -375,7 +506,7 @@ class CertificateInventory:
                 SET status = 'available', selected_aid_id = NULL, issuance_key = NULL,
                     recipient_hash = NULL, chatwoot_message_id = NULL,
                     reserved_at = NULL, submitted_at = NULL, delivered_at = NULL
-                WHERE is_test = true AND status <> 'available'
+                WHERE record_kind = 'certificate' AND is_test = true AND status <> 'available'
             """))
             return result.rowcount
 
@@ -383,7 +514,8 @@ class CertificateInventory:
         async with self._engine.connect() as connection:
             rows = (await connection.execute(text("""
                 SELECT pdf_bucket, pdf_object_key, pdf_version_id, pdf_sha256, pdf_size
-                FROM women_help_pdf_certificates WHERE is_test = true
+                FROM women_help_pdf_certificates
+                WHERE record_kind = 'certificate' AND is_test = true
             """))).mappings()
             return tuple(CertificateObjectRef(
                 bucket=row["pdf_bucket"], key=row["pdf_object_key"],
@@ -394,7 +526,8 @@ class CertificateInventory:
     async def purge_test_records(self) -> int:
         async with self._engine.begin() as connection:
             result = await connection.execute(
-                text("DELETE FROM women_help_pdf_certificates WHERE is_test = true")
+                text("""DELETE FROM women_help_pdf_certificates
+                        WHERE record_kind = 'certificate' AND is_test = true""")
             )
             return result.rowcount
 
