@@ -73,6 +73,14 @@ x-webhook-presenter-fast-path: &webhook-presenter-fast-path
   bind:
     create_host_path: false
 
+x-agent-bot-self-event-filter: &agent-bot-self-event-filter
+  type: bind
+  source: ../timeweb/agent_bot_self_event_filter.rb
+  target: /app/config/initializers/nevidimy_agent_bot_self_event_filter.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   chatwoot:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
@@ -95,6 +103,7 @@ services:
       - *atomic-turn
       - *turn-timing
       - *webhook-presenter-fast-path
+      - *agent-bot-self-event-filter
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
       test:
@@ -128,6 +137,7 @@ services:
       - *atomic-turn
       - *turn-timing
       - *webhook-presenter-fast-path
+      - *agent-bot-self-event-filter
 
   agent-bot:
     # The offline PII-model probe already peaks near 370 MiB before HTTP work.

@@ -185,6 +185,7 @@ verify(first['spans'].keys.sort == (['message_builder'] + Message::CALLBACK_ORDE
        'span allowlist')
 verify(first['spans'].values.all? { |value| value['count'] == 1 && value['elapsed_ms'] >= 0 }, 'native spans')
 verify(cold.native_message.order == Message::CALLBACK_ORDER, 'native callback ordering changed')
+verify(!first.key?('process_gc_ms'), 'missing GC API was not optional') unless GC.respond_to?(:total_time)
 report[:cold_native_order_and_sql] = true
 
 warm = controller_class.new(id: 124)
@@ -299,6 +300,110 @@ verify(Rails.logger.events.last['spans'].values.all? { |value| value['count'] ==
 verify(Message.private_instance_methods.include?(:send_reply), 'private callback visibility changed')
 report[:reload_idempotency] = true
 
+module ProbeResourceCounters
+  def self.read(name)
+    value = Thread.current[:probe_resource_counters].fetch(name).shift
+    raise value if value.is_a?(Exception)
+
+    value
+  end
+end
+
+class << Process
+  alias_method :probe_native_clock_gettime, :clock_gettime
+
+  def clock_gettime(clock, *units)
+    if clock == Process::CLOCK_THREAD_CPUTIME_ID && Thread.current[:probe_resource_counters]
+      return ProbeResourceCounters.read(:cpu)
+    end
+
+    probe_native_clock_gettime(clock, *units)
+  end
+end
+
+class << GC
+  alias_method :probe_native_stat, :stat
+  alias_method :probe_native_total_time, :total_time if method_defined?(:total_time)
+
+  def stat(*arguments)
+    if arguments == [:total_allocated_objects] && Thread.current[:probe_resource_counters]
+      return ProbeResourceCounters.read(:allocations)
+    end
+
+    probe_native_stat(*arguments)
+  end
+
+  def total_time
+    return ProbeResourceCounters.read(:gc) if Thread.current[:probe_resource_counters]
+    return probe_native_total_time if respond_to?(:probe_native_total_time)
+
+    raise NotImplementedError
+  end
+end
+
+def resource_samples
+  { cpu: [1_000_000_000, 1_025_000_000], gc: [2_000_000_000, 2_002_000_000], allocations: [1000, 1042] }
+end
+
+resource_fields = %w[thread_cpu_ms process_gc_ms process_allocated_objects]
+Thread.current[:probe_resource_counters] = resource_samples
+verify(controller_class.new.create == :native_controller_return, 'resource timing changed native return')
+metrics = Rails.logger.events.last
+verify(resource_fields.map { |key| metrics[key] } == [25.0, 2.0, 42], 'resource deltas or units changed')
+verify(resource_fields.all? { |key| metrics[key].finite? && metrics[key] >= 0 }, 'invalid resource delta')
+Thread.current[:probe_resource_counters] = resource_samples.transform_values { |values| [values.first, values.first] }
+controller_class.new.create
+verify(resource_fields.map { |key| Rails.logger.events.last[key] } == [0.0, 0.0, 0], 'zero resource deltas were omitted')
+report[:resource_deltas_are_finite_and_nonnegative] = true
+
+{ cpu: 'thread_cpu_ms', gc: 'process_gc_ms', allocations: 'process_allocated_objects' }.each do |counter, field|
+  [NotImplementedError.new('PRIVATE_SENTINEL'), NoMethodError.new('PRIVATE_SENTINEL'), RuntimeError.new('PRIVATE_SENTINEL'),
+   nil, 'PRIVATE_SENTINEL', Float::INFINITY, Float::NAN, -1].each do |invalid|
+    [0, 1].each do |position|
+      samples = resource_samples
+      samples[counter][position] = invalid
+      Thread.current[:probe_resource_counters] = samples
+      before = Rails.logger.events.length
+      verify(controller_class.new.create == :native_controller_return, 'optional counter changed native return')
+      metrics = Rails.logger.events.last
+      verify(Rails.logger.events.length == before + 1 && !metrics.key?(field) &&
+             (resource_fields - [field]).all? { |key| metrics.key?(key) },
+             'optional counter failure suppressed native timing or other counters')
+    end
+  end
+  samples = resource_samples
+  samples[counter] = [100, 99]
+  Thread.current[:probe_resource_counters] = samples
+  controller_class.new.create
+  verify(!Rails.logger.events.last.key?(field), 'decreasing counter was reported')
+end
+Thread.current[:probe_resource_counters] = resource_samples.transform_values { |_value| [NotImplementedError.new, NotImplementedError.new] }
+begin
+  controller_class.new(failure: failure, fail_at: :send_reply).create
+  raise 'native failure swallowed by resource timing'
+rescue ProbeFailure => caught
+  verify(caught.equal?(failure), 'resource failure replaced native exception')
+end
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'resource failure leaked request scope')
+report[:resource_apis_and_failures_are_optional] = true
+
+Thread.current[:probe_resource_counters] = {
+  cpu: [100_000_000, 120_000_000, 150_000_000, 200_000_000],
+  gc: [1_000_000_000, 1_100_000_000, 1_120_000_000, 1_200_000_000],
+  allocations: [1000, 1100, 1120, 1200]
+}
+controller_class.new(id: 127, gate: -> { controller_class.new(id: 128).create }).create
+inner, outer = Rails.logger.events.last(2)
+verify(inner['outgoing_message_id'] == 128 && outer['outgoing_message_id'] == 127, 'nested resource event ordering')
+verify(resource_fields.map { |key| inner[key] } == [30.0, 20.0, 20] &&
+       resource_fields.map { |key| outer[key] } == [100.0, 200.0, 200], 'nested resource baselines mixed')
+Thread.current[:probe_resource_counters] = resource_samples
+controller_class.new.create
+verify(resource_fields.map { |key| Rails.logger.events.last[key] } == [25.0, 2.0, 42], 'warm resource baselines leaked')
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'nested resource scope leaked')
+Thread.current[:probe_resource_counters] = nil
+report[:resource_nested_and_warm_scope_isolation] = true
+
 controller_class.new(id: 'PRIVATE_SENTINEL').create
 verify(!Rails.logger.events.last.key?('outgoing_message_id'), 'noninteger message id logged')
 controller_class.new(outgoing: false).create
@@ -307,7 +412,7 @@ invalid_status = controller_class.new
 invalid_status.response.status = 'PRIVATE_SENTINEL'
 invalid_status.create
 verify(!Rails.logger.events.last.key?('http_status'), 'invalid status logged')
-allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status]
+allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status thread_cpu_ms process_gc_ms process_allocated_objects]
 verify(Rails.logger.events.all? { |event| (event.keys - allowed).empty? &&
                                       event['event'] == 'nevidimy_atomic_turn_timing' }, 'event allowlist')
 verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'sensitive sentinel logged')

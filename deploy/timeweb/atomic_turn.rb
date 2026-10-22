@@ -90,8 +90,12 @@ module NevidimyAtomicTurn
         next nil unless incoming
         duplicate = NevidimyAtomicTurn.reply(@conversation, incoming.id)
         next { id: duplicate, outcome: 'duplicate' } if duplicate
-        next nil unless NevidimyAtomicTurn.version(@conversation) == turn[:version] &&
-                        NevidimyAtomicTurn.eligible?(@conversation, incoming.id)
+        unless NevidimyAtomicTurn.version(@conversation) == turn[:version]
+          # Exact, bounded client retry is safe only after this explicit
+          # pre-write rejection; it must fetch and replan from fresh state.
+          next { outcome: 'conflict', reason: 'stale_version' }
+        end
+        next nil unless NevidimyAtomicTurn.eligible?(@conversation, incoming.id)
         next nil if turn[:attributes].key?('context_epoch') &&
                     turn[:attributes]['context_epoch'] != (@conversation.custom_attributes['context_epoch'] || 0)
 
@@ -116,6 +120,7 @@ module NevidimyAtomicTurn
         { id: @message.id, outcome: 'committed' }
       end
       return head :conflict unless result
+      return render json: result, status: :conflict if result[:reason] == 'stale_version'
 
       render json: result
     end

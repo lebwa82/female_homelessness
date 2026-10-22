@@ -255,8 +255,8 @@ class BaseController
     @response = { status: status }
   end
 
-  def render(json:)
-    @response = { status: :ok, json: json }
+  def render(json:, status: :ok)
+    @response = { status: status, json: json }
   end
 
   def show
@@ -429,7 +429,12 @@ mutations.each do |change|
   verify(commit(conflict).response[:status] == :conflict && conflict.writes.zero? && conflict.rows.size == rows_before, 'eligibility conflict partially mutated conversation')
 end
 conflict = Conversation.new
-verify(commit(conflict, payload(conflict, version: 'stale')).response[:status] == :conflict && unchanged?(conflict), 'stale version mutated conversation')
+stale = commit(conflict, payload(conflict, version: 'stale')).response
+verify(stale[:status] == :conflict && unchanged?(conflict), 'stale version mutated conversation')
+verify(stale[:json] == { outcome: 'conflict', reason: 'stale_version' }, 'stale no-write reason missing')
+ineligible = Conversation.new
+ineligible.assignee_id = 9
+verify(!commit(ineligible).response.key?(:json), 'generic conflict advertised stale retry')
 missing = Conversation.new
 missing.rows.clear
 verify(commit(missing).response[:status] == :conflict && missing.writes.zero?, 'missing input mutated conversation')

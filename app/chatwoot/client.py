@@ -28,6 +28,13 @@ class ChatwootApiError(RuntimeError):
         self.status = status
 
 
+class StaleButtonVersion(ChatwootApiError):
+    """The native atomic commit explicitly rejected a stale read before writes."""
+
+    def __init__(self) -> None:
+        super().__init__("atomic_turn_stale_version", 409)
+
+
 @dataclass(frozen=True, slots=True)
 class BinaryAttachment:
     filename: str
@@ -119,6 +126,22 @@ class AiohttpChatwootTransport:
                 ):
                     timing.status = response.status
                     timing.request_id = response.headers.get("X-Request-Id", "")
+                    if (response.status == 409 and method == "POST" and path.endswith("/messages")
+                            and isinstance(payload, dict) and "nevidimy_atomic_turn" in payload):
+                        # Retain no response text. Only this bounded, exact native
+                        # no-write signal permits a fresh snapshot/replan.
+                        try:
+                            body = await response.content.readexactly(257)
+                        except asyncio.IncompleteReadError as error:
+                            body = error.partial
+                        if len(body) <= 256:
+                            try:
+                                conflict = json.loads(body.decode("utf-8"), object_pairs_hook=list)
+                            except (ValueError, UnicodeDecodeError):
+                                conflict = None
+                            expected = [("outcome", "conflict"), ("reason", "stale_version")]
+                            if conflict in (expected, expected[::-1]):
+                                raise StaleButtonVersion()
                     if response.status >= 400:
                         raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
                     if response.status == 204:
@@ -227,6 +250,8 @@ class ChatwootClient:
                 "POST", self._path(f"/conversations/{conversation_id}/messages"),
                 self._bot_token, payload,
             ))
+        except StaleButtonVersion:
+            raise
         except ChatwootApiError as error:
             if error.status == 409:
                 return None  # Proven conflict before any write; safe legacy reread.

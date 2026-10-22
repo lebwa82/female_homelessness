@@ -16,12 +16,41 @@ module NevidimyTurnTiming
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
+  def self.thread_cpu_time
+    Process.clock_gettime(Process::CLOCK_THREAD_CPUTIME_ID, :nanosecond)
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.process_gc_time
+    GC.total_time
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.process_allocated_objects
+    GC.stat(:total_allocated_objects)
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.counter_delta(started, finished, unit = 1)
+    return unless started.is_a?(Integer) && finished.is_a?(Integer) && started >= 0 && finished >= started
+
+    value = (finished - started) / unit
+    value.round(3) if value.finite?
+  end
+
   def self.start
-    {
+    scope = {
       started: monotonic,
       spans: SPANS.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] },
       sql: SQL_KINDS.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] }
     }
+    scope[:thread_cpu_started] = thread_cpu_time
+    scope[:process_gc_started] = process_gc_time
+    scope[:process_allocated_started] = process_allocated_objects
+    scope
   rescue StandardError
     nil
   end
@@ -81,6 +110,11 @@ module NevidimyTurnTiming
   end
 
   def self.finish(scope, controller, completed:)
+    thread_cpu_ms = counter_delta(scope[:thread_cpu_started], thread_cpu_time, 1_000_000.0)
+    # These two counters cover the whole process, not just this request when
+    # threads overlap. Do not enable/change GC accounting or trigger collection.
+    process_gc_ms = counter_delta(scope[:process_gc_started], process_gc_time, 1_000_000.0)
+    process_allocated = counter_delta(scope[:process_allocated_started], process_allocated_objects)
     # Reconstruct the event from fixed keys; never serialize request/model data.
     event = {
       event: 'nevidimy_atomic_turn_timing',
@@ -88,6 +122,9 @@ module NevidimyTurnTiming
       spans: counters(scope.fetch(:spans), SPANS),
       sql: counters(scope.fetch(:sql), SQL_KINDS)
     }
+    event[:thread_cpu_ms] = thread_cpu_ms unless thread_cpu_ms.nil?
+    event[:process_gc_ms] = process_gc_ms unless process_gc_ms.nil?
+    event[:process_allocated_objects] = process_allocated unless process_allocated.nil?
     message_id = scope[:outgoing_message_id]
     event[:outgoing_message_id] = message_id if message_id.is_a?(Integer) && message_id.positive?
     # On an exception, middleware may still change the final HTTP status.

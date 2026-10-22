@@ -37,7 +37,14 @@ class NevidimyAtomicTurnLiveProbe
     require INITIALIZER
     timing = '/run/nevidimy-check/turn_timing.rb'
     require timing if File.file?(timing)
+    %w[webhook_presenter_fast_path.rb agent_bot_self_event_filter.rb].each do |filename|
+      optional = "/run/nevidimy-check/#{filename}"
+      require optional if File.file?(optional)
+    end
     Rails.application.reloader.prepare!
+    if defined?(NevidimyAgentBotSelfEventFilter)
+      check(AgentBotListener < NevidimyAgentBotSelfEventFilter::Listener, 'self_event_filter_disabled')
+    end
     if defined?(NevidimyTurnTiming)
       ancestors = Api::V1::Accounts::Conversations::MessagesController.ancestors
       check(ancestors.index(NevidimyTurnTiming::Controller) < ancestors.index(NevidimyAtomicTurn::Commit), 'timing_scope_order')
@@ -59,6 +66,7 @@ class NevidimyAtomicTurnLiveProbe
     verify_staff_lock_race
     verify_private_notes_and_replay
     verify_private_note_rollback
+    verify_stale_version_retry
     if defined?(NevidimyTurnTiming)
       check(@timing_events.length == @posts.size, 'timing_event_count')
       @result[:timing_events] = @timing_events
@@ -82,7 +90,8 @@ class NevidimyAtomicTurnLiveProbe
     quiet.define_singleton_method(:info) do |message = nil, &block|
       if message.is_a?(String) && message.start_with?('{"event":"nevidimy_atomic_turn_timing"')
         event = JSON.parse(message)
-        allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status]
+        allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status
+                     thread_cpu_ms process_gc_ms process_allocated_objects]
         raise NevidimyAtomicTurnLiveProbe::Failure, 'timing_extra_fields' unless (event.keys - allowed).empty?
         events << event
       end
@@ -245,6 +254,16 @@ class NevidimyAtomicTurnLiveProbe
     @job_adapter.enqueued_jobs.count { |job| job[:job].name == 'SendReplyJob' }
   end
 
+  def created_webhooks(message_id)
+    @job_adapter.enqueued_jobs.count do |job|
+      next false unless job[:job].name == 'AgentBots::WebhookJob'
+
+      payload = job[:args][1]
+      payload.is_a?(Hash) && (payload['id'] || payload[:id]) == message_id &&
+        (payload['event'] || payload[:event]) == 'message_created'
+    end
+  end
+
   def check_reply(response, outcome, id)
     message_id = response[:data]['id']
     @result[:created][:message_ids] |= [message_id] if message_id.is_a?(Integer)
@@ -327,6 +346,9 @@ class NevidimyAtomicTurnLiveProbe
     first = post('commit', body)
     check_reply(first, 'committed', id)
     check(sends == jobs + 1, 'commit_send_job_count')
+    if defined?(NevidimyAgentBotSelfEventFilter)
+      check(created_webhooks(first[:data]['id']).zero?, 'self_reply_webhook_not_filtered')
+    end
     @conversation.reload.update!(custom_attributes: @conversation.custom_attributes.merge('workflow_need' => 'probe_concurrent'))
     before = state
     jobs = sends
@@ -615,6 +637,44 @@ class NevidimyAtomicTurnLiveProbe
     @result[:checks] << 'native_second_note_public_failure_and_staff_conflict_no_partial_writes'
   ensure
     Thread.current.thread_variable_set(:nevidimy_probe_builder_failure_at, nil)
+  end
+
+  def verify_stale_version_retry
+    id = fresh_neutral_input
+    if defined?(NevidimyAgentBotSelfEventFilter)
+      # Calling the Rails reloader in this one-off harness can register native
+      # listeners again. Require a native incoming callback, then prove exactly
+      # one enqueue per listener invocation, independently of subscription count.
+      check(created_webhooks(id).positive?, 'incoming_webhook_filtered')
+      before = created_webhooks(id)
+      AgentBotListener.instance.send(:process_message_event, 'message_created', @bot,
+                                     @conversation.messages.find(id), nil)
+      check(created_webhooks(id) == before + 1, 'incoming_listener_enqueue_count')
+    end
+    key = note_key(120)
+    stale = note_body(id, 'stale_notes_read', [key])
+    @conversation.update_columns(updated_at: @conversation.updated_at + 1)
+    before, queued = state, @job_adapter.enqueued_jobs.length
+    response = post('stale_notes_no_write', stale)
+    check(response[:status] == 409 && response[:data] == { 'outcome' => 'conflict', 'reason' => 'stale_version' } &&
+          state == before && @job_adapter.enqueued_jobs.length == queued &&
+          private_receipts(key).empty? && !replies(id).exists?, 'stale_marker_partial_write')
+    fresh = note_body(id, 'stale_notes_fresh_read', [key])
+    jobs = sends
+    committed = post('stale_notes_fresh_commit', fresh)
+    check_reply(committed, 'committed', id)
+    check(private_receipts(key).size == 1 && sends == jobs + 2, 'stale_fresh_note_duplicate')
+    if defined?(NevidimyAgentBotSelfEventFilter)
+      check((private_receipts(key) + [committed[:data]['id']]).all? { |message_id| created_webhooks(message_id).zero? },
+            'self_note_or_reply_webhook_not_filtered')
+      @result[:checks] << 'self_reply_note_webhooks_skipped_incoming_and_send_jobs_preserved'
+    end
+    before, queued = state, @job_adapter.enqueued_jobs.length
+    duplicate = post('stale_notes_old_replay', stale)
+    check_reply(duplicate, 'duplicate', id)
+    check(duplicate[:data]['id'] == committed[:data]['id'] && state == before &&
+          @job_adapter.enqueued_jobs.length == queued, 'stale_replay_mutated')
+    @result[:checks] << 'stale_version_is_no_write_fresh_notes_commit_and_old_replay_dedup'
   end
 
   def cleanup

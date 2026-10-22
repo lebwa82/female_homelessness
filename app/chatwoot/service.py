@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from app.agents import YandexAgentGateway
 from app.catalog import get_aid_item
 from app.certificate_documents import CertificateObjectRef, CertificateObjectStore
-from app.chatwoot.client import BinaryAttachment
+from app.chatwoot.client import BinaryAttachment, StaleButtonVersion
 from app.chatwoot.contracts import (
     ConversationChanged,
     IncomingChatwootMessage,
@@ -186,49 +186,53 @@ class ChatwootAgentService:
                 lock.release()
 
     async def _process_fast_button(self, event: IncomingChatwootMessage) -> bool | None:
-        snapshot = await self._api.button_snapshot(event.conversation_id, event.message_id)
-        if snapshot.get("capability") != CAPABILITY:
-            return None
-        # Legacy partial sends can still need their pending checkpoint cleared.
-        if snapshot.get("reply_id") and not (
-            (snapshot.get("conversation") or {}).get("custom_attributes") or {}
-        ).get("scenario_pending_input"):
-            return False
-        if not snapshot.get("eligible"):
-            return None
-        conversation = snapshot.get("conversation")
-        if (not isinstance(conversation, dict) or conversation.get("id") != event.conversation_id
-                or not isinstance(snapshot.get("version"), str)):
-            raise RuntimeError("invalid_button_snapshot")
-        buffered = BufferedButtonApi(conversation)
-        candidate = copy.copy(self)
-        candidate._api = buffered
-        candidate._gateway = NoExternalGateway()
-        candidate._queues = QueueCoordinator(buffered, self._duty_team_id, NoExternalGateway())
-        candidate._scenario_effects = ScenarioEffects(
-            buffered, candidate._queues, clock=self._scenario_effects.clock, can_route=_bot_owns,
-        )
-        candidate._certificate_claim = no_external_effect
-        candidate._send_certificate = no_external_effect
-        try:
-            planned = await candidate._process_locked(event)
-        except UnsupportedFastButton:
-            return None  # Everything so far was an in-memory, effect-free plan.
-        if not planned or buffered.reply is None:
-            return None
-        notes = buffered.notes
-        if notes and (not isinstance(snapshot.get("features"), list)
-                      or PRIVATE_NOTES_FEATURE not in snapshot["features"]):
-            return None
-        try:
-            message_id = await self._api.commit_button(
-                event.conversation_id, event.message_id, snapshot["version"],
-                buffered.attributes, buffered.reply,
-                **({"notes": notes} if notes else {}),
+        for _ in range(2):
+            snapshot = await self._api.button_snapshot(event.conversation_id, event.message_id)
+            if snapshot.get("capability") != CAPABILITY:
+                return None
+            # Legacy partial sends can still need their pending checkpoint cleared.
+            if snapshot.get("reply_id") and not (
+                (snapshot.get("conversation") or {}).get("custom_attributes") or {}
+            ).get("scenario_pending_input"):
+                return False
+            if not snapshot.get("eligible"):
+                return None
+            conversation = snapshot.get("conversation")
+            if (not isinstance(conversation, dict) or conversation.get("id") != event.conversation_id
+                    or not isinstance(snapshot.get("version"), str)):
+                raise RuntimeError("invalid_button_snapshot")
+            buffered = BufferedButtonApi(conversation)
+            candidate = copy.copy(self)
+            candidate._api = buffered
+            candidate._gateway = NoExternalGateway()
+            candidate._queues = QueueCoordinator(buffered, self._duty_team_id, NoExternalGateway())
+            candidate._scenario_effects = ScenarioEffects(
+                buffered, candidate._queues, clock=self._scenario_effects.clock, can_route=_bot_owns,
             )
-        except UnsupportedFastButton:
-            return None  # Client preflight rejected the plan before sending it.
-        return True if message_id is not None else None
+            candidate._certificate_claim = no_external_effect
+            candidate._send_certificate = no_external_effect
+            try:
+                planned = await candidate._process_locked(event)
+            except UnsupportedFastButton:
+                return None  # Everything so far was an in-memory, effect-free plan.
+            if not planned or buffered.reply is None:
+                return None
+            notes = buffered.notes
+            if notes and (not isinstance(snapshot.get("features"), list)
+                          or PRIVATE_NOTES_FEATURE not in snapshot["features"]):
+                return None
+            try:
+                message_id = await self._api.commit_button(
+                    event.conversation_id, event.message_id, snapshot["version"],
+                    buffered.attributes, buffered.reply,
+                    **({"notes": notes} if notes else {}),
+                )
+            except StaleButtonVersion:
+                continue  # Explicit no-write conflict; discard every buffered effect.
+            except UnsupportedFastButton:
+                return None  # Client preflight rejected the plan before sending it.
+            return True if message_id is not None else None
+        return None
 
     async def _process_locked(self, event: IncomingChatwootMessage) -> bool:
         conversation = await self._sync_owner(event.conversation_id)

@@ -1,11 +1,20 @@
 """Neutral, offline contracts for speculative button planning."""
 
+import asyncio
+import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.chatwoot.client import BinaryAttachment, ChatwootApiError
+from app.chatwoot.client import (
+    AiohttpChatwootTransport,
+    BinaryAttachment,
+    ChatwootApiError,
+    StaleButtonVersion,
+)
 from app.chatwoot.fast_buttons import (
     CAPABILITY,
     PRIVATE_NOTES_FEATURE,
@@ -214,6 +223,8 @@ class FastChatwoot(FakeChatwoot):
         self.commit_mode = "success"
         self.features = [PRIVATE_NOTES_FEATURE]
         self.commit_notes = []
+        self.snapshot_version = "snapshot-version"
+        self.after_stale = None
 
     async def button_snapshot(self, cid, message_id):
         self.snapshot_calls.append((cid, message_id))
@@ -222,7 +233,7 @@ class FastChatwoot(FakeChatwoot):
             "eligible": self.eligible,
             "reply_id": self.duplicate_reply_id,
             "conversation": deepcopy(self.conversation),
-            "version": "snapshot-version",
+            "version": self.snapshot_version,
             "features": deepcopy(self.features),
         }
 
@@ -231,6 +242,13 @@ class FastChatwoot(FakeChatwoot):
         self.commit_notes.append(deepcopy(notes or []))
         if self.commit_mode == "conflict":
             return None
+        if self.commit_mode in {"stale_once", "stale"}:
+            if self.commit_mode == "stale_once":
+                self.commit_mode = "success"
+            self.snapshot_version = f"fresh-version:{len(self.commits)}"
+            if self.after_stale is not None:
+                self.after_stale()
+            raise StaleButtonVersion()
         if self.commit_mode == "preflight":
             raise UnsupportedFastButton("unsupported_commit_plan")
         if self.commit_mode == "unknown":
@@ -346,10 +364,139 @@ async def test_proven_commit_conflict_rereads_through_normal_fallback(fast_runti
     before_replies = len(api.replies)
     assert await service.process(event("need:legal", 43))
     assert len(api.commits) == 1
+    assert api.snapshot_calls == [(23, 43)]
     assert "conversation" in api.legacy_calls
     assert "history" in api.legacy_calls
     assert api.legacy_calls.count("reply") == 1
     assert len(api.replies) == before_replies + 1
+    assert gateway.calls == 0
+
+
+async def test_stale_version_gets_one_fresh_replan_without_legacy_fallback(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.commit_mode = "stale_once"
+    before_replies = len(api.replies)
+    assert await service.process(event("need:legal", 43))
+    assert api.snapshot_calls == [(23, 43), (23, 43)]
+    assert len(api.commits) == 2
+    assert [commit[2] for commit in api.commits] == ["snapshot-version", "fresh-version:1"]
+    assert not api.legacy_calls
+    assert len(api.replies) == before_replies + 1
+    assert gateway.calls == 0
+
+
+async def test_repeated_stale_versions_are_bounded_before_normal_fallback(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.commit_mode = "stale"
+    before_replies = len(api.replies)
+    assert await service.process(event("need:legal", 43))
+    assert api.snapshot_calls == [(23, 43), (23, 43)]
+    assert len(api.commits) == 2
+    assert api.legacy_calls.count("reply") == 1
+    assert len(api.replies) == before_replies + 1
+    assert gateway.calls == 0
+
+
+async def test_fresh_human_assignment_wins_after_stale_version(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.commit_mode = "stale_once"
+
+    def takeover():
+        api.conversation["assignee_id"] = 4
+        api.eligible = False
+
+    api.after_stale = takeover
+    assert await service.process(event("need:legal", 43))
+    assert len(api.snapshot_calls) == 2 and len(api.commits) == 1
+    assert api.conversation["assignee_id"] == 4
+    assert api.conversation["custom_attributes"]["reply_owner"] == "human"
+    assert api.legacy_calls.count("reply") == 1
+    assert gateway.calls == 0
+
+
+async def test_fresh_newer_input_prevents_late_reply_after_stale_version(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.commit_mode = "stale_once"
+
+    def newer_input():
+        api.conversation["custom_attributes"]["scenario_last_message_id"] = 44
+        api.eligible = False
+
+    api.after_stale = newer_input
+    before_replies = len(api.replies)
+    assert not await service.process(event("need:legal", 43))
+    assert len(api.snapshot_calls) == 2 and len(api.commits) == 1
+    assert len(api.replies) == before_replies
+    assert api.conversation["custom_attributes"]["scenario_last_message_id"] == 44
+    assert gateway.calls == 0
+
+
+async def test_fresh_duplicate_snapshot_prevents_another_commit_after_stale_version(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.commit_mode = "stale_once"
+
+    def duplicate():
+        api.duplicate_reply_id = 999
+
+    api.after_stale = duplicate
+    before_replies = len(api.replies)
+    assert not await service.process(event("need:legal", 43))
+    assert len(api.snapshot_calls) == 2 and len(api.commits) == 1
+    assert not api.legacy_calls
+    assert len(api.replies) == before_replies
+    assert gateway.calls == 0
+
+
+async def test_stale_note_plan_is_recomputed_without_duplicate_effects(fast_runtime):
+    api, service, gateway = fast_runtime
+    callback = scenario_callback(api, "s35b", 0, 0, "legal_consultation")
+    api.commit_mode = "stale_once"
+    assert await service.process(event(callback, 43))
+    assert len(api.snapshot_calls) == 2 and len(api.commits) == 2
+    assert [len(notes) for notes in api.commit_notes] == [1, 1]
+    assert len(api.notes) == len(api.note_keys) == 1
+    assert not api.legacy_calls
+    assert gateway.calls == 0
+
+
+async def test_new_epoch_and_workflow_discard_old_speculative_notes(fast_runtime):
+    api, service, gateway = fast_runtime
+    callback = scenario_callback(api, "s35b", 0, 0, "legal_consultation")
+    api.commit_mode = "stale_once"
+
+    def changed_workflow():
+        attrs = api.conversation["custom_attributes"]
+        attrs["context_epoch"] = 2
+        attrs["scenario"] = {"screen": "s34b", "variant": 0, "aid_id": "psychologist_3_sessions"}
+        attrs["workflow_navigation"]["revision"] += 1
+
+    api.after_stale = changed_workflow
+    assert await service.process(event(callback, 43))
+    assert len(api.snapshot_calls) == 2 and len(api.commits) == 2
+    assert [len(notes) for notes in api.commit_notes] == [1, 0]
+    assert not api.notes and not api.note_keys
+    attrs = api.conversation["custom_attributes"]
+    assert attrs["context_epoch"] == 2
+    assert attrs["scenario"]["screen"] == "s34b"
+    assert not attrs.get("scenario_event_receipts")
+    assert not api.legacy_calls
+    assert gateway.calls == 0
+
+
+async def test_unknown_second_commit_outcome_does_not_fall_back_or_retry_again(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.commit_mode = "stale_once"
+
+    def unknown():
+        api.commit_mode = "unknown"
+
+    api.after_stale = unknown
+    before_replies = len(api.replies)
+    with pytest.raises(ConnectionError, match="unknown atomic commit outcome"):
+        await service.process(event("need:legal", 43))
+    assert len(api.snapshot_calls) == 2 and len(api.commits) == 2
+    assert not api.legacy_calls
+    assert len(api.replies) == before_replies
     assert gateway.calls == 0
 
 
@@ -821,3 +968,122 @@ async def test_incompatible_private_notes_are_rejected_before_transport(case):
             notes=notes,
         )
     assert len(transport.calls) == 0
+
+
+def conflict_transport(body: bytes):
+    """Exercise the real JSON transport against an in-memory HTTP response."""
+    stream = SimpleNamespace(readexactly=AsyncMock())
+    if len(body) < 257:
+        stream.readexactly.side_effect = asyncio.IncompleteReadError(body, 257)
+    else:
+        stream.readexactly.return_value = body[:257]
+    response = SimpleNamespace(status=409, headers={}, content=stream)
+
+    @asynccontextmanager
+    async def response_context():
+        yield response
+
+    request = Mock(side_effect=lambda *args, **kwargs: response_context())
+
+    @asynccontextmanager
+    async def session_context():
+        yield SimpleNamespace(request=request)
+
+    transport = AiohttpChatwootTransport("https://chat.example.test")
+    transport._http_session = session_context
+    return transport, request, stream
+
+
+async def test_exact_native_stale_conflict_survives_client_as_typed_no_write_signal():
+    transport, request, stream = conflict_transport(
+        json.dumps({"outcome": "conflict", "reason": "stale_version"}).encode(),
+    )
+    reply = {"text": "Neutral", "choices": (), "turn_key": "message:41"}
+    with pytest.raises(StaleButtonVersion):
+        await client(transport).commit_button(
+            23,
+            41,
+            "version",
+            {"scenario_last_message_id": 41},
+            reply,
+        )
+    assert request.call_count == 1
+    stream.readexactly.assert_awaited_once_with(257)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"not-json",
+        b"\xff",
+        b"null",
+        b'{"outcome":"conflict","reason":"ownership_changed"}',
+        b'{"outcome":"conflict","reason":"stale_version","extra":true}',
+        b'{"outcome":"other","outcome":"conflict","reason":"stale_version"}',
+        b" " * 257 + b'{"outcome":"conflict","reason":"stale_version"}',
+    ],
+)
+async def test_generic_or_invalid_conflict_never_becomes_stale_retry(body):
+    transport, request, stream = conflict_transport(body)
+    reply = {"text": "Neutral", "choices": (), "turn_key": "message:41"}
+    assert (
+        await client(transport).commit_button(
+            23,
+            41,
+            "version",
+            {"scenario_last_message_id": 41},
+            reply,
+        )
+        is None
+    )
+    assert request.call_count == 1
+    stream.readexactly.assert_awaited_once_with(257)
+
+
+@pytest.mark.parametrize(
+    "method,path,payload",
+    [
+        ("GET", "/conversations/23/messages", {"nevidimy_atomic_turn": {}}),
+        ("POST", "/conversations/23/messages", {"content": "Neutral"}),
+        ("POST", "/conversations/23/custom_attributes", {"nevidimy_atomic_turn": {}}),
+    ],
+)
+async def test_stale_marker_cannot_reclassify_other_requests(method, path, payload):
+    transport, request, stream = conflict_transport(
+        b'{"outcome":"conflict","reason":"stale_version"}',
+    )
+    with pytest.raises(ChatwootApiError) as error:
+        await transport.request(method, path, "test-token", payload)
+    assert type(error.value) is ChatwootApiError
+    assert request.call_count == 1
+    assert stream.readexactly.await_count == 0
+
+
+async def test_conflict_body_timeout_is_not_reclassified_as_proven_stale():
+    transport, request, stream = conflict_transport(b"")
+    stream.readexactly.side_effect = TimeoutError("neutral timeout")
+    reply = {"text": "Neutral", "choices": (), "turn_key": "message:41"}
+    with pytest.raises(TimeoutError):
+        await client(transport).commit_button(
+            23,
+            41,
+            "version",
+            {"scenario_last_message_id": 41},
+            reply,
+        )
+    assert request.call_count == 1
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), ChatwootApiError("atomic_turn_shape", 0)])
+async def test_unproven_write_outcomes_do_not_reread_replan_or_fall_back(fast_runtime, error):
+    api, service, gateway = fast_runtime
+    api.commit_button = AsyncMock(side_effect=error)
+    before_replies = len(api.replies)
+    with pytest.raises(type(error)):
+        await service.process(event("need:legal", 43))
+    assert api.snapshot_calls == [(23, 43)]
+    assert api.commit_button.await_count == 1
+    assert not api.legacy_calls
+    assert len(api.replies) == before_replies
+    assert gateway.calls == 0
