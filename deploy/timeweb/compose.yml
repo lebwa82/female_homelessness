@@ -138,7 +138,7 @@ services:
   sidekiq:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
     pull_policy: never
-    mem_limit: 768m
+    mem_limit: 2048m
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
       SIDEKIQ_CONCURRENCY: "2"

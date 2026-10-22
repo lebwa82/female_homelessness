@@ -315,6 +315,7 @@ def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None
             assert mount["bind"].get("create_host_path", False) is False
             assert mount["source"] == str(ROOT / "deploy/timeweb" / filename)
     assert services["chatwoot"]["environment"]["ENABLE_ACCOUNT_SIGNUP"] == "false"
+    assert int(services["sidekiq"]["mem_limit"]) == 2048 * 1024 * 1024
     assert int(services["agent-bot"]["mem_limit"]) == 768 * 1024 * 1024
     healthcheck = services["chatwoot"]["healthcheck"]["test"]
     assert "X-Forwarded-Proto" in healthcheck[-1]
