@@ -81,6 +81,14 @@ x-agent-bot-self-event-filter: &agent-bot-self-event-filter
   bind:
     create_host_path: false
 
+x-conversation-broadcast-fast-path: &conversation-broadcast-fast-path
+  type: bind
+  source: ../timeweb/conversation_broadcast_fast_path.rb
+  target: /app/config/initializers/nevidimy_conversation_broadcast_fast_path.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 x-interactive-jobs: &interactive-jobs
   type: bind
   source: ../timeweb/interactive_jobs.rb
@@ -111,6 +119,7 @@ services:
       - *atomic-turn
       - *turn-timing
       - *webhook-presenter-fast-path
+      - *conversation-broadcast-fast-path
       - *agent-bot-self-event-filter
       - *interactive-jobs
     healthcheck:
@@ -146,6 +155,7 @@ services:
       - *atomic-turn
       - *turn-timing
       - *webhook-presenter-fast-path
+      - *conversation-broadcast-fast-path
       - *agent-bot-self-event-filter
       - *interactive-jobs
 
