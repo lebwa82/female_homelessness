@@ -81,6 +81,14 @@ x-agent-bot-self-event-filter: &agent-bot-self-event-filter
   bind:
     create_host_path: false
 
+x-agent-bot-conversation-projection: &agent-bot-conversation-projection
+  type: bind
+  source: ../timeweb/agent_bot_conversation_projection.rb
+  target: /app/config/initializers/nevidimy_agent_bot_conversation_projection.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 x-conversation-broadcast-fast-path: &conversation-broadcast-fast-path
   type: bind
   source: ../timeweb/conversation_broadcast_fast_path.rb
@@ -104,6 +112,7 @@ services:
     mem_limit: 1536m
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+      NEVIDIMY_AGENT_CONVERSATION_PROJECTION: "1"
       WEB_CONCURRENCY: "1"
       RAILS_MAX_THREADS: "2"
       ENABLE_ACCOUNT_SIGNUP: "false"
@@ -121,6 +130,7 @@ services:
       - *webhook-presenter-fast-path
       - *conversation-broadcast-fast-path
       - *agent-bot-self-event-filter
+      - *agent-bot-conversation-projection
       - *interactive-jobs
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
@@ -141,6 +151,7 @@ services:
     mem_limit: 2048m
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+      NEVIDIMY_AGENT_CONVERSATION_PROJECTION: "1"
       SIDEKIQ_CONCURRENCY: "2"
       RAILS_MAX_THREADS: "2"
       http_proxy: ${TELEGRAM_HTTP_PROXY:-}
@@ -157,6 +168,7 @@ services:
       - *webhook-presenter-fast-path
       - *conversation-broadcast-fast-path
       - *agent-bot-self-event-filter
+      - *agent-bot-conversation-projection
       - *interactive-jobs
 
   agent-bot:
