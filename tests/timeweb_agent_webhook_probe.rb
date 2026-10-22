@@ -52,7 +52,7 @@ require_relative '../deploy/timeweb/agent_webhook'
 
 class FakeHttp
   attr_accessor :open_timeout, :read_timeout, :write_timeout, :max_retries,
-                :use_ssl, :verify_mode, :ca_file, :min_version
+                :use_ssl, :verify_mode, :verify_hostname, :ca_file, :min_version, :keep_alive_timeout
   attr_reader :requests
 
   def initialize
@@ -60,7 +60,20 @@ class FakeHttp
   end
 
   def start
+    @started = true
+    return self unless block_given?
+
     yield self
+  ensure
+    finish if block_given?
+  end
+
+  def started?
+    @started == true
+  end
+
+  def finish
+    @started = false
   end
 
   def request(request)
@@ -70,6 +83,7 @@ class FakeHttp
       yield 'ok'
     end
     yield response
+    response
   end
 end
 
