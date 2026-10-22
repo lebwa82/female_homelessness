@@ -1,0 +1,18 @@
+[Unit]
+Description=Nevidimy Certificate Administration Bot on Timeweb
+Requires=docker.service nevidimy.service
+After=docker.service nevidimy.service nevidimy-telegram.service nevidimy-proxy-tunnel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/nevidimy/app
+ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
+ExecStartPre=/usr/bin/test -s /etc/women-help-agent.env
+ExecStart=/usr/bin/python3 scripts/chatwoot_compose.py --profile certificate-admin up -d --no-build --pull never --no-deps --wait --wait-timeout 180 certificate-admin-bot
+ExecStop=/usr/bin/python3 scripts/chatwoot_compose.py --profile certificate-admin stop certificate-admin-bot
+TimeoutStartSec=240
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

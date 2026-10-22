@@ -161,6 +161,7 @@ services:
   certificate-admin-bot:
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+      TELEGRAM_PROXY_URL: http://telegram-proxy:3128
     volumes:
       - *database-ca
 

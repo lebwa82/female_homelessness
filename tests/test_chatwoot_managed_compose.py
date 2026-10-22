@@ -184,7 +184,8 @@ def test_timeweb_ip_https_publishes_only_tls_proxy_and_preserves_internal_servic
         mount = next(v for v in service["volumes"]
                      if v["target"] == "/app/config/initializers/nevidimy_tls_offload.rb")
         assert mount["read_only"] is True
-        assert mount["bind"]["create_host_path"] is False
+        # Compose 2.40 omits false-valued fields in its normalized JSON.
+        assert mount.get("bind", {}).get("create_host_path", False) is False
 
 
 def test_timeweb_ip_https_requires_current_ip_and_automates_public_certificates(
@@ -417,6 +418,18 @@ def test_http_local_systemd_drop_in_preserves_target_guard() -> None:
     assert "--no-build --pull never --wait" in start
     assert start.endswith("redis chatwoot sidekiq caddy")
     assert "--profile" not in start
+
+
+def test_timeweb_certificate_admin_reuses_existing_telegram_proxy(compose_command) -> None:
+    result = render(compose_command, managed=True, timeweb=True)
+    assert result.returncode == 0, result.stderr
+    services = json.loads(result.stdout)["services"]
+    admin = services["certificate-admin-bot"]
+    assert admin["environment"]["TELEGRAM_PROXY_URL"] == "http://telegram-proxy:3128"
+    assert admin["environment"]["CERTIFICATE_DATABASE_SSLMODE"] == "verify-full"
+    assert not admin.get("ports")
+    assert not admin.get("depends_on")
+    assert "TELEGRAM_PROXY_URL" not in services["agent-bot"]["environment"]
 
 
 def test_timeweb_agent_unit_starts_only_agent_after_core_with_target_guard() -> None:

@@ -247,6 +247,31 @@ PII-редактор инициализируется, синтетически�
 это не изменение тарифа VM. Постоянный backend запущен и healthy; штатный
 перезапуск отдельного `nevidimy-agent.service` проверен на изолированном диалоге.
 
+### Бот администрирования сертификатов
+
+`deploy/timeweb/nevidimy-certificate-admin.service` управляет существующим
+Compose-сервисом `certificate-admin-bot` через профиль `certificate-admin` и
+общий `scripts/chatwoot_compose.py`, сохраняя активные overlays и TLS-настройки.
+Зависимости — Docker и ядро `nevidimy.service`; перед запуском проверяются
+маркер целевой VM и существующий `/etc/women-help-agent.env`. Образ Python
+должен быть доставлен заранее, настройки и доступ администраторов остаются
+в существующем закрытом env-файле.
+
+Timeweb-overlay направляет Telegram-запросы этого бота через существующий
+`http://telegram-proxy:3128`. Unit запускается после уже включённых
+`nevidimy-telegram.service` и `nevidimy-proxy-tunnel.service`; зависимости
+`Requires` ограничены Docker и ядром. Перед включением администратора
+нужно проверить работоспособность существующего прокси.
+
+После проверки целевой VM по API и SSH unit устанавливается в
+`/etc/systemd/system/nevidimy-certificate-admin.service`; после `daemon-reload`
+его можно включить через `systemctl enable --now nevidimy-certificate-admin.service`.
+Запуск и остановка затрагивают только `certificate-admin-bot`; `--no-deps`,
+`--no-build` и `--pull never` сохраняют подготовленный состав контейнеров и образов.
+`--wait` для этого сервиса подтверждает состояние running; отдельного
+Compose healthcheck у него нет. Само наличие unit в репозитории не означает
+его установки или проверки на VM.
+
 ### База и сеть
 
 Managed PostgreSQL — primary + две реплики, всего три узла. Лимиты инфраструктуры
