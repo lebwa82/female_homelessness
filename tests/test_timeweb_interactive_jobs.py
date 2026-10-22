@@ -21,4 +21,4 @@ def test_native_interactive_queue_isolation_and_noop_delivery_contracts():
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert len(report) == 8 and all(report.values())
+    assert len(report) == 9 and all(report.values())

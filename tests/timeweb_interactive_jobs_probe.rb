@@ -68,7 +68,7 @@ module Channel
 end
 
 class Message
-  attr_accessor :inbox_id, :conversation, :attachments, :error
+  attr_accessor :inbox_id, :conversation, :attachments, :error, :content_attributes
   attr_reader :jobs
 
   def initialize(incoming: false, private_message: false, channel: Channel::Telegram.new)
@@ -76,6 +76,7 @@ class Message
     @inbox_id = 5
     @conversation = OpenStruct.new(inbox_id: 5, inbox: OpenStruct.new(channel: channel))
     @attachments, @jobs = [], []
+    @content_attributes = {}
   end
 
   def incoming?
@@ -165,10 +166,14 @@ Tempfile.create(['native-job', '.rb']) do |file|
   file.write(source)
   file.flush
   load file.path
-  verify(NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, Digest::SHA256.hexdigest(source)), 'known source rejected')
+  digest = Digest::SHA256.hexdigest(source)
+  verify(NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, digest), 'known source rejected')
+  verify(NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, ['unknown', digest]), 'second approved source rejected')
+  verify(NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, [digest, 'unknown']), 'first approved source rejected')
+  verify(!NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, %w[unknown other]), 'unknown sources accepted')
   verify(!NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, 'unknown'), 'changed source accepted')
   SyntheticNativeJob.prepend(Module.new { def perform; super; end })
-  verify(!NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, Digest::SHA256.hexdigest(source)), 'unknown override accepted')
+  verify(!NevidimyInteractiveJobs.native_file?(SyntheticNativeJob, :perform, [digest]), 'unknown override accepted')
 end
 Message.prepend(NevidimyInteractiveJobs::MessageDelivery)
 NevidimyInteractiveJobs.install
@@ -182,6 +187,21 @@ report['source_and_owner_guards_fail_closed_and_reload_is_safe'] = true
   verify(original == [row.inbox_id, row.conversation, row.attachments], 'row changed')
 end
 report['telegram_incoming_and_private_rows_omit_only_the_noop_delivery_job'] = true
+
+[true, 0, '', 'false', [], {}].each do |pending|
+  [Message.new(incoming: true), Message.new(private_message: true),
+   Message.new(incoming: true, private_message: true)].each do |row|
+    row.content_attributes['translation_pending'] = pending
+    verify(row.send(:send_reply) == :native_result && row.jobs == [:immediate], 'truthy pending translation lost native job')
+    verify(row.content_attributes['translation_pending'].equal?(pending), 'pending translation changed')
+  end
+end
+[nil, false].each do |pending|
+  row = Message.new(incoming: true)
+  row.content_attributes['translation_pending'] = pending
+  verify(row.send(:send_reply).nil? && row.jobs.empty?, 'falsey translation prevented proven no-op skip')
+end
+report['translation_pending_uses_native_ruby_truthiness_and_preserves_delivery'] = true
 
 [Message.new, Message.new(incoming: true, channel: Channel::Api.new),
  Message.new(private_message: true, channel: Class.new(Channel::Telegram).new)].each do |row|
@@ -210,5 +230,10 @@ verify(unknown.send(:send_reply) == :native_result, 'unknown inbox skipped')
 unknown = Message.new(incoming: true)
 unknown.conversation = nil
 verify(unknown.send(:send_reply) == :native_result, 'association error skipped native job')
+[nil, '', []].each do |attributes|
+  unknown = Message.new(incoming: true)
+  unknown.content_attributes = attributes
+  verify(unknown.send(:send_reply) == :native_result, 'unknown content attributes skipped native job')
+end
 report['ambiguous_metadata_falls_back_instead_of_dropping_work'] = true
 puts JSON.generate(report)

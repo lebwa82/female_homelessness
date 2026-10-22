@@ -5,7 +5,10 @@ require 'json'
 
 module NevidimyInteractiveJobs
   CAPSULE = 'nevidimy_interactive'.freeze
-  SEND_REPLY_SHA256 = '8beaf0b6ff088e0c73e062f7c5b184c242ca00077c149d02cd4e19a317c7701e'.freeze
+  SEND_REPLY_SHA256S = %w[
+    8beaf0b6ff088e0c73e062f7c5b184c242ca00077c149d02cd4e19a317c7701e
+    aa6a3eee8d0dd193f3903614a245d535633d84acaf0064e28ca57c7f91db61e6
+  ].freeze
   BASE_SERVICE_SHA256 = 'f4006490ac594a59c6fccb4bd6e0cad89305fec4d5974a802e2c6ee8a8290258'.freeze
   TELEGRAM_SERVICE_SHA256 = '52eec4832b08826f5faa9bc1349ec3eb34ec19720c6fed4b67a37d279d053402'.freeze
   MESSAGE_BODY_SHA256 = '15e02ef2db60b84e6a18b2d6f608cc41aa895615959df760260359f809086d53'.freeze
@@ -27,14 +30,14 @@ module NevidimyInteractiveJobs
     true
   end
 
-  def self.native_file?(type, name, digest)
+  def self.native_file?(type, name, digests)
     method = type.instance_method(name)
     method.owner == type && method.source_location &&
-      Digest::SHA256.file(method.source_location.first).hexdigest == digest
+      Array(digests).include?(Digest::SHA256.file(method.source_location.first).hexdigest)
   end
 
   def self.native_delivery?
-    return false unless native_file?(SendReplyJob, :perform, SEND_REPLY_SHA256) &&
+    return false unless native_file?(SendReplyJob, :perform, SEND_REPLY_SHA256S) &&
                         native_file?(Base::SendOnChannelService, :perform, BASE_SERVICE_SHA256) &&
                         native_file?(Telegram::SendOnTelegramService, :perform_reply, TELEGRAM_SERVICE_SHA256)
 
@@ -52,6 +55,11 @@ module NevidimyInteractiveJobs
 
   def self.undeliverable_telegram?(message)
     return false unless message.incoming? || message.private?
+
+    attributes = message.content_attributes
+    # Chatwoot 4.19 runs translation before channel delivery. Ruby treats every
+    # value except nil/false as pending, including 0, empty strings and containers.
+    return false unless attributes.is_a?(Hash) && !attributes['translation_pending']
 
     conversation = message.conversation
     return false unless message.inbox_id.is_a?(Integer) && message.inbox_id.positive? &&
@@ -73,8 +81,8 @@ module NevidimyInteractiveJobs
     private
 
     def send_reply
-      # Pinned Telegram delivery validates the channel, then returns without
-      # any write/send for these rows. Keep their rows, callbacks and UI events;
+      # Pinned Telegram delivery returns without any write/send for these rows
+      # only when no translation is pending. Keep their rows, callbacks and UI events;
       # omit only that proven no-op job, not public replies or other channels.
       return if NevidimyInteractiveJobs.undeliverable_telegram?(self)
 
