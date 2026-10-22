@@ -180,7 +180,8 @@ Rails.logger.define_singleton_method(:info) { |value| logs << JSON.parse(value) 
 timing = { started: 10.0, success: true, outcome_class: 'Integer', raw_request_ms: 12.0,
            request_to_headers_ms: 3.0, response_block_ms: 4.0, response_tail_ms: 5.0 }
 NevidimyTelegramTransport.log_send(OpenStruct.new(id: 1, content_attributes: {}), timing)
-keys = %w[event message_id http_elapsed_ms pool_checkout_ms connection_reused tls_setup_ms
+keys = %w[event message_id http_elapsed_ms pool_checkout_ms pool_key_ms pool_mutex_wait_ms
+          pool_lease_wait_ms pool_idle_closed pool_checkout_cpu_ms connection_reused tls_setup_ms
           send_elapsed_ms accepted_at_ms source_to_accepted_ms success outcome_class] + KEYS.map(&:to_s)
 verify(logs.length == 1 && logs.first.keys.sort == keys.sort && logs.first['raw_request_ms'] == 12.0)
 report['fixed_content_free_fields_only'] = true

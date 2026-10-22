@@ -59,6 +59,52 @@ module NevidimyTelegramTransport
     nil
   end
 
+  def self.thread_cpu_time
+    Process.clock_gettime(Process::CLOCK_THREAD_CPUTIME_ID)
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.start_checkout_timing(timing)
+    return unless timing.is_a?(Hash)
+
+    { target: timing, cpu_started: thread_cpu_time, lease_ms: 0.0, idle_closed: 0 }
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.record_checkout_phase(trace, phase, started)
+    return unless trace
+
+    elapsed = request_delta(started, request_clock)
+    trace[phase] = if phase == :lease_ms
+                     trace[phase] && elapsed ? trace[phase] + elapsed : nil
+                   else
+                     elapsed
+                   end
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.record_idle_close(trace)
+    trace[:idle_closed] += 1 if trace
+  rescue StandardError
+    nil
+  end
+
+  def self.finish_checkout_timing(trace)
+    return unless trace
+
+    cpu_ms = request_delta(trace[:cpu_started], thread_cpu_time)
+    trace[:target].merge!(pool_key_ms: trace[:key_ms]&.round(3),
+                         pool_mutex_wait_ms: trace[:mutex_ms]&.round(3),
+                         pool_lease_wait_ms: trace[:lease_ms]&.round(3),
+                         pool_idle_closed: trace[:idle_closed], pool_checkout_cpu_ms: cpu_ms&.round(3))
+  rescue StandardError, NotImplementedError
+    # Observation must not replace a selected lease or a native checkout exception.
+    nil
+  end
+
   def self.record_raw_request(timing, started, headers, callback_ms, finished)
     raw_ms = request_delta(started, finished)
     headers_ms = request_delta(started, headers)
@@ -113,6 +159,9 @@ module NevidimyTelegramTransport
       event: 'nevidimy_telegram_send', message_id: message.id.is_a?(Integer) ? message.id : nil,
       http_elapsed_ms: timing[:http_elapsed_ms]&.round,
       pool_checkout_ms: timing[:pool_checkout_ms]&.round(3),
+      pool_key_ms: timing[:pool_key_ms], pool_mutex_wait_ms: timing[:pool_mutex_wait_ms],
+      pool_lease_wait_ms: timing[:pool_lease_wait_ms], pool_idle_closed: timing[:pool_idle_closed],
+      pool_checkout_cpu_ms: timing[:pool_checkout_cpu_ms],
       connection_reused: timing[:connection_reused], tls_setup_ms: timing[:tls_setup_ms]&.round(3),
       raw_request_ms: timing[:raw_request_ms], request_to_headers_ms: timing[:request_to_headers_ms],
       response_block_ms: timing[:response_block_ms], response_tail_ms: timing[:response_tail_ms],
@@ -329,9 +378,17 @@ module NevidimyTelegramTransport
     end
 
     def checkout(candidate)
-      key = key_for(candidate)
+      trace = NevidimyTelegramTransport.start_checkout_timing(Thread.current[TIMING_KEY])
+      key_started = NevidimyTelegramTransport.request_clock if trace
+      begin
+        key = key_for(candidate)
+      ensure
+        NevidimyTelegramTransport.record_checkout_phase(trace, :key_ms, key_started)
+      end
       deadline = monotonic + CHECKOUT_SECONDS
+      mutex_started = NevidimyTelegramTransport.request_clock if trace
       @mutex.synchronize do
+        NevidimyTelegramTransport.record_checkout_phase(trace, :mutex_ms, mutex_started)
         if @pid != Process.pid
           @connections.each { |connection| close(connection) }
           @connections.clear
@@ -348,6 +405,7 @@ module NevidimyTelegramTransport
             @connections.delete(connection)
             @created_at.delete(connection)
             @keys.delete(connection)
+            NevidimyTelegramTransport.record_idle_close(trace)
             close(connection)
             true
           end
@@ -360,6 +418,7 @@ module NevidimyTelegramTransport
             @connections.delete(connection)
             @created_at.delete(connection)
             @keys.delete(connection)
+            NevidimyTelegramTransport.record_idle_close(trace)
             close(connection)
           end
           if @connections.length < MAX_CONNECTIONS
@@ -372,9 +431,17 @@ module NevidimyTelegramTransport
           remaining = deadline - monotonic
           raise Timeout::Error, 'Telegram connection checkout timed out' unless remaining.positive?
 
-          @available.wait(@mutex, remaining)
+          lease_started = NevidimyTelegramTransport.request_clock if trace
+          begin
+            @available.wait(@mutex, remaining)
+          ensure
+            # ConditionVariable includes re-acquiring the mutex after waking.
+            NevidimyTelegramTransport.record_checkout_phase(trace, :lease_ms, lease_started)
+          end
         end
       end
+    ensure
+      NevidimyTelegramTransport.finish_checkout_timing(trace)
     end
   end
 

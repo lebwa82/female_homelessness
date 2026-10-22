@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
+
+from app.chatwoot.fast_buttons import CAPABILITY, PRIVATE_NOTES_FEATURE
+
+BUTTON_SNAPSHOT_MAX_BYTES = 262_144
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +23,8 @@ class IncomingChatwootMessage:
     contact_id: int
     inbox_id: int
     content: str
+    # Present only after webhook HMAC verification. A proposal, never truth.
+    button_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +194,9 @@ def _only_bot_bookkeeping_changed(payload: dict[str, Any]) -> bool:
     return bool(changed_keys) and changed_keys <= _BOT_BOOKKEEPING_ATTRIBUTES
 
 
-def parse_message_created(payload: object) -> IncomingChatwootMessage | None:
+def parse_message_created(
+    payload: object, *, trusted_snapshot: bool = False,
+) -> IncomingChatwootMessage | None:
     """Return a public inbound text message, otherwise intentionally ignore it."""
     if not isinstance(payload, dict) or payload.get("event") != "message_created":
         return None
@@ -229,13 +239,66 @@ def parse_message_created(payload: object) -> IncomingChatwootMessage | None:
     inbox_id = _positive_int(inbox.get("id"))
     if None in {message_id, conversation_id, contact_id, inbox_id}:
         return None
-    return IncomingChatwootMessage(
+    event = IncomingChatwootMessage(
         message_id=message_id,
         conversation_id=conversation_id,
         contact_id=contact_id,
         inbox_id=inbox_id,
         content=content.strip(),
     )
+    if (trusted_snapshot and channel == "Channel::Telegram" and isinstance(attributes, dict)
+            and "nevidimy_telegram_callback_data" in attributes):
+        return replace(event, button_snapshot=validated_button_snapshot(
+            payload.get("nevidimy_button_snapshot"), event,
+        ))
+    return event
+
+
+def validated_button_snapshot(value: object, event: IncomingChatwootMessage) -> dict | None:
+    """Validate the signed extension without discarding its actionable event."""
+    if not isinstance(value, dict) or value.keys() != {
+        "schema", "capability", "features", "input_id", "contact_id", "inbox_id",
+        "version", "conversation",
+    }:
+        return None
+    if (type(value["schema"]) is not int or value["schema"] != 1
+            or value["capability"] != CAPABILITY or value["features"] != [PRIVATE_NOTES_FEATURE]):
+        return None
+    for name, expected in (("input_id", event.message_id), ("contact_id", event.contact_id),
+                           ("inbox_id", event.inbox_id)):
+        if type(value[name]) is not int or value[name] != expected:
+            return None
+    version, conversation = value["version"], value["conversation"]
+    if not isinstance(version, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z", version,
+    ) is None:
+        return None
+    if not isinstance(conversation, dict) or conversation.keys() != {
+        "id", "status", "custom_attributes", "assignee_id", "team_id", "meta",
+    }:
+        return None
+    if (type(conversation["id"]) is not int or conversation["id"] != event.conversation_id
+            or conversation["status"] not in ("open", "pending", "resolved", "snoozed")
+            or not isinstance(conversation["custom_attributes"], dict)):
+        return None
+    for name in ("assignee_id", "team_id"):
+        item = conversation[name]
+        if item is not None and (type(item) is not int or item <= 0):
+            return None
+    assignee, team = conversation["assignee_id"], conversation["team_id"]
+    if conversation["meta"] != {
+        "assignee": {"id": assignee} if assignee else None,
+        "assignee_type": "User" if assignee else "AgentBot",
+        "team": {"id": team} if team else None,
+    }:
+        return None
+    try:
+        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if size > BUTTON_SNAPSHOT_MAX_BYTES:
+            return None
+        return deepcopy(value)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return None
 
 
 def _positive_int(value: Any) -> int | None:

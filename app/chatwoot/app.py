@@ -51,6 +51,7 @@ class AgentBotWebhook:
         timestamp = _header(request.headers, "X-Chatwoot-Timestamp")
         signature = _header(request.headers, "X-Chatwoot-Signature")
         delivery_id = _header(request.headers, "X-Chatwoot-Delivery")
+        verified_signature = False
         signed_headers = (timestamp, signature, delivery_id)
         if any(signed_headers) and not all(signed_headers):
             return web.Response(status=401)
@@ -66,6 +67,7 @@ class AgentBotWebhook:
                 )
             except InvalidWebhookSignature:
                 return web.Response(status=401)
+            verified_signature = True
         elif self._signature_secret:
             return web.Response(status=401)
         try:
@@ -73,7 +75,7 @@ class AgentBotWebhook:
         except json.JSONDecodeError:
             return web.Response(status=204)
         event = (
-            parse_message_created(payload) or parse_staff_message(payload)
+            parse_message_created(payload, trusted_snapshot=verified_signature) or parse_staff_message(payload)
             or parse_message_delivery_changed(payload)
             or parse_conversation_changed(payload)
         )

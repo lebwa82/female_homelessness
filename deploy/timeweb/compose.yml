@@ -105,6 +105,14 @@ x-interactive-jobs: &interactive-jobs
   bind:
     create_host_path: false
 
+x-agent-bot-message-projection: &agent-bot-message-projection
+  type: bind
+  source: ../timeweb/agent_bot_message_projection.rb
+  target: /app/config/initializers/nevidimy_agent_bot_message_projection.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   chatwoot:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
@@ -113,6 +121,9 @@ services:
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
       NEVIDIMY_AGENT_CONVERSATION_PROJECTION: "1"
+      NEVIDIMY_AGENT_MESSAGE_PROJECTION: ${NEVIDIMY_AGENT_MESSAGE_PROJECTION:-0}
+      NEVIDIMY_AGENT_BACKGROUND_WAITING: ${NEVIDIMY_AGENT_BACKGROUND_WAITING:-0}
+      NEVIDIMY_AGENT_BUTTON_SNAPSHOT: ${NEVIDIMY_AGENT_BUTTON_SNAPSHOT:-0}
       WEB_CONCURRENCY: "1"
       RAILS_MAX_THREADS: "2"
       ENABLE_ACCOUNT_SIGNUP: "false"
@@ -131,6 +142,7 @@ services:
       - *conversation-broadcast-fast-path
       - *agent-bot-self-event-filter
       - *agent-bot-conversation-projection
+      - *agent-bot-message-projection
       - *interactive-jobs
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
@@ -152,6 +164,9 @@ services:
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
       NEVIDIMY_AGENT_CONVERSATION_PROJECTION: "1"
+      NEVIDIMY_AGENT_MESSAGE_PROJECTION: ${NEVIDIMY_AGENT_MESSAGE_PROJECTION:-0}
+      NEVIDIMY_AGENT_BACKGROUND_WAITING: ${NEVIDIMY_AGENT_BACKGROUND_WAITING:-0}
+      NEVIDIMY_AGENT_BUTTON_SNAPSHOT: ${NEVIDIMY_AGENT_BUTTON_SNAPSHOT:-0}
       SIDEKIQ_CONCURRENCY: "2"
       RAILS_MAX_THREADS: "2"
       http_proxy: ${TELEGRAM_HTTP_PROXY:-}
@@ -169,6 +184,7 @@ services:
       - *conversation-broadcast-fast-path
       - *agent-bot-self-event-filter
       - *agent-bot-conversation-projection
+      - *agent-bot-message-projection
       - *interactive-jobs
 
   agent-bot:

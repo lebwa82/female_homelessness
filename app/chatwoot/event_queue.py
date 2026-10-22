@@ -3,6 +3,10 @@
 One deployed agent-bot process, eight ordered lanes. A conversation always uses
 the same lane; failed work stays pending and is retried, including after restart.
 Redis already belongs to the Chatwoot contour and has AOF persistence enabled.
+
+The optional snapshot is a separate Stream field, NEVER part of event payload.
+Old readers ignore it and use their established GET path; new readers accept old
+entries without it. Rollout/rollback needs no stream migration, drain or deletion.
 """
 
 from __future__ import annotations
@@ -11,15 +15,17 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from redis.exceptions import ResponseError
 
 from app.chatwoot.contracts import (
+    BUTTON_SNAPSHOT_MAX_BYTES,
     ConversationChanged,
     IncomingChatwootMessage,
     MessageDeliveryChanged,
     StaffMessage,
+    validated_button_snapshot,
 )
 from app.chatwoot.telemetry import event_timing
 
@@ -42,9 +48,18 @@ class DurableEventQueue:
         if kind not in EVENTS:
             raise ValueError("unsupported_event_type")
         key = self.keys[event.conversation_id % len(self.keys)]
-        await self.redis.xadd(key, {
-            "type": kind, "payload": json.dumps(asdict(event), ensure_ascii=False),
-        })
+        if isinstance(event, IncomingChatwootMessage):
+            # Preserve EXACT legacy event schema, even when a hint is present.
+            payload = asdict(replace(event, button_snapshot=None))
+            payload.pop("button_snapshot")
+        else:
+            payload = asdict(event)
+        fields = {"type": kind, "payload": json.dumps(payload, ensure_ascii=False)}
+        if isinstance(event, IncomingChatwootMessage):
+            snapshot = validated_button_snapshot(event.button_snapshot, event)
+            if snapshot is not None:
+                fields["button_snapshot"] = json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
+        await self.redis.xadd(key, fields)
 
     async def start(self) -> None:
         for key in self.keys:
@@ -65,6 +80,14 @@ class DurableEventQueue:
         for _, messages in batches:
             for entry_id, fields in messages:
                 event = EVENTS[fields["type"]](**json.loads(fields["payload"]))
+                if isinstance(event, IncomingChatwootMessage):
+                    hint = fields.get("button_snapshot")
+                    try:
+                        snapshot = (json.loads(hint) if isinstance(hint, str)
+                                    and len(hint.encode("utf-8")) <= BUTTON_SNAPSHOT_MAX_BYTES else None)
+                    except (ValueError, UnicodeError, RecursionError):
+                        snapshot = None  # Broken optimization must not poison a lane.
+                    event = replace(event, button_snapshot=validated_button_snapshot(snapshot, event))
                 queue_age_ms = max(0, time.time() * 1000 - int(entry_id.split("-", 1)[0]))
                 with event_timing(event, queue_age_ms=round(queue_age_ms, 3)):
                     await self.service.process(event)

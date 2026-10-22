@@ -4,6 +4,7 @@ require 'digest'
 
 module NevidimyAgentBotConversationProjection
   OPT_IN = 'NEVIDIMY_AGENT_CONVERSATION_PROJECTION'.freeze
+  BACKGROUND_WAITING = 'NEVIDIMY_AGENT_BACKGROUND_WAITING'.freeze
   OWNER_SHA256S = {
     'AgentBotListener' => 'cf733d9ade2e9ff4564e7f41deeeaede8e3a2a95edf7d4a5dbe0a6b4653088a3',
     'BaseListener' => '50db9ab0c06244e023d58b4b7dd01d9b9e2c4fa37745f535500ffa6af162bc76',
@@ -94,6 +95,29 @@ module NevidimyAgentBotConversationProjection
     false
   end
 
+  def self.waiting_only?(changes)
+    return false unless changes.is_a?(Array) && changes.length == 2
+
+    fields = {}
+    changes.each do |item|
+      return false unless item.is_a?(Hash) && item.length == 1
+      name, delta = item.first
+      return false unless name.is_a?(String) || name.is_a?(Symbol)
+      name = name.to_s
+      return false unless %w[waiting_since updated_at].include?(name) && !fields.key?(name)
+      return false unless delta.is_a?(Hash) && delta.keys.all? { |key| key.is_a?(Symbol) } &&
+                          delta.keys.sort == %i[current_value previous_value]
+
+      fields[name] = [delta[:previous_value], delta[:current_value]]
+    end
+    return false unless fields.keys.sort == %w[updated_at waiting_since]
+
+    timestamp = ->(value) { value.is_a?(Time) || (defined?(ActiveSupport::TimeWithZone) && value.is_a?(ActiveSupport::TimeWithZone)) }
+    before, after = fields['waiting_since']
+    fields['updated_at'].all?(&timestamp) &&
+      ((before.nil? && timestamp.call(after)) || (after.nil? && timestamp.call(before)))
+  end
+
   def self.install
     @wrappers = []
     [[defined?(NevidimyTurnTiming::BotEvents) && NevidimyTurnTiming::BotEvents, [:conversation_updated]],
@@ -139,7 +163,18 @@ module NevidimyAgentBotConversationProjection
         else
           full_payload
         end
-        process_webhook_bot_event(bot, payload)
+        if compact && ENV[NevidimyAgentBotConversationProjection::BACKGROUND_WAITING] == '1' &&
+           NevidimyAgentBotConversationProjection.waiting_only?(changed_attributes)
+          # Keep the same durable native job, delivery identity and retry policy.
+          # Only timer bookkeeping moves off the interactive queue; ownership,
+          # unknown/mixed deltas and other recipients retain native priority.
+          AgentBots::WebhookJob.set(queue: :medium).perform_later(
+            bot.outgoing_url, payload, :agent_bot_webhook,
+            secret: bot.secret, delivery_id: SecureRandom.uuid
+          )
+        else
+          process_webhook_bot_event(bot, payload)
+        end
       end
     end
   end

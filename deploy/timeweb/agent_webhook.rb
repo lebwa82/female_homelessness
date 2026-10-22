@@ -17,7 +17,7 @@ module NevidimyInternalAgentWebhook
     end
 
     uri = URI(expected)
-    body = @payload.to_json
+    body = nevidimy_snapshot_body(@payload.to_json)
     request = Net::HTTP::Post.new(uri.request_uri, request_headers(body))
     request.body = body
     # Explicit nil disables environment proxies: this traffic must stay in Docker.
@@ -46,6 +46,59 @@ module NevidimyInternalAgentWebhook
         end
       end
     end
+  end
+
+  # Read at delivery, not in the synchronous MESSAGE_CREATED listener:
+  # waiting_since can advance updated_at after dispatch. If this job races the
+  # remaining callbacks, the authoritative POST still rejects a stale version.
+  # The original queued payload/arguments remain untouched on every attempt.
+  def nevidimy_snapshot_body(original_body)
+    return original_body unless ENV['NEVIDIMY_AGENT_BUTTON_SNAPSHOT'] == '1' && defined?(NevidimyAtomicTurn)
+
+    payload = JSON.parse(original_body)
+    return original_body unless payload.is_a?(Hash) && payload['event'] == 'message_created' &&
+                                payload['message_type'] == 'incoming' && payload['private'] == false &&
+                                payload.dig('conversation', 'channel') == 'Channel::Telegram'
+
+    input_id, contact_id, inbox_id, display_id = payload['id'], payload.dig('sender', 'id'),
+                                               payload.dig('inbox', 'id'), payload.dig('conversation', 'id')
+    return original_body unless [input_id, contact_id, inbox_id, display_id].all? { |id| id.is_a?(Integer) && id.positive? }
+
+    callback = payload.dig('content_attributes', 'nevidimy_telegram_callback_data')
+    return original_body unless callback.is_a?(String) && callback.valid_encoding? &&
+                                !callback.strip.empty? && callback.bytesize <= 64
+
+    input = Message.uncached { Message.find_by(id: input_id) }
+    return original_body unless input.instance_of?(Message) && input.incoming? && input.private? == false &&
+                                input.sender_type == 'Contact' && input.sender_id == contact_id && input.inbox_id == inbox_id &&
+                                input.content_attributes.is_a?(Hash) &&
+                                input.content_attributes['nevidimy_telegram_callback_data'] == callback
+
+    # One fresh row provides a coherent version AND every planning field.
+    conversation = Conversation.uncached { Conversation.find_by(id: input.conversation_id) }
+    return original_body unless conversation.instance_of?(Conversation) && conversation.display_id == display_id &&
+                                conversation.account_id == input.account_id && conversation.inbox_id == inbox_id &&
+                                conversation.contact_id == contact_id && conversation.custom_attributes.is_a?(Hash)
+
+    snapshot = {
+      schema: 1, capability: NevidimyAtomicTurn::CAPABILITY, features: ['private_notes_v1'],
+      input_id: input_id, contact_id: contact_id, inbox_id: inbox_id,
+      version: NevidimyAtomicTurn.version(conversation),
+      conversation: {
+        id: display_id, status: conversation.status, custom_attributes: conversation.custom_attributes,
+        assignee_id: conversation.assignee_id, team_id: conversation.team_id,
+        meta: { assignee: conversation.assignee_id && { id: conversation.assignee_id },
+                assignee_type: conversation.assignee_id ? 'User' : 'AgentBot',
+                team: conversation.team_id && { id: conversation.team_id } }
+      }
+    }
+    return original_body if snapshot.to_json.bytesize > 262_144
+
+    body = payload.merge('nevidimy_button_snapshot' => snapshot).to_json
+    # aiohttp's existing 1 MiB limit applies to the WHOLE signed body.
+    body.bytesize < 1_048_576 ? body : original_body
+  rescue StandardError
+    original_body # Optional optimization failure must never drop the input.
   end
 end
 
