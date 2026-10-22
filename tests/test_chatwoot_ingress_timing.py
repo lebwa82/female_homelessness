@@ -292,7 +292,7 @@ channel = Channel::Telegram.new
 verify(channel.public_methods.include?(:send_message_on_telegram), 'sender visibility changed')
 verify(channel.send_message_on_telegram(message) == 37, 'native numeric ID changed')
 accepted = JSON.parse(Rails.logger.lines.last)
-keys = %w[event message_id http_elapsed_ms send_elapsed_ms accepted_at_ms source_to_accepted_ms success outcome_class]
+keys = %w[event message_id http_elapsed_ms pool_checkout_ms connection_reused tls_setup_ms send_elapsed_ms accepted_at_ms source_to_accepted_ms success outcome_class]
 verify(accepted.keys.sort == keys.sort, 'telemetry fields are not allowlisted')
 verify(accepted['message_id'] == 123 && accepted['http_elapsed_ms'] == 10 && accepted['send_elapsed_ms'] == 30, 'wrong monotonic boundaries')
 verify(accepted['accepted_at_ms'] == 1_700_000_000_373 && accepted['source_to_accepted_ms'] == 250, 'wrong wall-clock boundary')

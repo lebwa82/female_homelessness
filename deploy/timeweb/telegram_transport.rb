@@ -17,6 +17,10 @@ module NevidimyTelegramTransport
   IDLE_SECONDS = 30
   LIFETIME_SECONDS = 300
   CHECKOUT_SECONDS = 5
+  KEEPALIVE_INTERVAL = 10
+  KEEPALIVE_TIMEOUT = 2
+  WARM_CONNECTIONS = 2
+  REFRESH_AFTER_SECONDS = LIFETIME_SECONDS - IDLE_SECONDS
   CONNECTION_ATTRIBUTES = (
     %i[address port ipaddr local_host local_port proxy_address proxy_port proxy_user proxy_pass
        open_timeout read_timeout write_timeout continue_timeout use_ssl? verify_hostname] +
@@ -40,6 +44,30 @@ module NevidimyTelegramTransport
     (Time.now.to_f * 1000).to_i
   end
 
+  def self.verified_connection(uri, options)
+    unless destination?(uri) || uri.to_s == 'https://api.telegram.org/'
+      raise ArgumentError, 'Telegram transport destination is not allowed'
+    end
+    connection = HTTParty::ConnectionAdapter.call(uri, options)
+    unless connection.address == 'api.telegram.org' && connection.port == 443
+      raise ArgumentError, 'Telegram transport connection is not allowed'
+    end
+    connection.use_ssl = true
+    connection.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    connection.verify_hostname = true if connection.respond_to?(:verify_hostname=)
+    connection.verify_callback = nil
+    connection.max_retries = 0
+    connection.keep_alive_timeout = IDLE_SECONDS
+    connection.set_debug_output(nil)
+    connection
+  end
+
+  def self.canonical_connection
+    uri = URI('https://api.telegram.org/')
+    native = HTTParty.build_request(Net::HTTP::Head, uri)
+    verified_connection(uri, native.options)
+  end
+
   def self.log_send(message, timing)
     attributes = message.content_attributes
     received_at = attributes[RECEIVED_AT_ATTRIBUTE] if attributes.is_a?(Hash)
@@ -49,6 +77,8 @@ module NevidimyTelegramTransport
     Rails.logger.info({
       event: 'nevidimy_telegram_send', message_id: message.id.is_a?(Integer) ? message.id : nil,
       http_elapsed_ms: timing[:http_elapsed_ms]&.round,
+      pool_checkout_ms: timing[:pool_checkout_ms]&.round(3),
+      connection_reused: timing[:connection_reused], tls_setup_ms: timing[:tls_setup_ms]&.round(3),
       send_elapsed_ms: ((monotonic - timing[:started]) * 1000).round,
       accepted_at_ms: accepted_at, source_to_accepted_ms: elapsed,
       success: timing[:success], outcome_class: timing[:outcome_class]
@@ -64,28 +94,102 @@ module NevidimyTelegramTransport
       @available = ConditionVariable.new
       @connections = []
       @created_at = {}
+      @keys = {}
       @idle = []
       @pid = Process.pid
     end
 
     def request(candidate, *arguments, &block)
+      waited = monotonic
       connection, key = checkout(candidate)
       reusable = false
       begin
-        connection.start unless connection.started?
+        timing = Thread.current[TIMING_KEY]
+        reused = connection.started?
+        original_socket = connection.instance_variable_get(:@socket) if reused
+        if timing
+          timing[:pool_checkout_ms] = (monotonic - waited) * 1000
+          timing[:connection_reused] = reused
+        end
+        setup = monotonic
+        begin
+          connection.start unless reused
+        ensure
+          timing[:tls_setup_ms] = reused ? 0.0 : (monotonic - setup) * 1000 if timing
+        end
         response = connection.request(*arguments, &block)
         reusable = !response.connection_close?
         response
       ensure
-        @mutex.synchronize do
-          if reusable && connection.started? && monotonic - @created_at.fetch(connection) < LIFETIME_SECONDS
-            @idle << [connection, key, monotonic]
-          else
-            @connections.delete(connection)
-            @created_at.delete(connection)
-            close(connection)
-          end
-          @available.broadcast
+        if timing && reused
+          # Net::HTTP can reconnect before transmitting when it observes an idle
+          # peer's EOF. started? alone is not proof of reusing the TLS session.
+          same_socket = original_socket && original_socket.equal?(connection.instance_variable_get(:@socket))
+          timing[:connection_reused] = !!same_socket
+          timing[:tls_setup_ms] = nil unless same_socket
+        end
+        release(connection, key, reusable)
+      end
+    end
+
+    # Maintenance never waits for or takes a busy foreground lease. An old
+    # idle session stays usable until its verified replacement is ready.
+    def maintain(candidate)
+      key = key_for(candidate)
+      make_refresh_room(key)
+      old = nil
+      connection = @mutex.synchronize do
+        @pid = Process.pid if @pid != Process.pid && @connections.empty?
+        next nil unless @pid == Process.pid
+
+        now = monotonic
+        entry = @idle.select { |_http, idle_key, _used| idle_key == key }
+                     .min_by do |http, _idle_key, used|
+                       born = @created_at.fetch(http)
+                       renewing = now - born >= REFRESH_AFTER_SECONDS || now - used >= IDLE_SECONDS
+                       renewing ? [0, born] : [1, used]
+                     end
+        rotate = entry && (now - @created_at.fetch(entry[0]) >= REFRESH_AFTER_SECONDS ||
+                            now - entry[2] >= IDLE_SECONDS)
+        if rotate || @keys.values.count(key) < WARM_CONNECTIONS
+          next nil if @connections.length >= MAX_CONNECTIONS
+
+          old = entry[0] if rotate
+          @connections << candidate
+          @created_at[candidate] = now
+          @keys[candidate] = key
+          candidate
+        elsif entry && now - entry[2] >= KEEPALIVE_INTERVAL
+          @idle.delete(entry)
+          entry[0]
+        end
+      end
+      return nil unless connection
+
+      reusable = false
+      begin
+        Timeout.timeout(KEEPALIVE_TIMEOUT) do
+          connection.start unless connection.started?
+          response = connection.request(Net::HTTP::Head.new('/'))
+          # A redirect is observed, never followed; no token/body is transmitted.
+          reusable = response.code.to_i.between?(200, 399) && !response.connection_close?
+        end
+        reusable
+      rescue StandardError
+        false
+      ensure
+        release(connection, key, reusable)
+        retire_idle(old) if old && reusable
+      end
+    end
+
+    def ready_count
+      @mutex.synchronize do
+        next 0 unless @pid == Process.pid
+
+        @idle.count do |http, _key, used|
+          http.started? && monotonic - used < IDLE_SECONDS &&
+            monotonic - @created_at.fetch(http) < LIFETIME_SECONDS
         end
       end
     end
@@ -103,7 +207,7 @@ module NevidimyTelegramTransport
       nil
     end
 
-    def checkout(candidate)
+    def key_for(candidate)
       # Only opaque digests, never URLs, bot tokens, or proxy credentials, are keys.
       settings = CONNECTION_ATTRIBUTES.map do |attribute|
         next unless candidate.respond_to?(attribute)
@@ -111,13 +215,65 @@ module NevidimyTelegramTransport
         value = candidate.public_send(attribute)
         [attribute, value.class.name, value.to_s]
       end.compact
-      key = Digest::SHA256.hexdigest(Marshal.dump(settings))
+      Digest::SHA256.hexdigest(Marshal.dump(settings))
+    end
+
+    def release(connection, key, reusable)
+      retired = @mutex.synchronize do
+        if reusable && connection.started? && monotonic - @created_at.fetch(connection) < LIFETIME_SECONDS
+          @idle << [connection, key, monotonic]
+          nil
+        else
+          @connections.delete(connection)
+          @created_at.delete(connection)
+          @keys.delete(connection)
+          connection
+        end.tap { @available.broadcast }
+      end
+      close(retired) if retired
+    end
+
+    def retire_idle(connection)
+      retired = @mutex.synchronize do
+        entry = @idle.find { |http, _key, _used| http.equal?(connection) }
+        next nil unless entry
+
+        @idle.delete(entry)
+        @connections.delete(connection)
+        @created_at.delete(connection)
+        @keys.delete(connection)
+        @available.broadcast
+        connection
+      end
+      close(retired) if retired
+    end
+
+    def make_refresh_room(key)
+      victim = @mutex.synchronize do
+        next nil unless @pid == Process.pid && @connections.length >= MAX_CONNECTIONS
+
+        entries = @idle.select { |_http, idle_key, _used| idle_key == key }
+        next nil unless entries.length > 1
+
+        entries.sort_by! { |http, _idle_key, _used| @created_at.fetch(http) }
+        oldest, _idle_key, used = entries.first
+        next nil unless monotonic - @created_at.fetch(oldest) >= REFRESH_AFTER_SECONDS ||
+                        monotonic - used >= IDLE_SECONDS
+
+        entries[1][0] # Retain the oldest usable socket until its replacement is ready.
+      end
+      retire_idle(victim) if victim
+    end
+
+    def checkout(candidate)
+      key = key_for(candidate)
       deadline = monotonic + CHECKOUT_SECONDS
       @mutex.synchronize do
         if @pid != Process.pid
           @connections.each { |connection| close(connection) }
           @connections.clear
           @created_at.clear
+          @keys.clear
           @idle.clear
           @pid = Process.pid
         end
@@ -128,6 +284,7 @@ module NevidimyTelegramTransport
 
             @connections.delete(connection)
             @created_at.delete(connection)
+            @keys.delete(connection)
             close(connection)
             true
           end
@@ -139,11 +296,13 @@ module NevidimyTelegramTransport
             connection = @idle.shift.first
             @connections.delete(connection)
             @created_at.delete(connection)
+            @keys.delete(connection)
             close(connection)
           end
           if @connections.length < MAX_CONNECTIONS
             @connections << candidate
             @created_at[candidate] = monotonic
+            @keys[candidate] = key
             return [candidate, key]
           end
 
@@ -157,6 +316,90 @@ module NevidimyTelegramTransport
   end
 
   POOL = Pool.new
+
+  class Keepalive
+    def initialize(pool = POOL)
+      @pool = pool
+      @mutex = Mutex.new
+      @condition = ConditionVariable.new
+      @running = false
+    end
+
+    def start
+      @mutex.synchronize do
+        return if @pid == Process.pid && @running
+
+        @pid = Process.pid
+        @stopped = false
+        @running = true
+      end
+      # Sidekiq fires startup after application warmup and before job fetching.
+      tick
+      log('startup')
+      @mutex.synchronize do
+        if @stopped
+          @running = false
+          return
+        end
+        @thread = Thread.new do
+          begin
+            loop do
+              stopped = @mutex.synchronize do
+                @condition.wait(@mutex, KEEPALIVE_INTERVAL) unless @stopped
+                @stopped || @pid != Process.pid
+              end
+              break if stopped
+
+              tick
+            end
+          ensure
+            @mutex.synchronize { @running = false if @pid == Process.pid }
+          end
+        end
+        @thread.name = 'telegram-keepalive' if @thread.respond_to?(:name=)
+      end
+    rescue StandardError
+      @mutex.synchronize { @running = false }
+      log('unavailable')
+      nil
+    end
+
+    def stop(wait: false)
+      thread = @mutex.synchronize do
+        return unless @pid == Process.pid
+
+        @stopped = true
+        @condition.broadcast
+        @thread
+      end
+      thread.join(KEEPALIVE_TIMEOUT * WARM_CONNECTIONS + 1) if wait && thread && thread != Thread.current
+    end
+
+    private
+
+    def tick
+      results = WARM_CONNECTIONS.times.map { @pool.maintain(NevidimyTelegramTransport.canonical_connection) }
+      if results.include?(false)
+        log('unavailable') unless @failed
+        @failed = true
+      elsif results.include?(true)
+        log('recovered') if @failed
+        @failed = false
+      end
+    rescue StandardError
+      log('unavailable') unless @failed
+      @failed = true
+    end
+
+    def log(phase)
+      Rails.logger.info({ event: 'nevidimy_telegram_keepalive', phase: phase,
+                          ready: @pool.ready_count, pid: Process.pid }.to_json)
+    rescue StandardError
+      nil
+    end
+  end
+
+  KEEPALIVE = Keepalive.new
 
   class Lease
     def initialize(connection)
@@ -173,18 +416,7 @@ module NevidimyTelegramTransport
       # Also checked on redirects: this specialized adapter cannot expand its origin.
       raise ArgumentError, 'Telegram transport destination is not allowed' unless NevidimyTelegramTransport.destination?(uri)
 
-      connection = HTTParty::ConnectionAdapter.call(uri, options)
-      unless connection.address == 'api.telegram.org' && connection.port == 443
-        raise ArgumentError, 'Telegram transport connection is not allowed'
-      end
-
-      connection.use_ssl = true
-      connection.verify_mode = OpenSSL::SSL::VERIFY_PEER
-      connection.verify_hostname = true if connection.respond_to?(:verify_hostname=)
-      connection.verify_callback = nil
-      connection.max_retries = 0
-      connection.keep_alive_timeout = IDLE_SECONDS
-      Lease.new(connection)
+      Lease.new(NevidimyTelegramTransport.verified_connection(uri, options))
     end
   end
 
@@ -242,4 +474,12 @@ end
 HTTParty.singleton_class.prepend(NevidimyTelegramTransport::HttpPartyPatch)
 Rails.application.reloader.to_prepare do
   Channel::Telegram.prepend(NevidimyTelegramTransport::ChannelPatch)
+end
+
+if defined?(Sidekiq)
+  Sidekiq.configure_server do |config|
+    config.on(:startup) { NevidimyTelegramTransport::KEEPALIVE.start }
+    config.on(:quiet) { NevidimyTelegramTransport::KEEPALIVE.stop }
+    config.on(:shutdown) { NevidimyTelegramTransport::KEEPALIVE.stop(wait: true) }
+  end
 end

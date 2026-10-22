@@ -21,4 +21,4 @@ def test_native_telegram_text_transport_reuses_verified_tls_sessions_without_ret
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert len(report) == 10 and all(report.values())
+    assert len(report) == 20 and all(report.values())
