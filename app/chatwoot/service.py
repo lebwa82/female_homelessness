@@ -124,6 +124,7 @@ class ChatwootAgentService:
         queue_router: QueueRouter | None = None,
         certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
         certificate_resume: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
+        certificate_request: Callable[[str, str, int, int, int, str], Awaitable[bool]] | None = None,
         certificate_store: CertificateObjectStore | None = None,
         certificate_mark_submitted: Callable[[str, int], Awaitable[None]] | None = None,
         certificate_mark_failed: Callable[[str], Awaitable[None]] | None = None,
@@ -138,6 +139,7 @@ class ChatwootAgentService:
         self._locks: dict[int, asyncio.Lock] = {}
         self._certificate_claim = certificate_claim
         self._certificate_resume = certificate_resume
+        self._certificate_request = certificate_request
         self._certificate_store = certificate_store
         self._certificate_mark_submitted = certificate_mark_submitted
         self._certificate_mark_failed = certificate_mark_failed
@@ -213,6 +215,9 @@ class ChatwootAgentService:
             )
             candidate._certificate_claim = no_external_effect
             candidate._certificate_resume = no_external_effect
+            candidate._certificate_request = (
+                no_external_effect if self._certificate_request is not None else None
+            )
             candidate._send_certificate = no_external_effect
             try:
                 planned = await candidate._process_locked(event)
@@ -371,7 +376,12 @@ class ChatwootAgentService:
 
         handoff = _requires_human_handoff(seeded)
         with timed_stage("scenario_effects"):
-            await self._scenario_effects.apply(event.conversation_id, event.message_id, seeded.store.actions)
+            await self._persist_certificate_requests(event, seeded)
+            await self._scenario_effects.apply(event.conversation_id, event.message_id, [
+                action for action in seeded.store.actions
+                if not (action[1] == "scenario_event"
+                        and action[3].get("kind") == "certificate_requested")
+            ])
         if handoff:
             if not await self._notify_duty(event, seeded, messages):
                 return False
@@ -406,6 +416,18 @@ class ChatwootAgentService:
             "scenario_pending_input": None, "scenario_last_message_id": event.message_id,
         })
         return True
+
+    async def _persist_certificate_requests(
+        self, event: IncomingChatwootMessage, seeded: _SeededConversation,
+    ) -> None:
+        if self._certificate_request is None:
+            return
+        for _, action, _, payload in seeded.store.actions:
+            if action == "scenario_event" and payload.get("kind") == "certificate_requested":
+                await self._certificate_request(
+                    payload["aid_id"], payload["key"], event.contact_id,
+                    event.conversation_id, event.message_id, payload["reason"],
+                )
 
     async def _send_certificate(
         self, conversation_id: int, turn_key: str, turn: AgentTurn
