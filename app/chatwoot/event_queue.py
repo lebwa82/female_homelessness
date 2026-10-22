@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import asdict
 
 from redis.exceptions import ResponseError
@@ -20,6 +21,7 @@ from app.chatwoot.contracts import (
     MessageDeliveryChanged,
     StaffMessage,
 )
+from app.chatwoot.telemetry import event_timing
 
 logger = logging.getLogger(__name__)
 EVENTS = {kind.__name__: kind for kind in (
@@ -57,12 +59,15 @@ class DurableEventQueue:
         # Our fixed consumer name resumes unacknowledged work after process death.
         batches = await self.redis.xreadgroup(self.group, self.consumer, {key: "0"}, count=1)
         if not any(messages for _, messages in batches):
-            batches = await self.redis.xreadgroup(self.group, self.consumer, {key: ">"},
-                                                  count=1, block=block_ms)
+            batches = await self.redis.xreadgroup(
+                self.group, self.consumer, {key: ">"}, count=1, block=block_ms
+            )
         for _, messages in batches:
             for entry_id, fields in messages:
                 event = EVENTS[fields["type"]](**json.loads(fields["payload"]))
-                await self.service.process(event)
+                queue_age_ms = max(0, time.time() * 1000 - int(entry_id.split("-", 1)[0]))
+                with event_timing(event, queue_age_ms=round(queue_age_ms, 3)):
+                    await self.service.process(event)
                 async with self.redis.pipeline(transaction=True) as transaction:
                     transaction.xack(key, self.group, entry_id)
                     transaction.xdel(key, entry_id)

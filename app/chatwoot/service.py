@@ -23,6 +23,7 @@ from app.chatwoot.contracts import (
 from app.chatwoot.queues import QueueCoordinator
 from app.chatwoot.routing import QueueRouter
 from app.chatwoot.scenario_effects import ScenarioEffects, returning_after_day
+from app.chatwoot.telemetry import event_timing, timed_stage
 from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
 from app.release_info import active_release_info
@@ -135,26 +136,42 @@ class ChatwootAgentService:
 
     async def process(
         self,
-        event: IncomingChatwootMessage | ConversationChanged | StaffMessage | MessageDeliveryChanged,
+        event: IncomingChatwootMessage
+        | ConversationChanged
+        | StaffMessage
+        | MessageDeliveryChanged,
     ) -> bool:
         """Process one trusted inbound event; ``False`` means intentionally silent."""
-        lock = self._locks.setdefault(event.conversation_id, asyncio.Lock())
-        async with lock:
-            if isinstance(event, MessageDeliveryChanged):
-                if event.status in {"delivered", "read"}:
-                    if self._certificate_mark_delivered is not None:
-                        await self._certificate_mark_delivered(event.message_id)
-                elif event.status == "failed" and self._certificate_mark_delivery_failed is not None:
-                    await self._certificate_mark_delivery_failed(event.message_id)
-                return False
-            if isinstance(event, StaffMessage):
-                await self._staff_message(event)
-                return False
-            if isinstance(event, ConversationChanged):
-                conversation = await self._sync_owner(event.conversation_id)
-                await self._queues.sync(conversation)
-                return False
-            return await self._process_locked(event)
+        with event_timing(event) as timing:
+            if timing and isinstance(event, IncomingChatwootMessage):
+                timing.kind = "callback" if _is_callback(event.content) else "text"
+            lock = self._locks.setdefault(event.conversation_id, asyncio.Lock())
+            with timed_stage("lock_wait"):
+                await lock.acquire()
+            try:
+                if isinstance(event, MessageDeliveryChanged):
+                    if event.status in {"delivered", "read"}:
+                        if self._certificate_mark_delivered is not None:
+                            await self._certificate_mark_delivered(event.message_id)
+                    elif (
+                        event.status == "failed"
+                        and self._certificate_mark_delivery_failed is not None
+                    ):
+                        await self._certificate_mark_delivery_failed(event.message_id)
+                    return False
+                if isinstance(event, StaffMessage):
+                    await self._staff_message(event)
+                    return False
+                if isinstance(event, ConversationChanged):
+                    conversation = await self._sync_owner(event.conversation_id)
+                    await self._queues.sync(conversation)
+                    return False
+                result = await self._process_locked(event)
+                if timing:
+                    timing.replied = result
+                return result
+            finally:
+                lock.release()
 
     async def _process_locked(self, event: IncomingChatwootMessage) -> bool:
         conversation = await self._sync_owner(event.conversation_id)
@@ -195,7 +212,8 @@ class ChatwootAgentService:
         await self._queues.sync(conversation)
 
         turn_key = f"message:{event.message_id}"
-        messages = await self._api.get_messages(event.conversation_id)
+        with timed_stage("history"):
+            messages = await self._api.get_messages(event.conversation_id)
         if await self._api.has_reply_for_turn(event.conversation_id, turn_key, messages=messages):
             await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
             pending = _custom_attributes(conversation).get("scenario_pending_input") or {}
@@ -224,40 +242,43 @@ class ChatwootAgentService:
         seeded = _seed_conversation(event, conversation, messages, self._certificate_claim)
         legacy_service = ConversationService(store=seeded.store, gateway=self._gateway,
                                              html_scenario=True)
-        if is_start_command:
-            turn = await legacy_service.start(seeded.incoming)
-            if returning_after_day(messages, event.message_id, self._scenario_effects.clock()):
-                turn = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)
-                turn = legacy_service._with_back_choice(seeded.record, turn)
-        elif _is_callback(event.content):
-            turn = await legacy_service.handle_callback(seeded.incoming, event.content)
-        else:
-            turn = await legacy_service.handle_text(seeded.incoming)
-            if (seeded.record.state == ConversationState.OPEN_CONVERSATION.value
-                    and not turn.audit.get("critical_delivery")
-                    and returning_after_day(messages, event.message_id, self._scenario_effects.clock())):
-                welcome = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)
-                choices = {c.id: c for c in (*welcome.choices, *turn.choices)
-                           if not c.id.startswith("back:")}
-                # The model already answered the current text, possibly with a
-                # greeting. Restore the menu without prepending a second welcome.
-                turn = turn.model_copy(update={"choices": tuple(choices.values())})
-                turn = legacy_service._with_back_choice(seeded.record, turn)
+        with timed_stage("scenario"):
+            if is_start_command:
+                turn = await legacy_service.start(seeded.incoming)
+                if returning_after_day(messages, event.message_id, self._scenario_effects.clock()):
+                    turn = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)
+                    turn = legacy_service._with_back_choice(seeded.record, turn)
+            elif _is_callback(event.content):
+                turn = await legacy_service.handle_callback(seeded.incoming, event.content)
+            else:
+                turn = await legacy_service.handle_text(seeded.incoming)
+                if (seeded.record.state == ConversationState.OPEN_CONVERSATION.value
+                        and not turn.audit.get("critical_delivery")
+                        and returning_after_day(messages, event.message_id, self._scenario_effects.clock())):
+                    welcome = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)
+                    choices = {c.id: c for c in (*welcome.choices, *turn.choices)
+                               if not c.id.startswith("back:")}
+                    # The model already answered the current text, possibly with a
+                    # greeting. Restore the menu without prepending a second welcome.
+                    turn = turn.model_copy(update={"choices": tuple(choices.values())})
+                    turn = legacy_service._with_back_choice(seeded.record, turn)
 
         # A staff member may have claimed the conversation while Qwen was
         # evaluating. Never overwrite that ownership with a stale workflow
         # projection.
-        before_side_effects = await self._sync_owner(event.conversation_id)
+        with timed_stage("ownership_guard"):
+            before_side_effects = await self._sync_owner(event.conversation_id)
         if not _bot_owns(before_side_effects):
             return False
         # A public staff reply can arrive while the LLM holds our local lock,
         # before that reply's webhook has projected the visible assignment.
-        staff = _latest_staff_message(
-            await self._api.get_messages(event.conversation_id, after_id=event.message_id),
-            event.conversation_id,
-            after=max(event.message_id, _epoch(_custom_attributes(before_side_effects).get(
-                "ownership_last_staff_message_id"))),
-        )
+        with timed_stage("staff_guard"):
+            staff = _latest_staff_message(
+                await self._api.get_messages(event.conversation_id, after_id=event.message_id),
+                event.conversation_id,
+                after=max(event.message_id, _epoch(_custom_attributes(before_side_effects).get(
+                    "ownership_last_staff_message_id"))),
+            )
         if staff is not None:
             await self._staff_message(staff)
             return False
@@ -283,13 +304,15 @@ class ChatwootAgentService:
             })
 
         handoff = _requires_human_handoff(seeded)
-        await self._scenario_effects.apply(event.conversation_id, event.message_id, seeded.store.actions)
+        with timed_stage("scenario_effects"):
+            await self._scenario_effects.apply(event.conversation_id, event.message_id, seeded.store.actions)
         if handoff:
             if not await self._notify_duty(event, seeded, messages):
                 return False
         else:
-            await self._persist_workflow(event.conversation_id, seeded.record)
-            await self._persist_aid_requests(event.conversation_id, seeded)
+            with timed_stage("workflow_write"):
+                await self._persist_workflow(event.conversation_id, seeded.record)
+                await self._persist_aid_requests(event.conversation_id, seeded)
 
         # A notification is not a takeover. A real human assignment wins even
         # while we are notifying the duty team; do not publish a late model reply.
@@ -304,13 +327,14 @@ class ChatwootAgentService:
             if not await self._send_certificate(event.conversation_id, turn_key, turn):
                 return False
         else:
-            await self._api.send_reply(
-                event.conversation_id,
-                text=turn.text,
-                choices=turn.choices,
-                turn_key=turn_key,
-                sensitive_content=turn.audit.get("sensitive_content"),
-            )
+            with timed_stage("reply_write"):
+                await self._api.send_reply(
+                    event.conversation_id,
+                    text=turn.text,
+                    choices=turn.choices,
+                    turn_key=turn_key,
+                    sensitive_content=turn.audit.get("sensitive_content"),
+                )
         await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
         await self._api.set_custom_attributes(event.conversation_id, {
             "scenario_pending_input": None, "scenario_last_message_id": event.message_id,

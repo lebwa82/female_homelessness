@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 import aiohttp
 
+from app.chatwoot.telemetry import api_timing, reply_persisted
 from app.domain import Choice
 
 
@@ -100,25 +101,28 @@ class AiohttpChatwootTransport:
         token: str,
         payload: dict[str, Any] | None = None,
     ) -> Any:
-        try:
-            async with (
-                self._http_session() as session,
-                session.request(
-                    method,
-                    f"{self._base_url}{path}",
-                    headers=self.request_headers(token),
-                    json=payload,
-                ) as response,
-            ):
-                if response.status >= 400:
-                    raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
-                if response.status == 204:
-                    return {}
-                return await response.json(content_type=None)
-        except ChatwootApiError:
-            raise
-        except aiohttp.ClientError as error:
-            raise ChatwootApiError(path.rsplit("/", 1)[-1], 0) from error
+        with api_timing(method, path) as timing:
+            try:
+                async with (
+                    self._http_session() as session,
+                    session.request(
+                        method,
+                        f"{self._base_url}{path}",
+                        headers=self.request_headers(token),
+                        json=payload,
+                    ) as response,
+                ):
+                    timing.status = response.status
+                    timing.request_id = response.headers.get("X-Request-Id", "")
+                    if response.status >= 400:
+                        raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
+                    if response.status == 204:
+                        return {}
+                    return await response.json(content_type=None)
+            except ChatwootApiError:
+                raise
+            except aiohttp.ClientError as error:
+                raise ChatwootApiError(path.rsplit("/", 1)[-1], 0) from error
 
     async def request_multipart(
         self,
@@ -137,23 +141,26 @@ class AiohttpChatwootTransport:
             filename=attachment.filename,
             content_type=attachment.content_type,
         )
-        try:
-            async with (
-                self._http_session() as session,
-                session.request(
-                    method,
-                    f"{self._base_url}{path}",
-                    headers=self.request_headers(token),
-                    data=form,
-                ) as response,
-            ):
-                if response.status >= 400:
-                    raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
-                return await response.json(content_type=None)
-        except ChatwootApiError:
-            raise
-        except aiohttp.ClientError as error:
-            raise ChatwootApiError(path.rsplit("/", 1)[-1], 0) from error
+        with api_timing(method, path) as timing:
+            try:
+                async with (
+                    self._http_session() as session,
+                    session.request(
+                        method,
+                        f"{self._base_url}{path}",
+                        headers=self.request_headers(token),
+                        data=form,
+                    ) as response,
+                ):
+                    timing.status = response.status
+                    timing.request_id = response.headers.get("X-Request-Id", "")
+                    if response.status >= 400:
+                        raise ChatwootApiError(path.rsplit("/", 1)[-1], response.status)
+                    return await response.json(content_type=None)
+            except ChatwootApiError:
+                raise
+            except aiohttp.ClientError as error:
+                raise ChatwootApiError(path.rsplit("/", 1)[-1], 0) from error
 
 
 class ChatwootClient:
@@ -327,7 +334,9 @@ class ChatwootClient:
             response = await self._transport.request_multipart(
                 "POST", path, self._bot_token, fields, attachment
             )
-        return _message_id(response)
+        message_id = _message_id(response)
+        reply_persisted(message_id)
+        return message_id
 
     async def has_reply_for_turn(
         self, conversation_id: int, turn_key: str, *,

@@ -1,5 +1,7 @@
 """Real local HTTPS: connection reuse must preserve CA/name checks and identities."""
 
+import json
+import logging
 import socket
 import ssl
 
@@ -8,6 +10,8 @@ import pytest
 from aiohttp import web
 
 from app.chatwoot.client import AiohttpChatwootTransport, BinaryAttachment, ChatwootApiError
+from app.chatwoot.contracts import IncomingChatwootMessage
+from app.chatwoot.telemetry import event_timing
 from tests.test_internal_tls import certificates as _certificates
 
 certificates = _certificates
@@ -22,6 +26,7 @@ async def https_endpoint(certificates):
         calls.append((request.transport, request.headers.get("Api-Access-Token"),
                       request.headers.get("Cookie")))
         response = web.json_response({"ok": True})
+        response.headers["X-Request-Id"] = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         response.set_cookie("session", "synthetic")
         return response
 
@@ -101,3 +106,22 @@ async def test_pool_rejects_untrusted_ca_and_wrong_hostname(
         assert not calls
     finally:
         await transport.aclose()
+
+
+async def test_transport_emits_only_status_and_safe_correlation_metadata(
+    monkeypatch, certificates, https_endpoint, caplog,
+):
+    trust_test_ca(monkeypatch, certificates)
+    caplog.set_level(logging.INFO, logger="app.chatwoot.telemetry")
+    url, _ = https_endpoint
+    transport = AiohttpChatwootTransport(url, reuse_connections=True)
+    try:
+        with event_timing(IncomingChatwootMessage(41, 23, 1, 2, "private-input")):
+            await transport.request("POST", "/?private=query", "private-token", {"content": "private-body"})
+    finally:
+        await transport.aclose()
+    call, = [json.loads(r.getMessage().partition(" ")[2]) for r in caplog.records
+             if r.getMessage().startswith("chatwoot_api_timing ")]
+    assert call["status"] == 200 and call["message"] == 41
+    assert call["request_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert "private" not in caplog.text

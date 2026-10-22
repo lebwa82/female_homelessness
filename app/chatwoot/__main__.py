@@ -15,11 +15,13 @@ from app.chatwoot.client import AiohttpChatwootTransport, ChatwootClient
 from app.chatwoot.event_queue import DurableEventQueue
 from app.chatwoot.followups import run as run_followups
 from app.chatwoot.service import ChatwootAgentService
+from app.chatwoot.telemetry import configure as configure_timing_logs
 from app.config import settings
 from app.transport_tls import server_context
 
 
 def main() -> None:
+    configure_timing_logs()
     if error := settings.chatwoot_configuration_error():
         raise SystemExit(error)
     if not settings.certificate_database_password:

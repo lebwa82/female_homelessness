@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import shutil
 import tempfile
 import uuid
@@ -15,6 +16,34 @@ from test_chatwoot_app import FakeRequest, RecordingService, _payload
 from app.chatwoot.app import AgentBotWebhook
 from app.chatwoot.contracts import ConversationChanged, IncomingChatwootMessage
 from app.chatwoot.event_queue import DurableEventQueue
+
+
+async def test_queue_age_and_retry_are_content_free_and_keep_event_identity(redis, caplog):
+    caplog.set_level(logging.INFO, logger="app.chatwoot.telemetry")
+
+    class FailingOnce(RecordingService):
+        fail = True
+
+        async def process(self, event):
+            if self.fail:
+                self.fail = False
+                raise RuntimeError("synthetic-private-error")
+            await super().process(event)
+
+    queue = await prepared(redis, FailingOnce())
+    await queue.enqueue(IncomingChatwootMessage(41, 2, 5, 1, "synthetic-private-input"))
+    with pytest.raises(RuntimeError):
+        await queue.consume_one(queue.keys[0])
+    assert (await redis.xpending(queue.keys[0], queue.group))["pending"] == 1
+    assert await queue.consume_one(queue.keys[0])
+    summaries = [json.loads(r.getMessage().partition(" ")[2]) for r in caplog.records
+                 if r.getMessage().startswith("chatwoot_event_timing ")]
+    assert len(summaries) == 2
+    assert all(r["conversation"] == 2 and r["message"] == 41 for r in summaries)
+    assert summaries[1]["queue_age_ms"] >= summaries[0]["queue_age_ms"] >= 0
+    assert [r["error_type"] for r in summaries] == ["RuntimeError", None]
+    assert "private" not in caplog.text
+    assert (await redis.xpending(queue.keys[0], queue.group))["pending"] == 0
 
 
 @pytest.fixture
