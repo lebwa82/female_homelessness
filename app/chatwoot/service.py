@@ -22,6 +22,7 @@ from app.chatwoot.contracts import (
 )
 from app.chatwoot.fast_buttons import (
     CAPABILITY,
+    PRIVATE_NOTES_FEATURE,
     BufferedButtonApi,
     NoExternalGateway,
     UnsupportedFastButton,
@@ -215,10 +216,15 @@ class ChatwootAgentService:
             return None  # Everything so far was an in-memory, effect-free plan.
         if not planned or buffered.reply is None:
             return None
+        notes = buffered.notes
+        if notes and (not isinstance(snapshot.get("features"), list)
+                      or PRIVATE_NOTES_FEATURE not in snapshot["features"]):
+            return None
         try:
             message_id = await self._api.commit_button(
                 event.conversation_id, event.message_id, snapshot["version"],
                 buffered.attributes, buffered.reply,
+                **({"notes": notes} if notes else {}),
             )
         except UnsupportedFastButton:
             return None  # Client preflight rejected the plan before sending it.

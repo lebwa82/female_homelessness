@@ -10,7 +10,11 @@ from typing import Any, Protocol
 
 import aiohttp
 
-from app.chatwoot.fast_buttons import BUTTON_ATTRIBUTES, UnsupportedFastButton
+from app.chatwoot.fast_buttons import (
+    BUTTON_ATTRIBUTES,
+    UnsupportedFastButton,
+    validate_button_notes,
+)
 from app.chatwoot.telemetry import api_timing, reply_persisted
 from app.domain import Choice
 
@@ -200,7 +204,8 @@ class ChatwootClient:
         ))
 
     async def commit_button(self, conversation_id: int, message_id: int, version: str,
-                            attributes: dict, reply: dict) -> int | None:
+                            attributes: dict, reply: dict, *,
+                            notes: list[dict[str, str]] | None = None) -> int | None:
         payload = _reply_payload(**reply)
         # A legacy-supported large workflow must not become a permanently
         # failing queued event. Reject incompatible plans before any POST.
@@ -213,6 +218,10 @@ class ChatwootClient:
         payload["nevidimy_atomic_turn"] = {
             "input_id": message_id, "version": version, "attributes": attributes,
         }
+        if notes is not None:
+            validate_button_notes(notes)
+            if notes:
+                payload["nevidimy_atomic_turn"]["notes"] = notes
         try:
             result = _as_object(await self._transport.request(
                 "POST", self._path(f"/conversations/{conversation_id}/messages"),

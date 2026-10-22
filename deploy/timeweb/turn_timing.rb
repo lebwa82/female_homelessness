@@ -50,7 +50,7 @@ module NevidimyTurnTiming
 
   def self.record_message(message)
     scope = Thread.current[SCOPE_KEY]
-    return unless scope && message.outgoing? && message.id.is_a?(Integer) && message.id.positive?
+    return unless scope && message.outgoing? && !message.private? && message.id.is_a?(Integer) && message.id.positive?
 
     scope[:outgoing_message_id] ||= message.id
   rescue StandardError

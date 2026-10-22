@@ -1,14 +1,15 @@
 """Speculative button planning; the native Chatwoot transaction is authoritative.
 
 This is an API buffer, not another scenario engine or durable state store. A plan
-can only change workflow bookkeeping and create one plain reply. Every external
-capability fails closed, before anything leaves this process.
+can change approved scenario state, buffer private notes and create one plain
+reply. Every external capability fails closed before anything leaves this process.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any
 
 BUTTON_ATTRIBUTES = frozenset(
@@ -26,14 +27,44 @@ BUTTON_ATTRIBUTES = frozenset(
         "scenario_pending_input",
         "scenario_last_message_id",
         "scenario_followups",
+        "scenario_requests",
+        "scenario_event_receipts",
         "consultation_reviewed",
     }
 )
 CAPABILITY = "nevidimy-atomic-turn-v1"
+PRIVATE_NOTES_FEATURE = "private_notes_v1"
 
 
 class UnsupportedFastButton(Exception):
     """No live effects occurred; the established handler can safely take over."""
+
+
+def validate_button_notes(notes: list[dict[str, str]]) -> None:
+    """Match the bounded native private-note contract before any HTTP write."""
+    if not isinstance(notes, list) or len(notes) > 4:
+        raise UnsupportedFastButton("unsupported_private_notes")
+    total = 0
+    for note in notes:
+        if not isinstance(note, dict) or note.keys() != {"content", "event_key"}:
+            raise UnsupportedFastButton("unsupported_private_notes")
+        content, key = note["content"], note["event_key"]
+        if not isinstance(content, str) or not isinstance(key, str):
+            raise UnsupportedFastButton("unsupported_private_notes")
+        try:
+            size = len(content.encode("utf-8"))
+            key_size = len(key.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise UnsupportedFastButton("unsupported_private_notes") from None
+        if (
+            size > 32_768
+            or not 0 < key_size <= 256
+            or re.fullmatch(r"scenario(?:-alert)?:[0-9a-f]{24}", key) is None
+        ):
+            raise UnsupportedFastButton("unsupported_private_notes")
+        total += size
+    if total > 65_536:
+        raise UnsupportedFastButton("unsupported_private_notes")
 
 
 class BufferedButtonApi:
@@ -41,6 +72,7 @@ class BufferedButtonApi:
         self._initial = copy.deepcopy(conversation)
         self._conversation = copy.deepcopy(conversation)
         self._reply: dict[str, Any] | None = None
+        self._notes: list[dict[str, str]] = []
 
     def _check(self, conversation_id: int) -> None:
         if type(conversation_id) is not int or conversation_id != self._conversation["id"]:
@@ -64,6 +96,10 @@ class BufferedButtonApi:
     def reply(self) -> dict[str, Any] | None:
         return copy.deepcopy(self._reply)
 
+    @property
+    def notes(self) -> list[dict[str, str]]:
+        return copy.deepcopy(self._notes)
+
     async def get_conversation(self, conversation_id: int) -> dict[str, Any]:
         self._check(conversation_id)
         return copy.deepcopy(self._conversation)
@@ -85,6 +121,16 @@ class BufferedButtonApi:
             **(self._conversation.get("custom_attributes") or {}),
             **copy.deepcopy(attributes),
         }
+
+    async def add_private_note(self, conversation_id: int, content: str, *, event_key=None) -> None:
+        self._check(conversation_id)
+        note = {"content": content, "event_key": event_key}
+        validate_button_notes([note])
+        if any(existing["event_key"] == event_key for existing in self._notes):
+            return
+        updated = [*self._notes, note]
+        validate_button_notes(updated)
+        self._notes = updated
 
     async def send_reply(
         self,

@@ -1,7 +1,7 @@
 # Compact projection/conditional commit on existing, authenticated API actions.
 # No new route, token, public port or scenario engine. Native message creation
 # and delivery remain authoritative; internal workflow writes emit no redundant
-# conversation_updated webhooks. Business effects use the established handler.
+# conversation_updated webhooks. Only advertised local effects join this transaction.
 require 'json'
 require 'time'
 
@@ -9,7 +9,8 @@ module NevidimyAtomicTurn
   CAPABILITY = 'nevidimy-atomic-turn-v1'.freeze
   ATTRIBUTES = %w[workflow_state workflow_need pending_aid_id pending_contact_method pending_city
                   pending_district pending_offer context_epoch workflow_navigation scenario
-                  scenario_pending_input scenario_last_message_id scenario_followups consultation_reviewed].freeze
+                  scenario_pending_input scenario_last_message_id scenario_followups consultation_reviewed
+                  scenario_requests scenario_event_receipts].freeze
 
   def self.version(conversation)
     conversation.updated_at.utc.iso8601(6)
@@ -54,7 +55,7 @@ module NevidimyAtomicTurn
       return head :not_found unless incoming
 
       render json: {
-        capability: CAPABILITY, input_id: incoming.id,
+        capability: CAPABILITY, features: ['private_notes_v1'], input_id: incoming.id,
         version: NevidimyAtomicTurn.version(@conversation),
         eligible: NevidimyAtomicTurn.eligible?(@conversation, incoming.id),
         reply_id: NevidimyAtomicTurn.reply(@conversation, incoming.id),
@@ -95,11 +96,12 @@ module NevidimyAtomicTurn
                     turn[:attributes]['context_epoch'] != (@conversation.custom_attributes['context_epoch'] || 0)
 
         # Only the explicit internal workflow allowlist can bypass callbacks.
-        # Native assignment/status, durable business requests and human notes
+        # Native assignment/status, external business effects and human notes
         # cannot enter this path. Merge under lock preserves unrelated fields.
         changes = turn[:attributes].to_unsafe_h
         @conversation.update_columns(custom_attributes: @conversation.custom_attributes.merge(changes),
                                      updated_at: Time.current)
+        create_nevidimy_notes(turn[:notes]) if turn.key?(:notes)
         payload = params.permit(:content, :content_type, content_attributes: {})
         payload[:message_type] = 'outgoing'
         payload[:private] = false
@@ -120,9 +122,59 @@ module NevidimyAtomicTurn
 
     private
 
+    def create_nevidimy_notes(notes)
+      return if notes.empty?
+
+      keys = notes.map { |note| note[:event_key] }
+      seen = {}
+      # Existing receipts may predate this input and may use native JSON-string
+      # storage. Load only metadata, through the model coder, in this conversation.
+      @conversation.messages.where(message_type: :outgoing, private: true)
+                   .select(:id, :content_attributes).each do |message|
+        attributes = message.content_attributes
+        next unless attributes.is_a?(Hash)
+
+        key = attributes['bot_event_key']
+        seen[key] = true if keys.include?(key)
+      end
+      notes.each do |note|
+        key = note[:event_key]
+        next if seen[key]
+
+        payload = ActionController::Parameters.new(
+          content: note[:content], content_type: 'text', message_type: 'outgoing', private: true,
+          content_attributes: { bot_event_key: key }
+        )
+        Messages::MessageBuilder.new(Current.user, @conversation, payload).perform
+        seen[key] = true
+      end
+    end
+
+    def valid_nevidimy_notes?(turn)
+      return true unless turn.key?(:notes)
+
+      notes = turn[:notes]
+      return false unless notes.is_a?(Array) && notes.size <= 4
+
+      total_bytes = 0
+      notes.all? do |note|
+        next false unless note.is_a?(ActionController::Parameters) && note.keys.sort == %w[content event_key]
+
+        content, key = note[:content], note[:event_key]
+        next false unless content.is_a?(String) && content.encoding == Encoding::UTF_8 &&
+                          content.valid_encoding? && content.bytesize <= 32_768
+        next false unless key.is_a?(String) && key.encoding == Encoding::UTF_8 && key.valid_encoding? &&
+                          key.bytesize <= 256 && key.match?(/\Ascenario(?:-alert)?:[0-9a-f]{24}\z/)
+
+        total_bytes += content.bytesize
+        total_bytes <= 65_536
+      end
+    end
+
     def valid_nevidimy_turn?(turn)
       return false unless turn.is_a?(ActionController::Parameters) &&
-                          turn.keys.sort == %w[attributes input_id version]
+                          [%w[attributes input_id version], %w[attributes input_id notes version]].include?(turn.keys.sort)
+      return false unless valid_nevidimy_notes?(turn)
       changes = turn[:attributes]
       return false unless changes.is_a?(ActionController::Parameters) && (changes.keys - ATTRIBUTES).empty?
       return false unless turn[:version].is_a?(String) && turn[:version].bytesize <= 40

@@ -91,13 +91,18 @@ class Message
   ].freeze
   attr_reader :id, :order, :failure, :fail_at
 
-  def initialize(id, failure: nil, fail_at: nil, outgoing: true)
+  def initialize(id, failure: nil, fail_at: nil, outgoing: true, private_message: false)
     @id, @failure, @fail_at, @outgoing = id, failure, fail_at, outgoing
+    @private_message = private_message
     @order = []
   end
 
   def outgoing?
     @outgoing
+  end
+
+  def private?
+    @private_message
   end
 
   def run_callbacks
@@ -141,10 +146,11 @@ module Api
           attr_reader :params, :response, :native_message, :calls
 
           def initialize(atomic: true, cold: false, id: 123, failure: nil, fail_at: nil,
-                         builder_failure: nil, gate: nil, outgoing: true)
+                         builder_failure: nil, gate: nil, outgoing: true, private_message: false)
             @params = atomic ? { nevidimy_atomic_turn: 'PRIVATE_SENTINEL' } : {}
             @response = OpenStruct.new(status: 201)
-            @native_message = Message.new(id, failure: failure, fail_at: fail_at, outgoing: outgoing)
+            @native_message = Message.new(id, failure: failure, fail_at: fail_at, outgoing: outgoing,
+                                         private_message: private_message)
             @cold, @builder_failure, @gate, @calls = cold, builder_failure, gate, 0
           end
 
@@ -306,5 +312,10 @@ verify(Rails.logger.events.all? { |event| (event.keys - allowed).empty? &&
                                       event['event'] == 'nevidimy_atomic_turn_timing' }, 'event allowlist')
 verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'sensitive sentinel logged')
 report[:content_free_allowlist] = true
+
+controller_class.new(private_message: true).create
+verify(!Rails.logger.events.last.key?('outgoing_message_id'), 'private note reported as public reply')
+controller_class.new(gate: -> { NevidimyTurnTiming.record_message(Message.new(77, private_message: true)) }).create
+verify(Rails.logger.events.last['outgoing_message_id'] == 123, 'private note shadowed public reply timing')
 
 puts JSON.generate(report)

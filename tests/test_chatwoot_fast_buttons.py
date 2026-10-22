@@ -6,10 +6,16 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.chatwoot.client import BinaryAttachment, ChatwootApiError
-from app.chatwoot.fast_buttons import CAPABILITY, BufferedButtonApi, UnsupportedFastButton
+from app.chatwoot.fast_buttons import (
+    CAPABILITY,
+    PRIVATE_NOTES_FEATURE,
+    BufferedButtonApi,
+    UnsupportedFastButton,
+)
 from app.chatwoot.routing import RouteDecision
 from app.chatwoot.service import ChatwootAgentService
 from app.domain import Choice
+from app.scenario import CERTIFICATES, CONSULTATION_IDS, render
 from app.store import CertificateClaimResult
 from tests.test_chatwoot_client import RecordingTransport, client
 from tests.test_chatwoot_service import FakeChatwoot, StubGateway, event, ordinary_evaluation
@@ -94,7 +100,7 @@ async def test_followup_and_pending_input_changes_are_buffered(conversation):
     }
 
 
-@pytest.mark.parametrize("field", ["scenario_requests", "routing_team_id", "unknown_field"])
+@pytest.mark.parametrize("field", ["bot_last_decision", "routing_team_id", "unknown_field"])
 async def test_unknown_attribute_rejects_entire_update_before_changes(conversation, field):
     api = BufferedButtonApi(conversation)
     with pytest.raises(UnsupportedFastButton):
@@ -154,7 +160,6 @@ async def test_attachments_are_rejected_before_buffering_reply(conversation):
 @pytest.mark.parametrize(
     "method,args",
     [
-        ("add_private_note", (23, "Neutral note")),
         ("set_status", (23, "open")),
         ("assign_human", (23, 4)),
         ("unassign_human", (23,)),
@@ -207,6 +212,8 @@ class FastChatwoot(FakeChatwoot):
         self.eligible = True
         self.duplicate_reply_id = None
         self.commit_mode = "success"
+        self.features = [PRIVATE_NOTES_FEATURE]
+        self.commit_notes = []
 
     async def button_snapshot(self, cid, message_id):
         self.snapshot_calls.append((cid, message_id))
@@ -216,16 +223,25 @@ class FastChatwoot(FakeChatwoot):
             "reply_id": self.duplicate_reply_id,
             "conversation": deepcopy(self.conversation),
             "version": "snapshot-version",
+            "features": deepcopy(self.features),
         }
 
-    async def commit_button(self, cid, message_id, version, attributes, reply):
+    async def commit_button(self, cid, message_id, version, attributes, reply, *, notes=None):
         self.commits.append((cid, message_id, version, deepcopy(attributes), deepcopy(reply)))
+        self.commit_notes.append(deepcopy(notes or []))
         if self.commit_mode == "conflict":
             return None
         if self.commit_mode == "preflight":
             raise UnsupportedFastButton("unsupported_commit_plan")
         if self.commit_mode == "unknown":
             raise ConnectionError("unknown atomic commit outcome")
+        for note in notes or []:
+            await FakeChatwoot.add_private_note(
+                self,
+                cid,
+                note["content"],
+                event_key=note["event_key"],
+            )
         await FakeChatwoot.set_custom_attributes(self, cid, attributes)
         return await FakeChatwoot.send_reply(self, cid, **reply)
 
@@ -526,7 +542,7 @@ async def test_incompatible_commit_plan_is_rejected_before_transport(invalid_par
     elif invalid_part == "large_utf8_text":
         reply["text"] = "я" * 16_385
     elif invalid_part == "unknown_field":
-        attributes["scenario_requests"] = {}
+        attributes["routing_team_id"] = 9
     elif invalid_part == "pending_input":
         attributes["scenario_pending_input"] = {"message_id": 41}
     elif invalid_part == "missing_watermark":
@@ -535,4 +551,273 @@ async def test_incompatible_commit_plan_is_rejected_before_transport(invalid_par
         attributes["scenario_last_message_id"] = 40
     with pytest.raises(UnsupportedFastButton):
         await client(transport).commit_button(23, 41, "version", attributes, reply)
+    assert len(transport.calls) == 0
+
+
+async def test_private_notes_and_business_receipts_are_buffered_without_aliases(conversation):
+    api = BufferedButtonApi(conversation)
+    key = "scenario:" + "a" * 24
+    await api.add_private_note(23, "Neutral note", event_key=key)
+    await api.add_private_note(23, "Repeated note", event_key=key)
+    assert api.notes == [{"content": "Neutral note", "event_key": key}]
+    exposed = api.notes
+    exposed[0]["content"] = "Changed"
+    assert api.notes[0]["content"] == "Neutral note"
+    update = {
+        "scenario_requests": {"request": {"state": "requested"}},
+        "scenario_event_receipts": {"a" * 24: "survey_answer"},
+    }
+    await api.set_custom_attributes(23, update)
+    assert api.attributes == update
+    assert api.reply is None
+
+
+@pytest.mark.parametrize("case", ["oversized", "utf8", "missing_key", "long_key", "legacy_key"])
+async def test_private_note_rejection_preserves_existing_buffer(conversation, case):
+    api = BufferedButtonApi(conversation)
+    await api.add_private_note(23, "Neutral", event_key="scenario:" + "a" * 24)
+    content, key = "Other", "scenario-alert:" + "b" * 24
+    if case == "oversized":
+        content = "x" * 32_769
+    elif case == "utf8":
+        content = "я" * 16_385
+    elif case == "missing_key":
+        key = None
+    elif case == "long_key":
+        key = "x" * 257
+    else:
+        key = "handoff:41"
+    with pytest.raises(UnsupportedFastButton):
+        await api.add_private_note(23, content, event_key=key)
+    assert len(api.notes) == 1
+    assert api.notes[0]["content"] == "Neutral"
+
+
+@pytest.mark.parametrize("limit", ["count", "aggregate"])
+async def test_private_note_count_and_aggregate_limits_are_effect_free(conversation, limit):
+    api = BufferedButtonApi(conversation)
+    size = 32_768 if limit == "aggregate" else 1
+    count = 2 if limit == "aggregate" else 4
+    for index in range(count):
+        await api.add_private_note(23, "x" * size, event_key=f"scenario:{index:024x}")
+    with pytest.raises(UnsupportedFastButton):
+        await api.add_private_note(23, "x", event_key="scenario:" + "f" * 24)
+    assert len(api.notes) == count
+
+
+async def test_private_note_identity_mismatch_is_rejected(conversation):
+    api = BufferedButtonApi(conversation)
+    with pytest.raises(UnsupportedFastButton):
+        await api.add_private_note(99, "Neutral", event_key="scenario:" + "a" * 24)
+    assert api.notes == []
+
+
+def scenario_callback(api, screen, variant, index, aid_id, job_kind=None):
+    """Construct neutral persisted metadata and use the real callback renderer."""
+    request_key = "a" * 24
+    context = {
+        "screen": screen,
+        "variant": variant,
+        "aid_id": aid_id,
+        "request_key": request_key,
+        "completed": variant == 7 or job_kind == "review",
+    }
+    attributes = api.conversation["custom_attributes"]
+    attributes.update(
+        workflow_state="scenario",
+        workflow_need="legal",
+        scenario=context,
+        scenario_requests={
+            request_key: {
+                "state": "completed" if job_kind == "review" else "requested",
+                "aid_id": aid_id,
+                "specialist_id": 4,
+            }
+        },
+    )
+    if job_kind:
+        key = f"{job_kind}:{request_key}"
+        context["job_key"] = key
+        attributes["scenario_followups"] = {
+            key: {"screen": screen, "state": "sent", "context": {}},
+            f"reminder:{key}": {"screen": "s59", "state": "pending", "context": {}},
+        }
+    revision = attributes["workflow_navigation"]["revision"]
+    choices = render(screen, revision=revision, context=context, variant=variant).choices
+    return next(choice.id for choice in choices if choice.id.startswith(f"sc:{screen}:{index}:"))
+
+
+SCENARIO_CASES = (
+    [
+        (
+            "s5",
+            variant,
+            variant * 4 + index,
+            (*CERTIFICATES, *CONSULTATION_IDS, CONSULTATION_IDS[-1])[variant],
+            "check",
+            {"survey_answer", "survey_closed"} if index == 3 else {"survey_answer"},
+        )
+        for variant in range(8)
+        for index in range(4)
+    ]
+    + [
+        (
+            "s7",
+            variant,
+            variant * 2 + index,
+            CONSULTATION_IDS[variant],
+            "review",
+            {"survey_answer", "survey_closed"} if index == 1 else {"survey_answer"},
+        )
+        for variant in range(3)
+        for index in range(2)
+    ]
+    + [
+        ("s35b", 0, index, "legal_consultation", None, {"legal_topic"})
+        for index in (0, 1, 2, 3, 4, 6)
+    ]
+    + [
+        ("s34b", 0, 0, "psychologist_3_sessions", None, {"survey_closed"}),
+        ("s56", 1, 3, "legal_consultation", "check", {"survey_answer", "consultation_retry"}),
+        ("s72", 0, 1, "legal_consultation", "review", {"survey_answer", "negative_feedback"}),
+    ]
+)
+
+
+@pytest.mark.parametrize("screen,variant,index,aid_id,job_kind,event_kinds", SCENARIO_CASES)
+async def test_local_scenario_effects_use_one_commit_without_history_or_model(
+    fast_runtime,
+    screen,
+    variant,
+    index,
+    aid_id,
+    job_kind,
+    event_kinds,
+):
+    api, service, gateway = fast_runtime
+    callback = scenario_callback(api, screen, variant, index, aid_id, job_kind)
+    requests = deepcopy(api.conversation["custom_attributes"]["scenario_requests"])
+    before_replies = len(api.replies)
+    assert await service.process(event(callback, 43))
+    assert len(api.commits) == 1
+    assert not api.legacy_calls
+    assert gateway.calls == 0
+    assert len(api.replies) == before_replies + 1
+    attrs = api.conversation["custom_attributes"]
+    assert attrs["scenario_requests"] == requests
+    assert set(attrs["scenario_event_receipts"].values()) == event_kinds
+    note_count = sum(
+        2 if kind in {"negative_feedback", "consultation_retry"} else 1 for kind in event_kinds
+    )
+    assert len(api.commit_notes[0]) == note_count
+    assert len(api.notes) == note_count
+    assert len(api.note_keys) == note_count
+    if job_kind:
+        job = f"{job_kind}:" + "a" * 24
+        assert attrs["scenario_followups"][job]["state"] == "answered"
+        assert attrs["scenario_followups"][f"reminder:{job}"]["state"] == "cancelled"
+    api.duplicate_reply_id = api.replies[-1]["message_id"]
+    assert not await service.process(event(callback, 43))
+    assert len(api.commits) == 1
+    assert len(api.notes) == note_count
+
+
+@pytest.mark.parametrize("features", [[], None, "private_notes_v1"])
+async def test_missing_note_feature_falls_back_without_speculative_live_effects(
+    fast_runtime, features
+):
+    api, service, gateway = fast_runtime
+    api.features = features
+    callback = scenario_callback(api, "s35b", 0, 0, "legal_consultation")
+    assert await service.process(event(callback, 43))
+    assert not api.commits
+    assert "history" in api.legacy_calls
+    assert api.legacy_calls.count("note") == 1
+    assert api.legacy_calls.count("reply") == 1
+    assert len(api.notes) == 1
+    assert gateway.calls == 0
+
+
+async def test_plain_reply_still_commits_without_private_note_feature(fast_runtime):
+    api, service, gateway = fast_runtime
+    api.features = []
+    assert await service.process(event("need:legal", 43))
+    assert len(api.commits) == 1
+    assert api.commit_notes == [[]]
+    assert not api.legacy_calls
+    assert gateway.calls == 0
+
+
+@pytest.mark.parametrize("notes", [None, []])
+async def test_empty_notes_preserve_original_atomic_payload(notes):
+    path = "/api/v1/accounts/12/conversations/23/messages"
+    transport = RecordingTransport(responses={("POST", path): {"outcome": "committed", "id": 51}})
+    reply = {"text": "Neutral", "choices": (), "turn_key": "message:41"}
+    assert (
+        await client(transport).commit_button(
+            23,
+            41,
+            "version",
+            {"scenario_last_message_id": 41},
+            reply,
+            notes=notes,
+        )
+        == 51
+    )
+    assert transport.calls[0][3]["nevidimy_atomic_turn"] == {
+        "input_id": 41,
+        "version": "version",
+        "attributes": {"scenario_last_message_id": 41},
+    }
+
+
+async def test_client_commits_optional_private_notes_inside_atomic_envelope():
+    path = "/api/v1/accounts/12/conversations/23/messages"
+    transport = RecordingTransport(responses={("POST", path): {"outcome": "committed", "id": 51}})
+    notes = [{"content": "Neutral", "event_key": "scenario:" + "a" * 24}]
+    reply = {"text": "Neutral", "choices": (), "turn_key": "message:41"}
+    assert (
+        await client(transport).commit_button(
+            23,
+            41,
+            "version",
+            {"scenario_last_message_id": 41},
+            reply,
+            notes=notes,
+        )
+        == 51
+    )
+    assert transport.calls[0][3]["nevidimy_atomic_turn"]["notes"] == notes
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("case", ["count", "single", "utf8", "aggregate", "key", "extra_key"])
+async def test_incompatible_private_notes_are_rejected_before_transport(case):
+    transport = RecordingTransport()
+    notes = [{"content": "Neutral", "event_key": "scenario:" + "a" * 24}]
+    if case == "count":
+        notes *= 5
+    elif case == "single":
+        notes[0]["content"] = "x" * 32_769
+    elif case == "utf8":
+        notes[0]["content"] = "я" * 16_385
+    elif case == "aggregate":
+        notes = [
+            {"content": "x" * size, "event_key": f"scenario:{index:024x}"}
+            for index, size in enumerate((32_768, 32_768, 1))
+        ]
+    elif case == "key":
+        notes[0]["event_key"] = "handoff:41"
+    else:
+        notes[0]["private"] = False
+    reply = {"text": "Neutral", "choices": (), "turn_key": "message:41"}
+    with pytest.raises(UnsupportedFastButton):
+        await client(transport).commit_button(
+            23,
+            41,
+            "version",
+            {"scenario_last_message_id": 41},
+            reply,
+            notes=notes,
+        )
     assert len(transport.calls) == 0

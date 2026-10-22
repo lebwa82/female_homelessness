@@ -25,7 +25,7 @@ module ActionController
   class Parameters
     def initialize(values = {})
       @values = values.each_with_object({}) do |(key, value), result|
-        result[key.to_s] = value.is_a?(Hash) ? Parameters.new(value) : value
+        result[key.to_s] = wrap(value)
       end
     end
 
@@ -34,7 +34,7 @@ module ActionController
     end
 
     def []=(key, value)
-      @values[key.to_s] = value.is_a?(Hash) ? Parameters.new(value) : value
+      @values[key.to_s] = wrap(value)
     end
 
     def keys
@@ -55,7 +55,23 @@ module ActionController
     end
 
     def to_unsafe_h
-      @values.transform_values { |value| value.is_a?(Parameters) ? value.to_unsafe_h : value }
+      @values.transform_values { |value| unwrap(value) }
+    end
+
+    private
+
+    def wrap(value)
+      return Parameters.new(value) if value.is_a?(Hash)
+      return value.map { |item| wrap(item) } if value.is_a?(Array)
+
+      value
+    end
+
+    def unwrap(value)
+      return value.to_unsafe_h if value.is_a?(Parameters)
+      return value.map { |item| unwrap(item) } if value.is_a?(Array)
+
+      value
     end
   end
 end
@@ -200,7 +216,7 @@ end
 module Messages
   class MessageBuilder
     class << self
-      attr_accessor :fail, :calls
+      attr_accessor :fail, :fail_at, :calls
     end
     self.calls = []
 
@@ -211,10 +227,11 @@ module Messages
     def perform
       verify(@conversation.locked, 'native builder escaped conversation lock')
       self.class.calls << [@user, @conversation, @payload.to_unsafe_h]
-      raise IOError, 'synthetic builder failure' if self.class.fail
+      raise IOError, 'synthetic builder failure' if self.class.fail || self.class.fail_at == self.class.calls.size
 
-      result = message(100 + @conversation.rows.size, :outgoing, false, 'AgentBot',
-                       @payload[:content_attributes][:bot_turn_key])
+      result = message(100 + @conversation.rows.size, :outgoing, @payload[:private], 'AgentBot')
+      result.content_attributes = @payload[:content_attributes].to_unsafe_h
+      result.content = @payload[:content]
       @conversation.rows << result
       result
     end
@@ -352,6 +369,7 @@ projection = Projection.new(conversation, nevidimy_turn_state: '10')
 projection.show
 state = projection.response.fetch(:json)
 verify(state[:capability] == 'nevidimy-atomic-turn-v1' && state[:input_id] == 10, 'wrong projection identity')
+verify(state[:features] == ['private_notes_v1'], 'private note feature was not advertised')
 verify(state[:eligible] && state[:reply_id].nil?, 'wrong projection eligibility')
 verify(state[:version] == '2026-01-01T00:00:00.123456Z', 'projection version lost precision')
 verify(state[:conversation][:id] == 101 && state[:conversation][:meta][:assignee_type] == 'AgentBot', 'wrong native conversation projection')
@@ -492,6 +510,141 @@ ensure
   Messages::MessageBuilder.fail = false
 end
 report['native_builder_error_propagates_and_modeled_transaction_rolls_back'] = true
+
+def private_note(key = "scenario:#{'a' * 24}", content = 'synthetic note')
+  { content: content, event_key: key }
+end
+
+noted = Conversation.new
+new_state = {
+  'scenario_last_message_id' => 10,
+  'scenario_requests' => { 'synthetic' => { 'status' => 'pending' } },
+  'scenario_event_receipts' => ["scenario:#{'a' * 24}"]
+}
+notes = [private_note, private_note("scenario-alert:#{'b' * 24}", 'synthetic alert')]
+before_calls = Messages::MessageBuilder.calls.size
+noted_values = payload(noted, attributes: new_state, notes: notes)
+noted_result = commit(noted, noted_values).response.fetch(:json)
+built = Messages::MessageBuilder.calls.drop(before_calls)
+verify(built.size == 3 && built.all? { |user, record, _values| user.equal?(Current.user) && record.equal?(noted) },
+       'notes bypassed bound native AgentBot builder')
+verify(built.map { |_user, _record, values| values['private'] } == [true, true, false],
+       'private notes were not buffered before the public reply')
+built.first(2).each_with_index do |(_user, _record, values), index|
+  verify(values == { 'content' => notes[index][:content], 'content_type' => 'text',
+                     'message_type' => 'outgoing', 'private' => true,
+                     'content_attributes' => { 'bot_event_key' => notes[index][:event_key] } },
+         'note payload accepted role, attachment or public-turn injection')
+end
+verify(noted_result == { id: noted.rows.last.id, outcome: 'committed' }, 'note turn returned a private note id')
+verify(noted.custom_attributes['scenario_requests'] == new_state['scenario_requests'] &&
+       noted.custom_attributes['scenario_event_receipts'] == new_state['scenario_event_receipts'] &&
+       noted.custom_attributes['unrelated'] == 'preserve', 'local-effect state was not merged')
+report['private_notes_use_native_builder_and_precede_one_public_reply'] = true
+
+# A lost acknowledgement retries the complete request, including its old version.
+# Duplicate public-turn detection must precede state/ownership/notes writes.
+noted.status, noted.assignee_id = 'resolved', 9
+before_snapshot = Marshal.dump([noted.custom_attributes, noted.updated_at, noted.rows])
+before_writes, before_calls = noted.writes, Messages::MessageBuilder.calls.size
+ack = commit(noted, noted_values).response.fetch(:json)
+verify(ack == { id: noted_result[:id], outcome: 'duplicate' }, 'retry did not acknowledge the existing public reply')
+verify(Marshal.dump([noted.custom_attributes, noted.updated_at, noted.rows]) == before_snapshot &&
+       noted.writes == before_writes && Messages::MessageBuilder.calls.size == before_calls,
+       'duplicate acknowledgement changed notes or workflow')
+report['private_note_turn_retry_is_no_write_and_returns_public_id'] = true
+
+deduped = Conversation.new
+old_note = message(9, :outgoing, true, 'User')
+old_note.raw_content_attributes = JSON.generate('bot_event_key' => private_note[:event_key])
+old_note.define_singleton_method(:content_attributes) { JSON.parse(raw_content_attributes) }
+deduped.rows << old_note
+deduped.rows << message(8, :outgoing, true, 'AgentBot').tap { |row| row.content_attributes = nil }
+next_key = "scenario:#{'c' * 24}"
+batch = [private_note, private_note(next_key), private_note(next_key, 'synthetic retry')]
+before_calls = Messages::MessageBuilder.calls.size
+verify(commit(deduped, payload(deduped, notes: batch)).response[:json][:outcome] == 'committed',
+       'existing private note blocked the public turn')
+created_notes = Messages::MessageBuilder.calls.drop(before_calls).map(&:last)
+verify(created_notes.size == 2 && created_notes.first['private'] &&
+       created_notes.first['content_attributes'] == { 'bot_event_key' => next_key } &&
+       created_notes.last['private'] == false, 'old decoded or duplicate batch event key created another note')
+other = Conversation.new
+before_calls = Messages::MessageBuilder.calls.size
+commit(other, payload(other, notes: [private_note]))
+verify(Messages::MessageBuilder.calls.size == before_calls + 2, 'note dedup escaped its conversation')
+report['note_dedup_uses_scoped_native_coder_and_no_input_cutoff'] = true
+
+invalid_notes = [
+  nil, {}, 'invalid', [nil], [true], ['invalid'], [private_note] * 5,
+  [{ content: 'synthetic' }], [{ event_key: private_note[:event_key] }],
+  [private_note.merge(role: 'user')], [private_note.merge(private: false)],
+  [private_note.merge(sender_type: 'User')], [private_note.merge(sender_id: 99)],
+  [private_note.merge(attachments: ['synthetic'])], [private_note.merge(content_type: 'text')],
+  [private_note.merge(content_attributes: { bot_turn_key: 'message:10' })],
+  [private_note.merge(unknown: true)], [private_note.merge(content: nil)],
+  [private_note.merge(content: 1)], [private_note.merge(content: 'x' * 32_769)],
+  [private_note.merge(content: "\u00e9" * 16_385)],
+  [private_note.merge(content: "\xff".force_encoding(Encoding::UTF_8))],
+  [private_note.merge(content: 'synthetic'.encode(Encoding::UTF_16LE))],
+  [private_note.merge(event_key: nil)], [private_note.merge(event_key: 1)],
+  [private_note.merge(event_key: '')], [private_note.merge(event_key: 'x' * 257)],
+  [private_note.merge(event_key: "scenario:#{'A' * 24}")],
+  [private_note.merge(event_key: "scenario:#{'a' * 23}")],
+  [private_note.merge(event_key: "legacy:#{'a' * 24}")],
+  [private_note.merge(event_key: "\xff".force_encoding(Encoding::UTF_8))],
+  [private_note.merge(event_key: private_note[:event_key].encode(Encoding::UTF_16LE))],
+  [private_note("scenario:#{'a' * 24}", 'x' * 21_846),
+   private_note("scenario:#{'b' * 24}", 'x' * 21_846),
+   private_note("scenario:#{'c' * 24}", 'x' * 21_846)]
+]
+invalid_notes.each do |batch|
+  invalid = Conversation.new
+  before_calls = Messages::MessageBuilder.calls.size
+  rejected = commit(invalid, payload(invalid, notes: batch))
+  verify(rejected.response[:status] == :conflict && unchanged?(invalid) && invalid.lock_count.zero? &&
+         Messages::MessageBuilder.calls.size == before_calls, 'invalid note plan wrote or reached the lock')
+end
+boundary = Conversation.new
+full = "\u00e9" * 16_384
+verify(commit(boundary, payload(boundary, notes: [private_note("scenario:#{'d' * 24}", full),
+                                               private_note("scenario:#{'e' * 24}", full)])).response[:status] == :ok,
+       'valid UTF-8 byte boundaries were rejected')
+empty = Conversation.new
+verify(commit(empty, payload(empty, notes: [])).response[:status] == :ok && empty.rows.size == 2,
+       'empty optional notes changed the public-only contract')
+four = Conversation.new
+verify(commit(four, payload(four, notes: %w[a b c d].map { |char| private_note("scenario:#{char * 24}") })).response[:status] == :ok &&
+       four.rows.size == 6, 'maximum supported note count was rejected')
+report['notes_are_fully_validated_before_writes_with_byte_and_role_limits'] = true
+
+staff_conflict = Conversation.new
+staff_conflict.rows << message(11, :outgoing, false, 'User')
+before_calls = Messages::MessageBuilder.calls.size
+rejected = commit(staff_conflict, payload(staff_conflict, notes: notes))
+verify(rejected.response[:status] == :conflict && staff_conflict.writes.zero? && staff_conflict.rows.size == 2 &&
+       Messages::MessageBuilder.calls.size == before_calls, 'notes bypassed public staff precedence')
+report['private_note_turn_keeps_staff_precedence_without_writes'] = true
+
+[2, 3].each do |failure_offset|
+  failed = Conversation.new
+  before_snapshot = Marshal.dump([failed.custom_attributes, failed.updated_at, failed.rows])
+  before_calls = Messages::MessageBuilder.calls.size
+  Messages::MessageBuilder.fail_at = before_calls + failure_offset
+  begin
+    commit(failed, payload(failed, attributes: new_state, notes: notes))
+    raise 'note-turn builder failure was swallowed'
+  rescue IOError => error
+    verify(error.message == 'synthetic builder failure', 'note-turn builder exception changed')
+    verify(Marshal.dump([failed.custom_attributes, failed.updated_at, failed.rows]) == before_snapshot,
+           'second-note or public-reply failure retained partial messages or local-effect state')
+    verify(Messages::MessageBuilder.calls.size == before_calls + failure_offset,
+           'note-turn failure retried or continued native builders')
+  ensure
+    Messages::MessageBuilder.fail_at = nil
+  end
+end
+report['second_note_and_public_reply_failures_roll_back_complete_local_effect_turn'] = true
 
 Conversation.staff_locks.clear
 Message.new(true, false, 'User').run_callbacks

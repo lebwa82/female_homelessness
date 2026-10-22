@@ -23,6 +23,7 @@ class NevidimyAtomicTurnLiveProbe
     @patched_methods = []
     @adapters = {}
     @loggers = {}
+    @posts = Queue.new
   end
 
   def check(condition, code)
@@ -56,8 +57,10 @@ class NevidimyAtomicTurnLiveProbe
     verify_assignment_status_and_epoch
     verify_concurrent_commit
     verify_staff_lock_race
+    verify_private_notes_and_replay
+    verify_private_note_rollback
     if defined?(NevidimyTurnTiming)
-      check(@timing_events.length == 11, 'timing_event_count')
+      check(@timing_events.length == @posts.size, 'timing_event_count')
       @result[:timing_events] = @timing_events
       @result[:checks] << 'native_atomic_timing_scope_and_content_free_events'
     end
@@ -204,7 +207,8 @@ class NevidimyAtomicTurnLiveProbe
     response = request(label, 'GET', "#{path}?nevidimy_turn_state=#{id}", @read_token)
     data = response[:data]
     check(response[:status] == 200 && data['capability'] == 'nevidimy-atomic-turn-v1' &&
-          data['input_id'] == id && data['eligible'] == true, 'snapshot_ineligible')
+          data['features'].include?('private_notes_v1') && data['input_id'] == id &&
+          data['eligible'] == true, 'snapshot_ineligible')
     data
   end
 
@@ -217,6 +221,7 @@ class NevidimyAtomicTurnLiveProbe
   end
 
   def post(label, body)
+    @posts << true
     request(label, 'POST', "#{path}/messages", @bot_token, body)
   end
 
@@ -352,6 +357,11 @@ class NevidimyAtomicTurnLiveProbe
         # ActiveRecord swallows this only at the enclosing transaction boundary:
         # verify a real rollback without invoking production error reporters.
         raise ActiveRecord::Rollback, 'probe_builder_failure' if Thread.current.thread_variable_get(:nevidimy_probe_builder_failure)
+        failure = Thread.current.thread_variable_get(:nevidimy_probe_builder_failure_at)
+        if failure
+          failure[:calls] += 1
+          raise ActiveRecord::Rollback, 'probe_selected_builder_failure' if failure[:calls] == failure[:at]
+        end
         super
       end
     end
@@ -513,6 +523,98 @@ class NevidimyAtomicTurnLiveProbe
     check(locked && bot_result[:status] == 409 && after[:attributes] == before[:attributes] &&
           after[:count] == before[:count] + 1 && !replies(id).exists? && sends == jobs + 1, 'public_staff_race_write')
     @result[:checks] << 'real_staff_before_create_lock_blocks_bot_then_conflicts'
+  end
+
+  def fresh_neutral_input
+    @conversation.reload
+    incoming = Message.create!(account_id: @account.id, inbox_id: @inbox.id,
+                               conversation_id: @conversation.id, sender: @conversation.contact,
+                               message_type: :incoming, private: false, content: 'Neutral isolated notes input')
+    @conversation.reload.update!(status: :pending, assignee_id: nil,
+                                custom_attributes: @conversation.custom_attributes.merge(
+                                  'reply_owner' => 'bot', 'ownership_version' => 3,
+                                  'scenario_pending_input' => nil
+                                ))
+    (@result[:created][:input_ids] ||= []) << incoming.id
+    incoming.id
+  end
+
+  def note_key(index)
+    "scenario:#{format('%024x', index)}"
+  end
+
+  def private_receipts(key)
+    @conversation.messages.where(message_type: :outgoing, private: true)
+                 .select(:id, :content_attributes).filter_map do |message|
+      attributes = message.content_attributes
+      message.id if attributes.is_a?(Hash) && attributes['bot_event_key'] == key
+    end
+  end
+
+  def note_body(id, label, keys)
+    body = payload(snapshot(id, label), id)
+    body[:nevidimy_atomic_turn][:notes] = keys.map do |key|
+      { content: 'Neutral private verification note', event_key: key }
+    end
+    body
+  end
+
+  def verify_private_notes_and_replay
+    old_key, first_key, second_key = (1..3).map { |index| note_key(index) }
+    old = Message.create!(account_id: @account.id, inbox_id: @inbox.id,
+                          conversation_id: @conversation.id, sender: @bot,
+                          message_type: :outgoing, private: true, content: 'Neutral earlier receipt',
+                          content_attributes: { bot_event_key: old_key })
+    id = fresh_neutral_input
+    check(old.id < id, 'note_receipt_not_earlier')
+    body = note_body(id, 'notes_read', [old_key, first_key, first_key, second_key])
+    body[:nevidimy_atomic_turn][:attributes].merge!(
+      scenario_requests: { 'probe' => { 'kind' => 'neutral' } },
+      scenario_event_receipts: { first_key => { 'kind' => 'neutral' } }
+    )
+    jobs, before = sends, state
+    response = post('notes_commit', body)
+    check_reply(response, 'committed', id)
+    check(state[:count] == before[:count] + 3 && sends == jobs + 3 &&
+          private_receipts(old_key) == [old.id] && private_receipts(first_key).size == 1 &&
+          private_receipts(second_key).size == 1, 'notes_dedup_or_commit')
+    check(@conversation.custom_attributes['scenario_requests'] == { 'probe' => { 'kind' => 'neutral' } } &&
+          @conversation.custom_attributes['scenario_event_receipts'].key?(first_key), 'notes_attributes_missing')
+    if defined?(NevidimyTurnTiming)
+      check(@timing_events.last['outgoing_message_id'] == response[:data]['id'], 'notes_timing_public_id')
+    end
+    @conversation.update_columns(custom_attributes: @conversation.custom_attributes.merge('workflow_need' => 'notes_concurrent'))
+    before, queued = state, @job_adapter.enqueued_jobs.length
+    duplicate = post('notes_duplicate', body)
+    check_reply(duplicate, 'duplicate', id)
+    check(state == before && @job_adapter.enqueued_jobs.length == queued, 'notes_replay_changed_state')
+    @result[:checks] << 'native_private_notes_receipts_and_public_reply_atomic_dedup'
+  end
+
+  def verify_private_note_rollback
+    [2, 3].each do |failure_at|
+      id = fresh_neutral_input
+      keys = [note_key(10 + failure_at), note_key(20 + failure_at)]
+      body = note_body(id, "notes_rollback_#{failure_at}_read", keys)
+      before, queued = state, @job_adapter.enqueued_jobs.length
+      Thread.current.thread_variable_set(:nevidimy_probe_builder_failure_at, { calls: 0, at: failure_at })
+      response = post("notes_rollback_#{failure_at}", body)
+      check(response[:status] >= 400 && state == before &&
+            @job_adapter.enqueued_jobs.length == queued && !replies(id).exists? &&
+            keys.all? { |key| private_receipts(key).empty? }, 'notes_rollback_partial_write')
+      Thread.current.thread_variable_set(:nevidimy_probe_builder_failure_at, nil)
+    end
+    id = fresh_neutral_input
+    key = note_key(99)
+    body = note_body(id, 'notes_staff_conflict_read', [key])
+    @conversation.update_columns(assignee_id: @staff.id)
+    before, queued = state, @job_adapter.enqueued_jobs.length
+    check(post('notes_staff_conflict', body)[:status] == 409 && state == before &&
+          @job_adapter.enqueued_jobs.length == queued && private_receipts(key).empty? &&
+          !replies(id).exists?, 'notes_staff_conflict_write')
+    @result[:checks] << 'native_second_note_public_failure_and_staff_conflict_no_partial_writes'
+  ensure
+    Thread.current.thread_variable_set(:nevidimy_probe_builder_failure_at, nil)
   end
 
   def cleanup
