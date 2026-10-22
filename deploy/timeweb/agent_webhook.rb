@@ -3,8 +3,77 @@
 require 'net/http'
 require 'uri'
 require 'openssl'
+require 'digest'
 
 module NevidimyInternalAgentWebhook
+  HTTPS_SLOT = :nevidimy_internal_agent_webhook_https
+  IDLE_SECONDS = 30
+  LIFETIME_SECONDS = 300
+
+  def self.monotonic
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.https_key(url, ca_file, timeout)
+    stat = File.stat(ca_file)
+    identity = [stat.dev, stat.ino, stat.size, stat.mtime.to_r, stat.ctime.to_r]
+    Digest::SHA256.hexdigest(Marshal.dump([url, ca_file, identity, timeout]))
+  rescue SystemCallError
+    nil # Missing/unreadable CA metadata forbids reuse; fresh native TLS still verifies it.
+  end
+
+  def self.close(http)
+    http.finish if http.started?
+  rescue StandardError
+    nil # Cleanup must not replace the original POST result or exception.
+  end
+
+  def self.with_connection(candidate, key)
+    thread = Thread.current
+    slot = thread.thread_variable_get(HTTPS_SLOT)
+    if slot && slot[:pid] != Process.pid
+      # Never finish an inherited TLS socket: its parent may still be using it.
+      thread.thread_variable_set(HTTPS_SLOT, nil)
+      slot = nil
+    end
+    # Sidekiq owns a bounded worker-thread pool. Each thread retains one slot,
+    # never a URL map; reentrant/fiber callers cannot borrow an active session.
+    return candidate.start { |http| yield http } if slot && slot[:busy]
+
+    now = monotonic
+    clock_valid = now.is_a?(Numeric) && now.finite?
+    if slot && (!key || !clock_valid || slot[:key] != key || now < slot[:last_used] ||
+                now - slot[:last_used] >= IDLE_SECONDS || now - slot[:created] >= LIFETIME_SECONDS)
+      slot[:busy] = true
+      close(slot[:http])
+      thread.thread_variable_set(HTTPS_SLOT, nil)
+      slot = nil
+    end
+    return candidate.start { |http| yield http } unless key && clock_valid
+
+    slot ||= { http: candidate, key: key, pid: Process.pid, created: now, last_used: now }
+    thread.thread_variable_set(HTTPS_SLOT, slot)
+    slot[:busy] = true
+    http, reusable = slot[:http], false
+    begin
+      http.start unless http.started?
+      result = yield http
+      reusable = result.is_a?(Net::HTTPSuccess) && !result.connection_close? && http.started?
+      result
+    ensure
+      finished = monotonic if reusable
+      if reusable && finished.is_a?(Numeric) && finished.finite?
+        slot[:last_used] = finished
+      else
+        close(http)
+        thread.thread_variable_set(HTTPS_SLOT, nil) if thread.thread_variable_get(HTTPS_SLOT).equal?(slot)
+      end
+      slot[:busy] = false
+    end
+  end
+
   private
 
   def perform_request
@@ -22,17 +91,22 @@ module NevidimyInternalAgentWebhook
     request.body = body
     # Explicit nil disables environment proxies: this traffic must stay in Docker.
     http = Net::HTTP.new(uri.hostname, uri.port, nil)
+    timeout = webhook_timeout
+    key = nil
     if uri.scheme == 'https'
       http.use_ssl = true
       http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      http.verify_hostname = true
       http.ca_file = ENV.fetch('SSL_CERT_FILE')
       http.min_version = OpenSSL::SSL::TLS1_2_VERSION
+      http.keep_alive_timeout = IDLE_SECONDS
+      key = NevidimyInternalAgentWebhook.https_key(expected, http.ca_file, timeout)
     end
-    http.open_timeout = webhook_timeout
-    http.read_timeout = webhook_timeout
-    http.write_timeout = webhook_timeout
+    http.open_timeout = timeout
+    http.read_timeout = timeout
+    http.write_timeout = timeout
     http.max_retries = 0
-    http.start do |connection|
+    NevidimyInternalAgentWebhook.with_connection(http, key) do |connection|
       connection.request(request) do |response|
         # In particular, never follow a redirect into another private endpoint.
         unless response.is_a?(Net::HTTPSuccess)
