@@ -17,6 +17,7 @@ dependencies = [
   "sqlalchemy",
   "pproxy>=2.7.9",
   "redis>=7.0.0",
+  "prometheus-client>=0.22.1,<1",
   "boto3>=1.43.100",
   "pypdf>=6.19.0",
   "pymupdf>=1.28.2",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import OrderedDict
 from typing import Any, Protocol
 
@@ -16,6 +17,7 @@ from app.chatwoot.contracts import (
     parse_message_delivery_changed,
     parse_staff_message,
 )
+from app.chatwoot.metrics import method_label, metrics, status_label
 from app.chatwoot.webhook import InvalidWebhookSignature, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
@@ -147,14 +149,39 @@ def create_application(
         signature_secret=signature_secret,
         event_queue=event_queue,
     )
-    app = web.Application()
+    webhook_path = f"/webhooks/chatwoot/agent/{route_secret}"
+
+    @web.middleware
+    async def measure(request, handler):
+        if request.path == "/metrics":
+            return await handler(request)
+        endpoint = "webhook" if request.path == webhook_path else "health" if request.path == "/healthz" else "other"
+        started = time.perf_counter()
+        status = 500
+        try:
+            response = await handler(request)
+            status = response.status
+            return response
+        except web.HTTPException as error:
+            status = error.status
+            raise
+        except asyncio.CancelledError:
+            status = 0
+            raise
+        finally:
+            metrics.http.labels(endpoint, method_label(request.method), status_label(status)).observe(
+                time.perf_counter() - started
+            )
+
+    app = web.Application(middlewares=[measure])
     async def health(request):
         if event_queue is not None and not await event_queue.healthy():
             return web.json_response({"status": "degraded"}, status=503)
         return await _health(request)
 
     app.router.add_get("/healthz", health)
-    app.router.add_post(f"/webhooks/chatwoot/agent/{route_secret}", webhook.handle)
+    app.router.add_get("/metrics", metrics.expose)
+    app.router.add_post(webhook_path, webhook.handle)
     app.on_shutdown.append(webhook.shutdown)
     return app
 

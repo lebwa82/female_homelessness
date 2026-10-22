@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from app.chatwoot.contracts import IncomingChatwootMessage
+from app.chatwoot.metrics import kind_label, method_label, metrics, status_label
 
 logger = logging.getLogger(__name__)
 _current: ContextVar[EventTiming | None] = ContextVar("chatwoot_timing", default=None)
@@ -57,6 +58,8 @@ def event_timing(event, *, queue_age_ms=None):
         raise
     finally:
         _current.reset(token)
+        elapsed = time.perf_counter() - timing.started
+        metrics.event_completed(timing, elapsed)
         logger.info(
             "chatwoot_event_timing %s",
             json.dumps(
@@ -65,7 +68,7 @@ def event_timing(event, *, queue_age_ms=None):
                     "started_at_ms": timing.started_at_ms,
                     "kind": timing.kind,
                     "queue_age_ms": timing.queue_age_ms,
-                    "total_ms": round((time.perf_counter() - timing.started) * 1000, 3),
+                    "total_ms": round(elapsed * 1000, 3),
                     "api_count": timing.api_count,
                     "api_ms": round(timing.api_ms, 3),
                     "stages_ms": {key: round(value, 3) for key, value in timing.stages_ms.items()},
@@ -108,17 +111,19 @@ def api_timing(method, path):
     try:
         yield response
     finally:
+        elapsed = (time.perf_counter() - started) * 1000
+        # Same bounded route labels as the logs; never include IDs or queries.
+        match = re.fullmatch(
+            r"/api/v1/accounts/\d+/(conversations|teams|inboxes)(?:/\d+)?"
+            r"(?:/(messages|custom_attributes|assignments|toggle_status|team_members))?",
+            path.partition("?")[0],
+        )
+        operation = ".".join(filter(None, match.groups())) if match else "other"
+        method = method_label(method)
+        metrics.api.labels(operation, method, status_label(response.status)).observe(elapsed / 1000)
         if timing:
-            elapsed = (time.perf_counter() - started) * 1000
             timing.api_count += 1
             timing.api_ms += elapsed
-            # Whitelist route shapes, not arbitrary URLs/query parameters.
-            match = re.fullmatch(
-                r"/api/v1/accounts/\d+/(conversations|teams|inboxes)(?:/\d+)?"
-                r"(?:/(messages|custom_attributes|assignments|toggle_status|team_members))?",
-                path.partition("?")[0],
-            )
-            operation = ".".join(filter(None, match.groups())) if match else "other"
             request_id = (
                 response.request_id
                 if re.fullmatch(
@@ -133,9 +138,7 @@ def api_timing(method, path):
                     {
                         **timing.identity(),
                         "stage": timing.stage,
-                        "method": method
-                        if method in {"GET", "POST", "PATCH", "PUT", "DELETE"}
-                        else "other",
+                        "method": method,
                         "operation": operation,
                         "status": response.status,
                         "request_id": request_id,
@@ -149,13 +152,16 @@ def reply_persisted(message_id):
     timing = _current.get()
     if timing and type(message_id) is int:
         timing.reply_ids.append(message_id)
+        elapsed = (time.perf_counter() - timing.started) * 1000
+        if len(timing.reply_ids) == 1:
+            metrics.reply.labels(kind_label(timing.kind)).observe(elapsed / 1000)
         logger.info(
             "chatwoot_reply_timing %s",
             json.dumps(
                 {
                     **timing.identity(),
                     "outgoing_message": message_id,
-                    "elapsed_ms": round((time.perf_counter() - timing.started) * 1000, 3),
+                    "elapsed_ms": round(elapsed, 3),
                 }
             ),
         )
