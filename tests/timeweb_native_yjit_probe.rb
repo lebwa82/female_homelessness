@@ -26,6 +26,8 @@ class NevidimyNativeYjitProbe
   YJIT_STATS = %i[inline_code_size outlined_code_size freed_code_size code_region_size
                   live_page_count freed_page_count yjit_alloc_size compiled_iseq_count
                   compiled_block_count yjit_insns_count vm_insns_count ratio_in_yjit].freeze
+  CPU_PROFILE_ROOT = '/run/nevidimy-stackprof'.freeze
+  CPU_PROFILE_FRAME_LIMIT = 30
 
   # TestAdapter settings alone must not permit a stray native perform_now.
   module NoJobExecution
@@ -74,6 +76,7 @@ class NevidimyNativeYjitProbe
     @stage = 'configure'
     @adapters, @loggers, @created = {}, {}, Hash.new { |hash, key| hash[key] = [] }
     configure(ENV.fetch('NEVIDIMY_YJIT_PROBE'))
+    configure_cpu_profile(ENV['NEVIDIMY_YJIT_PROFILE'])
     silence
     database_config = ActiveRecord::Base.connection_db_config
     validate_database(ActiveRecord::Base.connection, database: database_config.database)
@@ -105,7 +108,7 @@ class NevidimyNativeYjitProbe
     memory_after_warmup = memory
     stats_after_warmup = yjit_stats
     @stage = 'samples'
-    samples = SAMPLE_PAIRS.times.map { |index| pair(WARMUP_PAIRS + index) }
+    samples = sample_pairs
     memory_after_samples = memory
     stats_after_samples = yjit_stats
     @stage = 'after_invariants'
@@ -121,7 +124,8 @@ class NevidimyNativeYjitProbe
                     performed_jobs: 0, preexisting_core_rows_unchanged: true,
                     new_contacts: 1, new_contact_inboxes: 1, new_conversations: @created[Conversation].length,
                     new_messages: @created[Message].length, retained_tagged_records: true },
-      excludes: %w[controller_auth http_ingress real_queue_transport queue_wait job_execution telegram_delivery]
+      excludes: %w[controller_auth http_ingress real_queue_transport queue_wait job_execution telegram_delivery],
+      **(@cpu_profile ? { cpu_profile: @cpu_profile } : {})
     )}"
   rescue StandardError => error
     result = { ok: false, stage: @stage, error_type: error.class.name }
@@ -137,6 +141,96 @@ class NevidimyNativeYjitProbe
     @current&.each { |key, value| Current.public_send("#{key}=", value) }
     @adapters&.each { |job, adapter| job.queue_adapter = adapter }
     @loggers&.each { |owner, logger| owner.logger = logger }
+  end
+
+  def configure_cpu_profile(mode)
+    @cpu_profile = @cpu_profiler = nil
+    @cpu_profile_sampling = false
+    return if mode.nil? || mode == ''
+
+    check(mode == 'cpu', 'cpu_profile_mode')
+    @cpu_profiler = load_cpu_profiler
+  rescue LoadError
+    raise Failure, 'cpu_profile_dependency_missing'
+  end
+
+  def load_cpu_profiler
+    root = CPU_PROFILE_ROOT
+    check(ENV['NEVIDIMY_STACKPROF_ROOT'] == root, 'cpu_profile_dependency_root')
+    check(!defined?(StackProf) && $LOADED_FEATURES.none? { |path| path.match?(%r{/stackprof(?:/stackprof\.(?:so|bundle)|\.rb)\z}) },
+          'cpu_profile_already_loaded')
+    entry = "#{root}/gems/stackprof-0.2.25/lib/stackprof.rb"
+    check(File.realpath(entry) == entry, 'cpu_profile_dependency_path')
+    extensions = Dir.glob("#{root}/extensions/*/*/stackprof-0.2.25").select { |path| File.directory?(path) }
+    check(extensions.length == 1 && File.realpath(extensions.first) == extensions.first, 'cpu_profile_extension_path')
+    previous = $LOAD_PATH.dup
+    begin
+      $LOAD_PATH.unshift(File.dirname(entry), extensions.first)
+      require entry
+    ensure
+      $LOAD_PATH.replace(previous)
+    end
+    native = $LOADED_FEATURES.select { |path| path.match?(%r{/stackprof/stackprof\.(?:so|bundle)\z}) }
+    check(StackProf::VERSION == '0.2.25' && native.length == 1 &&
+          File.realpath(native.first) == native.first && native.first.start_with?(root + '/'), 'cpu_profile_dependency_contract')
+    StackProf
+  rescue Errno::ENOENT
+    raise Failure, 'cpu_profile_dependency_missing'
+  end
+
+  def sample_pairs
+    @cpu_profile_sampling = !@cpu_profiler.nil?
+    samples = SAMPLE_PAIRS.times.map { |index| pair(WARMUP_PAIRS + index) }
+    @cpu_profile_sampling = false
+    # StackProf 0.2.25 retains frames across start/stop; results consumes them.
+    # Retrieve once, after all measured blocks, never between incoming/outgoing.
+    @cpu_profile = cpu_profile_summary(@cpu_profiler.results) if @cpu_profiler
+    samples
+  ensure
+    @cpu_profile_sampling = false
+  end
+
+  def cpu_profile_summary(result)
+    check(result.is_a?(Hash) && result[:mode] == :cpu && result[:interval] == 1000 && result[:frames].is_a?(Hash) &&
+          %i[samples missed_samples gc_samples].all? { |key| result[key].is_a?(Integer) && result[key] >= 0 }, 'cpu_profile_result')
+    frame_self_samples = 0
+    frames = result[:frames].values.map do |frame|
+      check(frame.is_a?(Hash) && frame[:samples].is_a?(Integer) && frame[:samples] >= 0, 'cpu_profile_result')
+      frame_self_samples += frame[:samples]
+
+      path, name, line = frame.values_at(:file, :name, :line)
+      # Only source locations/VM method labels, never object inspection, eval,
+      # frame IDs, metadata, edges, line tables, source snippets or raw stacks.
+      next unless name.is_a?(String) && name.bytesize <= 160 &&
+                  name.match?(%r{\A(?:block(?: \([0-9]+\))? in )?(?:[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*[.#])?(?:[A-Za-z_][A-Za-z0-9_]*[!?=]?|\[\]=?|[+*/%<>=!~&|^-]{1,3})\z})
+      next unless frame[:total_samples].is_a?(Integer) && frame[:total_samples] >= frame[:samples]
+
+      # Ruby 3.4.4's rb_profile_frame_absolute_path/first_lineno expose exactly
+      # this marker/nil pair for CFUNC. Nil/unknown paths and GC's empty path
+      # are not native proof; anonymous singleton inspection labels stay out.
+      if path == '<cfunc>' && frame.key?(:line) && line.nil? &&
+         name.match?(/\A[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*[.#]/)
+        next({ kind: 'native', name: name, self_samples: frame[:samples], total_samples: frame[:total_samples] })
+      end
+      next unless path.is_a?(String) && path.bytesize <= 240 && !path.split('/').include?('..') &&
+                  path.match?(%r{\A(?:/app/(?:app|lib|enterprise/(?:app|lib)|config/initializers)/|/gems/ruby/3\.4\.0/gems/[A-Za-z0-9_.+-]+/(?:lib|ext)/|/usr/local/lib/ruby/3\.4\.0/)[A-Za-z0-9_.+/-]+\.rb\z}) &&
+                  line.is_a?(Integer) && line.positive?
+
+      { file: path.delete_prefix('/app/').delete_prefix('/gems/ruby/3.4.0/').delete_prefix('/usr/local/lib/ruby/3.4.0/'),
+        line: line, name: name, self_samples: frame[:samples], total_samples: frame[:total_samples] }
+    end.compact
+    # GC samples already enter :samples and exactly one exclusive frame each.
+    # Inclusive :total_samples can overlap and must never be summed here.
+    check(frame_self_samples <= result[:samples], 'cpu_profile_result')
+    kept_self_samples = frames.sum { |frame| frame[:self_samples] }
+    frames.sort_by! { |frame| [-frame[:self_samples], -frame[:total_samples], frame.fetch(:file, ''), frame.fetch(:line, 0), frame[:name]] }
+    top = frames.first(CPU_PROFILE_FRAME_LIMIT)
+    { mode: 'cpu', interval: 1000, total_samples: result[:samples], missed_samples: result[:missed_samples],
+      gc_samples: result[:gc_samples], top_frames: top,
+      coverage: { frame_self_samples: frame_self_samples, kept_self_samples: kept_self_samples,
+                  dropped_self_samples: frame_self_samples - kept_self_samples,
+                  top_self_samples: top.sum { |frame| frame[:self_samples] },
+                  unattributed_samples: result[:samples] - frame_self_samples } }
   end
 
   def silence
@@ -275,7 +369,16 @@ class NevidimyNativeYjitProbe
     process_cpu = Process.clock_gettime(Process::CLOCK_PROCESS_CPUTIME_ID)
     allocated = GC.stat(:total_allocated_objects)
     gc_time = GC.stat.fetch(:time, 0)
-    result = yield
+    profiling = false
+    if @cpu_profile_sampling
+      check(@cpu_profiler.start(mode: :cpu, interval: 1000, raw: false) == true, 'cpu_profile_start')
+      profiling = true
+    end
+    begin
+      result = yield
+    ensure
+      @cpu_profiler.stop if profiling
+    end
     sample = {
       elapsed_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(3),
       thread_cpu_ms: ((Process.clock_gettime(Process::CLOCK_THREAD_CPUTIME_ID) - thread_cpu) * 1000).round(3),

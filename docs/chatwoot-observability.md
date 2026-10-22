@@ -516,7 +516,8 @@ listeners, external hooks и изменение ранее существова�
 Исходные записи остаются в клоне для проверки; скрытого удаления нет.
 Benchmark исключает controller/auth, HTTP ingress, настоящую очередь, её
 ожидание и Telegram. Его выигрыш нельзя выдавать за полный выигрыш кнопки.
-После изменения production нужен отдельный замер ingress → Telegram acceptance.
+После изменения production нужен отдельный замер ingress → начало внешнего
+Telegram request; время до Telegram acceptance учитывать отдельно.
 
 Сравнение 22 октября 2026: одинаковый закреплённый образ и mounts, по одному
 отдельному процессу с лимитом 1 GiB / 1 CPU, 100 warmup + 30 sampled pairs.
@@ -538,6 +539,79 @@ RSS после samples: 441516 → 472440 KiB. Число SQL на сообще�
 разное ожидание SQL. Это не доказательство замедления от YJIT. На основании
 этого сравнения production-флаг не включался; до повторного сравнения не
 приписывать ему эффект на Telegram или задержку кнопок.
+
+### CPU-профиль MessageBuilder в изолированной копии
+
+Для этого же probe предусмотрен явный режим `NEVIDIMY_YJIT_PROFILE=cpu`.
+Без него зависимость StackProf не загружается. StackProf 0.2.25 собирается
+offline в отдельном network-none контейнере из проверенного публичного gem,
+не устанавливается в production image/Gemfile и монтируется read-only в
+`/run/nevidimy-stackprof`. Launcher проверяет manifest всех файлов, точный
+image ID, clone DB/Redis, provider TLS и неизменность production.
+
+CPU sampling с интервалом 1000 мкс охватывает только 60 измеряемых
+`MessageBuilder.perform` blocks: 30 incoming и 30 outgoing. Прогрев из 100 пар,
+создание тестовых разговоров и проверки инвариантов остаются снаружи.
+`start/stop` накапливают результаты, `results` вызывается один раз в конце.
+Это компонент API-inbox клона, **не профиль production atomic POST**:
+controller/auth, HTTP, реальные очереди и Telegram-specific fast paths сюда
+не входят. Задания только перехватываются, ни одно не исполняется.
+
+Вывод ограничен числовыми счётчиками и top-30 технических source/native frames.
+Нет raw stacks, аргументов, SQL, реквизитов или диалогов. Для Ruby C frames
+принимается только точный `<cfunc>` с `line:nil` и техническим именем метода.
+Отдельные счётчики показывают покрытие и отброшенные frames; inclusive samples
+могут пересекаться и не суммируются как независимые затраты.
+
+22 октября 2026 оба последовательных прогона (YJIT выключен, 1 CPU / 1 GiB,
+одинаковые mounts/flags) завершились успешно без OOM. Старые core-строки клона
+и production остались неизменны. Медианы без профилировщика: incoming wall
+142,004 мс / thread CPU 88,484 мс; outgoing wall 94,688 мс / CPU 56,518 мс.
+С профилировщиком wall — 155,315 / 107,188 мс: эти числа **не ускорение**,
+они включают накладные расходы профиля и различие нагрузки между прогонами.
+
+Получено 4927 CPU samples, missed 1, GC 170 (3,45%). Безопасно сохранённые
+frames покрывают 4609 samples (93,55%), top-30 — 1124 (22,81%). Три нативных
+метода PG `exec_prepared` / `exec_params` / `exec` вместе получили 375 self
+samples (7,61%). `QueryCache#select_all` имеет 1481 inclusive samples (30,06%),
+`PostgreSQL::DatabaseStatements#internal_exec_query` — 1137 (23,08%); эти
+проценты пересекаются. Единственной CPU-функции, объясняющей большую часть
+задержки, не найдено. CPU в клиенте PG не равен времени выполнения SQL на
+сервере. В профиле есть SQL LogSubscriber, но logger теста направлен в
+`File::NULL`: это не доказательство аналогичных расходов production logger.
+
+Дополнительная read-only проверка production: у Chatwoot, Sidekiq, Python
+backend и Telegram ingress CPU quota отсутствует, `nr_throttled=0`, OOM false.
+Это исключает наблюдаемый cgroup CPU throttling, но не конкуренцию Ruby threads
+или процессов. Размер JSON custom_attributes проверялся только численно:
+около 8 КБ у личного тестового разговора, максимум около 10,5 КБ по 237
+разговорам. Эти проверки не доказывают достижение общего бюджета 200 мс.
+
+### Стоимость внутреннего HTTPS setup
+
+22 октября 2026 отдельный Ruby-процесс в закреплённом native image выполнил
+10 cold и 20 warm `GET https://agent-bot:8080/healthz` из той же Docker-сети.
+Единственный mount — read-only публичный CA bundle, без env-файлов, токенов,
+Rails или POST/webhook. Контейнер ограничен 128 MiB / 1 CPU, rootfs read-only;
+production source/environment/контейнеры остались прежними. Все 30 ответов —
+200, без OOM; повторное использование одного warm socket проверено явно.
+Проверка сертификата и hostname включена, TLS не ниже 1.2, env proxy отключён,
+автоматические повторы Net::HTTP отключены.
+
+| Метрика | Число замеров | p50, мс | p95, мс |
+| --- | ---: | ---: | ---: |
+| Cold connect + TLS setup, wall | 10 | 18,579 | 20,173 |
+| Cold connect + TLS setup, thread CPU | 10 | 16,041 | 17,617 |
+| GET после cold setup, wall | 10 | 1,754 | 3,453 |
+| GET по уже открытому warm socket, wall | 20 | 1,620 | 2,795 |
+
+Setup измерен отдельно от создания Ruby HTTP object и request, teardown не
+входит. `/healthz` включает лёгкую проверку здоровья очереди, поэтому это не
+чистый RTT. Это также **не замер webhook/HMAC/Sidekiq**, не production A/B и не
+основание объявлять весь участок handoff 124 мс TLS-задержкой. Нынешний
+`agent_webhook.rb` открывает и закрывает HTTPS-сессию на каждую доставку;
+reuse потенциально убирает порядок 19 мс такого setup, а не сотни миллисекунд.
+По этому диагностическому прогону runtime reuse не включался.
 
 ## Изолированный замер обязательного Telegram-прокси
 
