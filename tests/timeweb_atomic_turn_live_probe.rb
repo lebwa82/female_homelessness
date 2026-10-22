@@ -34,7 +34,13 @@ class NevidimyAtomicTurnLiveProbe
     configure
     validate_target
     require INITIALIZER
+    timing = '/run/nevidimy-check/turn_timing.rb'
+    require timing if File.file?(timing)
     Rails.application.reloader.prepare!
+    if defined?(NevidimyTurnTiming)
+      ancestors = Api::V1::Accounts::Conversations::MessagesController.ancestors
+      check(ancestors.index(NevidimyTurnTiming::Controller) < ancestors.index(NevidimyAtomicTurn::Commit), 'timing_scope_order')
+    end
     check(Message._create_callbacks.any? { |callback| callback.filter == :nevidimy_lock_staff_conversation }, 'staff_callback_missing')
     check(ActiveRecord::Base.connection_pool.size >= 3, 'connection_pool_too_small')
     @subscriber = ActiveSupport::Notifications.subscribe('sql.active_record') do
@@ -50,6 +56,11 @@ class NevidimyAtomicTurnLiveProbe
     verify_assignment_status_and_epoch
     verify_concurrent_commit
     verify_staff_lock_race
+    if defined?(NevidimyTurnTiming)
+      check(@timing_events.length == 11, 'timing_event_count')
+      @result[:timing_events] = @timing_events
+      @result[:checks] << 'native_atomic_timing_scope_and_content_free_events'
+    end
     @result[:ok] = true
   rescue Failure => error
     @result[:error] = error.message
@@ -64,6 +75,16 @@ class NevidimyAtomicTurnLiveProbe
 
   def silence_and_capture_jobs
     quiet = Logger.new(File::NULL)
+    events = @timing_events = []
+    quiet.define_singleton_method(:info) do |message = nil, &block|
+      if message.is_a?(String) && message.start_with?('{"event":"nevidimy_atomic_turn_timing"')
+        event = JSON.parse(message)
+        allowed = %w[event elapsed_ms spans sql outgoing_message_id http_status]
+        raise NevidimyAtomicTurnLiveProbe::Failure, 'timing_extra_fields' unless (event.keys - allowed).empty?
+        events << event
+      end
+      super(message, &block)
+    end
     [Rails, ActiveRecord::Base, ActionController::Base, ActiveJob::Base].each do |owner|
       @loggers[owner] = owner.logger
       owner.logger = quiet

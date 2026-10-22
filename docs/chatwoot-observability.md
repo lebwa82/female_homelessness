@@ -51,6 +51,12 @@ API-inbox и acceptance-маркером, никогда на клиентско
 передаются через закрытое окружение. Задания перехватывает тестовый адаптер:
 такой прогон не подтверждает скорость production или доставку Telegram.
 
+Лог `nevidimy_atomic_turn_timing` разделяет native builder, after-commit callbacks
+и SQL (`schema`, `cached`, `uncached`) внутри atomic-create. В нём только
+фиксированные числовые поля, HTTP-статус и ID исходящего сообщения; SQL, binds,
+текст и параметры не записываются. Это время тела action без предшествующей
+авторизации и сети, а не end-to-end latency. Вложенные spans нельзя слепо суммировать.
+
 Нативный Telegram sender переиспользует проверенные HTTPS-соединения через
 существующий прокси, без автоматического повтора неоднозначного POST. Его
 content-free лог `nevidimy_telegram_send` отдельно показывает `http_elapsed_ms`,

@@ -57,6 +57,14 @@ x-atomic-turn: &atomic-turn
   bind:
     create_host_path: false
 
+x-turn-timing: &turn-timing
+  type: bind
+  source: ../timeweb/turn_timing.rb
+  target: /app/config/initializers/nevidimy_turn_timing.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   chatwoot:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
@@ -77,6 +85,7 @@ services:
       - *telegram-callback
       - *telegram-transport
       - *atomic-turn
+      - *turn-timing
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
       test:
@@ -108,6 +117,7 @@ services:
       - *telegram-callback
       - *telegram-transport
       - *atomic-turn
+      - *turn-timing
 
   agent-bot:
     # The offline PII-model probe already peaks near 370 MiB before HTTP work.
