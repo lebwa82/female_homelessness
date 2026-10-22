@@ -59,6 +59,13 @@ module NevidimyTelegramTransport
     nil
   end
 
+  def self.record_request_start(timing)
+    started_at = wall_ms
+    timing[:request_started_at_ms] = started_at if started_at.is_a?(Integer) && started_at.positive?
+  rescue StandardError, NotImplementedError
+    nil # An optional wall clock/recorder must never prevent the native request.
+  end
+
   def self.thread_cpu_time
     Process.clock_gettime(Process::CLOCK_THREAD_CPUTIME_ID)
   rescue StandardError, NotImplementedError
@@ -155,6 +162,10 @@ module NevidimyTelegramTransport
     accepted_at = timing[:accepted_at_ms]
     elapsed = accepted_at - received_at if accepted_at && received_at.is_a?(Integer) &&
                                           received_at.positive? && received_at <= accepted_at
+    request_at = timing[:request_started_at_ms]
+    request_at = nil unless request_at.is_a?(Integer) && request_at.positive?
+    to_request = request_at - received_at if request_at && received_at.is_a?(Integer) &&
+                                           received_at.positive? && received_at <= request_at
     Rails.logger.info({
       event: 'nevidimy_telegram_send', message_id: message.id.is_a?(Integer) ? message.id : nil,
       http_elapsed_ms: timing[:http_elapsed_ms]&.round,
@@ -167,6 +178,7 @@ module NevidimyTelegramTransport
       response_block_ms: timing[:response_block_ms], response_tail_ms: timing[:response_tail_ms],
       send_elapsed_ms: ((monotonic - timing[:started]) * 1000).round,
       accepted_at_ms: accepted_at, source_to_accepted_ms: elapsed,
+      request_started_at_ms: request_at, source_to_request_ms: to_request,
       success: timing[:success], outcome_class: timing[:outcome_class]
     }.to_json)
   rescue StandardError
@@ -207,6 +219,8 @@ module NevidimyTelegramTransport
         headers, observed_headers, callback_ms = nil, false, 0.0
         begin
           if timing && block
+            # Explicit TCP/CONNECT/TLS setup is above this boundary, not pure CPU.
+            NevidimyTelegramTransport.record_request_start(timing)
             response = connection.request(*arguments) do |native_response|
               entered = NevidimyTelegramTransport.request_clock
               headers = entered unless observed_headers
@@ -220,6 +234,7 @@ module NevidimyTelegramTransport
             end
           else
             # Do not introduce a response block into a blockless native request.
+            NevidimyTelegramTransport.record_request_start(timing) if timing
             response = connection.request(*arguments, &block)
           end
         ensure

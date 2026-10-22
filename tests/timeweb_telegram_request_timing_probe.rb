@@ -20,12 +20,18 @@ def verify(value)
 end
 
 class << NevidimyTelegramTransport
-  attr_accessor :probe_clock, :probe_clock_failure
+  attr_accessor :probe_clock, :probe_clock_failure, :probe_wall_failure
 
   def monotonic
     raise 'neutral telemetry clock failure' if probe_clock_failure
 
     probe_clock
+  end
+
+  def wall_ms
+    raise 'neutral wall clock failure' if probe_wall_failure
+
+    1_700_000_000_000 + (probe_clock * 1000).round
   end
 end
 
@@ -36,7 +42,7 @@ class TimingConnection
     end
   end
 
-  attr_reader :response, :block_result, :calls, :had_block, :arguments, :received_block
+  attr_reader :response, :block_result, :calls, :had_block, :arguments, :received_block, :request_entry
   attr_accessor :failure
 
   def initialize
@@ -48,6 +54,7 @@ class TimingConnection
   end
 
   def request(*arguments, &block)
+    @request_entry = NevidimyTelegramTransport.probe_clock
     @arguments, @had_block, @received_block = arguments, !block.nil?, block
     @calls += 1
     NevidimyTelegramTransport.probe_clock += 0.003
@@ -59,10 +66,25 @@ class TimingConnection
   end
 end
 
+class ColdTimingConnection < TimingConnection
+  def started?
+    @started == true
+  end
+
+  def start
+    NevidimyTelegramTransport.probe_clock += 0.25
+    @started = true
+  end
+end
+
 class TimingPool < NevidimyTelegramTransport::Pool
   attr_reader :released
 
   private
+
+  def monotonic
+    NevidimyTelegramTransport.probe_clock
+  end
 
   def checkout(candidate)
     [candidate, :neutral]
@@ -77,6 +99,7 @@ KEYS = %i[raw_request_ms request_to_headers_ms response_block_ms response_tail_m
 def context
   NevidimyTelegramTransport.probe_clock = 10.0
   NevidimyTelegramTransport.probe_clock_failure = false
+  NevidimyTelegramTransport.probe_wall_failure = false
   Thread.current[NevidimyTelegramTransport::TIMING_KEY] = {}
 end
 
@@ -94,6 +117,15 @@ report['native_results_arguments_and_reuse_unchanged'] = true
 verify(KEYS.map { |key| timing[key] } == [12.0, 3.0, 4.0, 5.0])
 verify((timing[:request_to_headers_ms] + timing[:response_block_ms] + timing[:response_tail_ms] - timing[:raw_request_ms]).abs < 0.001)
 report['three_marks_and_callback_are_nonoverlapping'] = true
+verify(timing[:request_started_at_ms] == 1_700_000_010_000 && connection.request_entry == 10.0)
+report['request_boundary_is_before_native_external_work'] = true
+
+timing = context
+connection, pool = ColdTimingConnection.new, TimingPool.new
+verify(pool.request(connection, request).equal?(connection.response) && !connection.had_block)
+verify(timing[:request_started_at_ms] == 1_700_000_010_250 && connection.request_entry == 10.25 &&
+       (timing[:tls_setup_ms] - 250.0).abs < 0.001 && timing[:raw_request_ms] == 8.0)
+report['cold_setup_is_before_request_boundary_and_separately_reported'] = true
 
 timing = context
 connection, pool = TimingConnection.new, TimingPool.new
@@ -153,9 +185,25 @@ rescue ArgumentError => error
 end
 report['clock_failure_does_not_replace_native_exception'] = true
 
+timing = context
+NevidimyTelegramTransport.probe_wall_failure = true
+connection, pool = TimingConnection.new, TimingPool.new
+verify(pool.request(connection, request).equal?(connection.response) && timing[:request_started_at_ms].nil? &&
+       timing[:raw_request_ms] == 8.0 && !connection.had_block)
+report['wall_clock_failure_does_not_change_delivery'] = true
+failure = IOError.new('neutral native failure')
+connection.failure = failure
+begin
+  pool.request(connection, request)
+  raise 'native request failure swallowed'
+rescue IOError => error
+  verify(error.equal?(failure) && pool.released == [connection, :neutral, false])
+end
+report['wall_clock_failure_does_not_replace_native_exception'] = true
+
 class BrokenRecorder < Hash
   def []=(key, value)
-    raise 'neutral telemetry recorder failure' if KEYS.include?(key)
+    raise 'neutral telemetry recorder failure' if KEYS.include?(key) || key == :request_started_at_ms
 
     super
   end
@@ -182,9 +230,23 @@ timing = { started: 10.0, success: true, outcome_class: 'Integer', raw_request_m
 NevidimyTelegramTransport.log_send(OpenStruct.new(id: 1, content_attributes: {}), timing)
 keys = %w[event message_id http_elapsed_ms pool_checkout_ms pool_key_ms pool_mutex_wait_ms
           pool_lease_wait_ms pool_idle_closed pool_checkout_cpu_ms connection_reused tls_setup_ms
-          send_elapsed_ms accepted_at_ms source_to_accepted_ms success outcome_class] + KEYS.map(&:to_s)
+          send_elapsed_ms accepted_at_ms source_to_accepted_ms request_started_at_ms source_to_request_ms
+          success outcome_class] + KEYS.map(&:to_s)
 verify(logs.length == 1 && logs.first.keys.sort == keys.sort && logs.first['raw_request_ms'] == 12.0)
 report['fixed_content_free_fields_only'] = true
+
+timing.merge!(request_started_at_ms: 1_700_000_010_250, accepted_at_ms: 1_700_000_010_258)
+message = OpenStruct.new(id: 1, content_attributes: { 'nevidimy_received_at_ms' => 1_700_000_009_000 })
+NevidimyTelegramTransport.log_send(message, timing)
+verify(logs.last['source_to_request_ms'] == 1250 && logs.last['source_to_accepted_ms'] == 1258 &&
+       logs.last['request_started_at_ms'] == 1_700_000_010_250)
+[{}, { 'nevidimy_received_at_ms' => '1700000009000' }, { 'nevidimy_received_at_ms' => 0 },
+ { 'nevidimy_received_at_ms' => 1_700_000_010_251 }].each do |attributes|
+  NevidimyTelegramTransport.log_send(OpenStruct.new(id: 1, content_attributes: attributes), timing)
+  verify(logs.last['source_to_request_ms'].nil?)
+end
+NevidimyTelegramTransport.record_request_start({}.freeze)
+report['source_boundary_uses_only_valid_persisted_numeric_timestamp'] = true
 
 Thread.current[NevidimyTelegramTransport::TIMING_KEY] = nil
 puts JSON.generate(report)
