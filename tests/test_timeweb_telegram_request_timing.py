@@ -23,4 +23,4 @@ def test_telegram_request_timing_preserves_native_callback_semantics():
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert len(report) == 12 and all(report.values())
+    assert len(report) == 17 and all(report.values())
