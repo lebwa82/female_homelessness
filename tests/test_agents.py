@@ -62,6 +62,38 @@ def test_classifier_does_not_load_legacy_workflow_instructions(monkeypatch) -> N
     assert "# Skill:" not in instructions
 
 
+def test_default_context_keeps_existing_availability_contract() -> None:
+    context = AgentContext(history=(), state="open_conversation")
+
+    assert context.new_certificates_unavailable is False
+    assert agents.format_agent_context(context, "synthetic history") == (
+        "Состояние диалога: open_conversation\npending_offer: none\n\n"
+        "Доступная помощь:\n- каталог пока не нужен\n\n"
+        "Проверенная информация:\n- проверенной справки нет\n\nИстория:\nsynthetic history"
+    )
+
+
+def test_paused_context_distinguishes_new_requests_from_existing_certificates() -> None:
+    context = AgentContext(
+        history=(), state="open_conversation", new_certificates_unavailable=True,
+    )
+
+    formatted = agents.format_agent_context(context, "synthetic history")
+
+    for rule in (
+        "Сейчас новые сертификаты недоступны",
+        "Не предлагай новый сертификат и не обещай его выдачу или сроки",
+        "Уже отправленный сертификат можно обсуждать",
+        "Не предлагай автоматически повторную выдачу или повторную заявку",
+        "Учитывай сообщения об уже оказанной помощи",
+        "Благодарность или просьба о дальнейшей поддержке не означает новую заявку",
+        "Не утверждай получение или использование только по наличию PDF",
+    ):
+        assert rule in formatted
+        assert formatted.index(rule) < formatted.index("История:")
+    assert "Приём новых заявок на сертификаты приостановлен" not in formatted
+
+
 def test_yandex_client_uses_fixed_timeout_and_disables_sdk_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -429,15 +461,21 @@ def test_transport_failure_is_unavailable_not_a_synthetic_unknown_risk() -> None
 
 
 @pytest.mark.asyncio
-async def test_evaluate_starts_exactly_two_calls_concurrently_and_keeps_actions_out_of_schema() -> None:
-    started: set[str] = set()
+@pytest.mark.parametrize("new_certificates_unavailable", (False, True))
+async def test_evaluate_starts_exactly_two_calls_concurrently_and_keeps_actions_out_of_schema(
+    new_certificates_unavailable: bool,
+) -> None:
+    started: list[str] = []
     in_flight = 0
     max_in_flight = 0
 
     async def call(agent_name: str, instructions: str, input_text: str) -> AgentCallResult:
         nonlocal in_flight, max_in_flight
-        del instructions, input_text
-        started.add(agent_name)
+        del instructions
+        if agent_name == "support":
+            unavailable_is_explicit = "Сейчас новые сертификаты недоступны" in input_text
+            assert unavailable_is_explicit is new_certificates_unavailable
+        started.append(agent_name)
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
         await asyncio.sleep(0.01)
@@ -454,10 +492,13 @@ async def test_evaluate_starts_exactly_two_calls_concurrently_and_keeps_actions_
         provider_settings=ProviderSettings(max_tokens=271, data_logging_enabled=False),
     )
     result = await gateway.evaluate(
-        AgentContext(history=(("user", "Мне нужна еда"),), state="open_conversation")
+        AgentContext(
+            history=(("user", "Мне нужна еда"),), state="open_conversation",
+            new_certificates_unavailable=new_certificates_unavailable,
+        )
     )
 
-    assert started == {"risk", "support"}
+    assert sorted(started) == ["risk", "support"]
     assert max_in_flight == 2
     assert result.safety_status is DiagnosticStatus.COMPLETED
     assert result.support_status is DiagnosticStatus.COMPLETED

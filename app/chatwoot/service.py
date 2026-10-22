@@ -41,6 +41,10 @@ from app.store import CertificateClaimResult, ConversationRecord, InMemoryConver
 from app.ui import HUMAN_CHOICE
 
 _CONTEXT_MARKER_PREFIX = "[women-help/context-epoch:"
+_CERTIFICATE_HISTORY_MARKER = (
+    "[SENSITIVE_DELIVERY] В истории есть сообщение с сертификатом; реквизиты скрыты. "
+    "Это не подтверждает получение или использование и не означает доступность нового сертификата."
+)
 logger = logging.getLogger(__name__)
 _WORKFLOW_ATTRS = (
     "workflow_state",
@@ -831,7 +835,7 @@ def _history_after_epoch(
             isinstance(attributes, dict)
             and attributes.get("bot_sensitive_content") == "certificate"
         ):
-            content = "[SENSITIVE_DELIVERY]"
+            content = _CERTIFICATE_HISTORY_MARKER
         history.append((role, content.strip()))
     return tuple(history)
 

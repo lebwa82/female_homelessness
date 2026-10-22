@@ -719,12 +719,17 @@ class ConversationService:
             history = await self.store.model_history(record)
             knowledge_query = " ".join(content for role, content in history if role == "user")
             verified_articles = find_verified_articles(knowledge_query)
+            new_certificates_unavailable = self.scenario_flow is not None
             return await self.gateway.evaluate(
                 AgentContext(
                     history=history,
                     state=record.state,
                     pending_offer=record.pending_offer,
-                    catalog=tuple(item.model_dump(mode="json") for item in available_catalog()),
+                    catalog=tuple(
+                        item.model_dump(mode="json") for item in available_catalog()
+                        if not new_certificates_unavailable or item.fulfillment != "certificate"
+                    ),
+                    new_certificates_unavailable=new_certificates_unavailable,
                     knowledge=(format_verified_context(verified_articles),)
                     if verified_articles
                     else (),
