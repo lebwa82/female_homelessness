@@ -14,7 +14,7 @@ module NevidimyAgentBotConversationProjection
     'AgentBot' => 'c1ac84ff6f5ef8de75c3375dd3ba5750b1c2775bda7a42c2b366930b8f6cdd32'
   }.freeze
   WRAPPER_SHA256S = {
-    'NevidimyTurnTiming::BotEvents' => '74ce222a55ccb0dbe715347b5a84cb92d70d890dd04b6b2e598d6036028d7cb8',
+    'NevidimyTurnTiming::BotEvents' => '2ec22c547e16b9e435e77c2dd11875a4f682614f71c1ef4f242c3946ef401c3c',
     'NevidimyWebhookPresenterFastPath::Presenter' => '91992962f5e852d0b088000a817517ffd5b9185ba3b5761e5d7ab4fd3d29b18a'
   }.freeze
   LISTENER_METHODS = {

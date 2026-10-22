@@ -12,6 +12,13 @@ module NevidimyTurnTiming
   LISTENER_EVENTS = %i[message_created conversation_updated].freeze unless const_defined?(:LISTENER_EVENTS, false)
   LISTENER_SPANS = %i[ui_message_created ui_conversation_updated bot_message_created bot_conversation_updated].freeze unless const_defined?(:LISTENER_SPANS, false)
   SPANS = ([:message_builder] + CALLBACKS + LISTENER_SPANS).freeze unless const_defined?(:SPANS, false)
+  COMPACT_GET_METHODS = {
+    authenticate_by_access_token?: :auth_mode, authenticate_access_token!: :auth_token,
+    validate_bot_access_token!: :auth_bot_endpoint, current_account: :account,
+    validate_token_api_access: :account_api_access, check_account_mfa_enforcement: :account_mfa,
+    conversation: :conversation_policy, show: :projection
+  }.freeze unless const_defined?(:COMPACT_GET_METHODS, false)
+  COMPACT_GET_SPANS = ([:process_action] + COMPACT_GET_METHODS.values).freeze unless const_defined?(:COMPACT_GET_SPANS, false)
   SQL_KINDS = %i[schema cached uncached].freeze unless const_defined?(:SQL_KINDS, false)
   TIMELINE_LIMIT = 64 unless const_defined?(:TIMELINE_LIMIT, false)
 
@@ -48,18 +55,24 @@ module NevidimyTurnTiming
     value.round(3) if value.finite?
   end
 
-  def self.start
+  def self.start(compact_get: false)
+    names = compact_get ? COMPACT_GET_SPANS : SPANS
     scope = {
       started: monotonic, started_at_ms: wall_ms, timeline: [], timeline_dropped: 0,
-      spans: SPANS.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] },
+      spans: names.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] },
       sql: SQL_KINDS.to_h { |name| [name, { count: 0, elapsed_ms: 0.0 }] }
     }
+    scope[:compact_get] = true if compact_get
     scope[:thread_cpu_started] = thread_cpu_time
     scope[:process_gc_started] = process_gc_time
     scope[:process_allocated_started] = process_allocated_objects
     scope
   rescue StandardError, NotImplementedError
     nil
+  end
+
+  def self.span_names(scope)
+    scope[:compact_get] == true ? COMPACT_GET_SPANS : SPANS
   end
 
   def self.measure(name)
@@ -82,7 +95,7 @@ module NevidimyTurnTiming
   end
 
   def self.start_span(scope, name, started)
-    return unless SPANS.include?(name)
+    return unless span_names(scope).include?(name)
     if scope.fetch(:timeline).length >= TIMELINE_LIMIT
       scope[:timeline_dropped] += 1
       return
@@ -137,6 +150,23 @@ module NevidimyTurnTiming
     nil
   end
 
+  def self.record_input_commit(message)
+    scope = Thread.current[SCOPE_KEY]
+    return unless scope && scope[:input_job] == true && !scope[:input_commit_seen] &&
+                  message.incoming? && !message.private? && message.id.is_a?(Integer) && message.id.positive?
+
+    scope[:input_commit_seen] = true
+    elapsed = (monotonic - scope.fetch(:started)) * 1000
+    return unless elapsed.finite? && elapsed >= 0
+
+    snapshot = { elapsed_ms: elapsed.round(3), sql: scope.fetch(:sql).transform_values(&:dup) }
+    cpu = counter_delta(scope[:thread_cpu_started], thread_cpu_time, 1_000_000.0)
+    snapshot[:thread_cpu_ms] = cpu unless cpu.nil?
+    scope[:before_first_after_commit] = snapshot
+  rescue StandardError, NotImplementedError
+    nil
+  end
+
   def self.sql(_name, started, finished, _id, payload)
     scope = Thread.current[SCOPE_KEY]
     return unless scope
@@ -162,7 +192,7 @@ module NevidimyTurnTiming
 
   def self.timeline(scope)
     scope.fetch(:timeline).first(TIMELINE_LIMIT).select do |entry|
-      entry.is_a?(Hash) && SPANS.include?(entry[:span]) &&
+      entry.is_a?(Hash) && span_names(scope).include?(entry[:span]) &&
         %i[start_ms end_ms sql_elapsed_ms].all? { |key| entry[key].is_a?(Numeric) && entry[key].finite? && entry[key] >= 0 } &&
         entry[:end_ms] >= entry[:start_ms] && entry[:sql_count].is_a?(Integer) && entry[:sql_count] >= 0
     end.map do |entry|
@@ -183,10 +213,11 @@ module NevidimyTurnTiming
     timeline = timeline(scope)
     # Reconstruct the event from fixed keys; never serialize request/model data.
     event = {
-      event: scope[:input_job] == true ? 'nevidimy_telegram_input_timing' : 'nevidimy_atomic_turn_timing',
+      event: scope[:compact_get] == true ? 'nevidimy_compact_get_timing' :
+        (scope[:input_job] == true ? 'nevidimy_telegram_input_timing' : 'nevidimy_atomic_turn_timing'),
       started_at_ms: scope.fetch(:started_at_ms), finished_at_ms: wall_ms,
       elapsed_ms: ((monotonic - scope.fetch(:started)) * 1000).round(3),
-      spans: counters(scope.fetch(:spans), SPANS),
+      spans: counters(scope.fetch(:spans), span_names(scope)),
       sql: counters(scope.fetch(:sql), SQL_KINDS), timeline: timeline,
       timeline_dropped: scope.fetch(:timeline_dropped) + scope.fetch(:timeline).length - timeline.length
     }
@@ -195,12 +226,87 @@ module NevidimyTurnTiming
     event[:process_allocated_objects] = process_allocated unless process_allocated.nil?
     id_field = scope[:input_job] == true ? :incoming_message_id : :outgoing_message_id
     message_id = scope[id_field]
-    event[id_field] = message_id if message_id.is_a?(Integer) && message_id.positive?
+    event[id_field] = message_id if scope[:compact_get] != true && message_id.is_a?(Integer) && message_id.positive?
+    snapshot = scope[:before_first_after_commit]
+    if scope[:input_job] == true && snapshot.is_a?(Hash) &&
+       snapshot[:elapsed_ms].is_a?(Numeric) && snapshot[:elapsed_ms].finite? && snapshot[:elapsed_ms] >= 0 &&
+       SQL_KINDS.all? { |kind|
+         value = snapshot.fetch(:sql).fetch(kind)
+         value[:count].is_a?(Integer) && value[:count] >= 0 &&
+           value[:elapsed_ms].is_a?(Numeric) && value[:elapsed_ms].finite? && value[:elapsed_ms] >= 0
+       }
+      detail = { elapsed_ms: snapshot[:elapsed_ms], sql: counters(snapshot.fetch(:sql), SQL_KINDS) }
+      cpu = snapshot[:thread_cpu_ms]
+      detail[:thread_cpu_ms] = cpu if cpu.is_a?(Numeric) && cpu.finite? && cpu >= 0
+      event[:before_first_after_commit] = detail
+    end
     # On an exception, middleware may still change the final HTTP status.
     status = controller.response.status if completed && controller
     event[:http_status] = status if status.is_a?(Integer) && status.between?(100, 599)
     Rails.logger.info(event.to_json)
   rescue StandardError, NotImplementedError
+    nil
+  end
+
+  def self.compact_get?(controller, arguments)
+    return false unless arguments.first == 'show' && controller.request.get?
+
+    # Observe the literal technical key only. Parsing params before native auth
+    # could move a malformed-query exception ahead of the authentication gate.
+    query = controller.request.query_string
+    query.is_a?(String) && query.match?(/(?:\A|&)nevidimy_turn_state(?:=|&|\z)/)
+  rescue StandardError, NotImplementedError
+    false
+  end
+
+  module CompactGetController
+    def process_action(*arguments, &block)
+      return super unless NevidimyTurnTiming.compact_get?(self, arguments)
+
+      previous = Thread.current[SCOPE_KEY]
+      scope = NevidimyTurnTiming.start(compact_get: true)
+      return super unless scope
+
+      Thread.current[SCOPE_KEY] = scope
+      begin
+        NevidimyTurnTiming.measure(:process_action) { super(*arguments, &block) }
+      ensure
+        Thread.current[SCOPE_KEY] = previous
+        NevidimyTurnTiming.finish(scope, self, completed: $!.nil?)
+      end
+    end
+
+    COMPACT_GET_METHODS.each do |name, stage|
+      define_method(name) do |*arguments, &block|
+        scope = Thread.current[SCOPE_KEY]
+        if scope.is_a?(Hash) && scope[:compact_get] == true
+          NevidimyTurnTiming.measure(stage) { super(*arguments, &block) }
+        else
+          super(*arguments, &block)
+        end
+      end
+    end
+  end
+
+  def self.install_compact_get(controller)
+    return if controller < CompactGetController
+
+    names = [:process_action] + COMPACT_GET_METHODS.keys
+    return unless names.all? { |name| controller.method_defined?(name) || controller.private_method_defined?(name) }
+    return unless COMPACT_GET_METHODS.keys.all? { |name| controller.instance_method(name).arity.zero? }
+
+    names.each do |name|
+      visibility = if controller.private_method_defined?(name)
+        :private
+      elsif controller.protected_method_defined?(name)
+        :protected
+      else
+        :public
+      end
+      CompactGetController.send(visibility, name)
+    end
+    controller.prepend(CompactGetController)
+  rescue StandardError
     nil
   end
 
@@ -253,6 +359,7 @@ module NevidimyTurnTiming
   module MessageCallbacks
     CALLBACKS.each do |name|
       define_method(name) do
+        NevidimyTurnTiming.record_input_commit(self) if name == :reopen_conversation
         NevidimyTurnTiming.record_message(self) if name == :dispatch_create_events
         NevidimyTurnTiming.measure(name) { super() }
       end
@@ -286,6 +393,9 @@ end
 
 NevidimyTurnTiming.install_sql_subscriber
 Rails.application.reloader.to_prepare do
+  if defined?(Api::V1::Accounts::ConversationsController)
+    NevidimyTurnTiming.install_compact_get(Api::V1::Accounts::ConversationsController)
+  end
   controller = Api::V1::Accounts::Conversations::MessagesController
   controller.prepend(NevidimyTurnTiming::Controller) unless controller < NevidimyTurnTiming::Controller
   builder = Messages::MessageBuilder

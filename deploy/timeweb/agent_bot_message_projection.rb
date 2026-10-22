@@ -11,10 +11,10 @@ module NevidimyAgentBotMessageProjection
     'MessageFilterHelpers' => '0c0b16c68061655aeae121f42951f20e840ad6a86f2f9b908bbbccd09ed4c2c0',
     'Contact' => '75ec0685efaa21b65f47a6845640bc5216bc44ba4441ccad494f156a8e312711',
     'Inbox' => '4575130acb38a15c49cacd346e99b52562e8ba2d4ed47feea3f61f2c6b0e7edb',
-    'NevidimyTurnTiming::BotEvents' => '74ce222a55ccb0dbe715347b5a84cb92d70d890dd04b6b2e598d6036028d7cb8',
+    'NevidimyTurnTiming::BotEvents' => '2ec22c547e16b9e435e77c2dd11875a4f682614f71c1ef4f242c3946ef401c3c',
     'NevidimyAgentBotSelfEventFilter::Listener' => '0b1fd72768f49ffc9c3a239f404692f272724e2825b6ebd1a2698eb7df6efc9c',
     '#<Class:NevidimyAgentBotSelfEventFilter>' => '0b1fd72768f49ffc9c3a239f404692f272724e2825b6ebd1a2698eb7df6efc9c',
-    '#<Class:NevidimyAgentBotConversationProjection>' => 'bd2d3770ce9aeba7497ac5a23f3a240c15e5735778acbaff3a723840268b4451'
+    '#<Class:NevidimyAgentBotConversationProjection>' => '72ed27119c7dfc9488255b0365798e15f8eadc16e7499334403c4730a6bac9de'
   }.freeze
 
   def self.verified?(method)

@@ -1,5 +1,6 @@
 """Neutral cross-language producer/consumer contract; no customer fixtures."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -15,6 +16,13 @@ from app.chatwoot.contracts import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_timing_wrapper_pin_matches_current_source():
+    timing = ROOT / "deploy/timeweb/turn_timing.rb"
+    projection = ROOT / "deploy/timeweb/agent_bot_conversation_projection.rb"
+    expected = hashlib.sha256(timing.read_bytes()).hexdigest()
+    assert projection.read_text().count(f"'NevidimyTurnTiming::BotEvents' => '{expected}'") == 1
 
 
 def test_native_projection_preserves_actual_consumer_contract():

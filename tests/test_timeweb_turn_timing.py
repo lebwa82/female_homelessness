@@ -21,4 +21,4 @@ def test_atomic_turn_timing_preserves_native_contract_and_logs_only_fixed_metric
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert len(report) == 23 and all(report.values())
+    assert len(report) == 31 and all(report.values())
