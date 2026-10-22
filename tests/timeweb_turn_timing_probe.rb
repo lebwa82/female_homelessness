@@ -568,6 +568,7 @@ input_job.perform(opaque)
 verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY] == false, 'inactive previous input scope changed')
 Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
 allowed << 'incoming_message_id'
+allowed << 'before_first_after_commit'
 verify(Rails.logger.events.all? { |event| (event.keys - allowed).empty? &&
        %w[nevidimy_atomic_turn_timing nevidimy_telegram_input_timing].include?(event['event']) }, 'input event allowlist')
 verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'input sensitive sentinel logged')
@@ -695,5 +696,179 @@ verify(Rails.logger.events.all? { |event|
 }, 'timeline numeric or fixed-key allowlist')
 verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'timeline exposed sensitive metadata')
 report[:timeline_exports_only_bounded_fixed_names_and_safe_numbers] = true
+
+# Only technical controller collaborators; params/headers/body must not be read
+# to decide whether pre-authentication telemetry is enabled.
+class Api::V1::Accounts::ConversationsController
+  HOOKS = %i[authenticate_by_access_token? authenticate_access_token! validate_bot_access_token!
+             current_account validate_token_api_access check_account_mfa_enforcement conversation].freeze
+  attr_reader :response, :order, :calls, :received
+
+  def initialize(query: 'nevidimy_turn_state=PRIVATE_SENTINEL', get: true, failure: nil, fail_at: nil,
+                 halt_at: nil, gate: nil, auth_modes: 1)
+    @request = OpenStruct.new(query_string: query)
+    @request.define_singleton_method(:get?) { get }
+    @response = OpenStruct.new(status: 200)
+    @failure, @fail_at, @halt_at, @gate, @auth_modes = failure, fail_at, halt_at, gate, auth_modes
+    @order, @calls = [], 0
+  end
+
+  def request
+    @request
+  end
+
+  def params
+    raise 'params read before native authentication'
+  end
+
+  def show
+    native_step(:show)
+    :native_show_return
+  end
+
+  private
+
+  def process_action(*arguments)
+    @calls += 1
+    @received = arguments
+    HOOKS.each do |name|
+      (name == :authenticate_by_access_token? ? @auth_modes : 1).times { send(name) }
+      if @halt_at == name
+        @response.status = 403
+        return :native_halt
+      end
+    end
+    show
+  end
+
+  HOOKS.each { |name| define_method(name) { native_step(name) }; private name }
+
+  def native_step(name)
+    @order << name
+    @gate.call(name) if @gate
+    ActiveSupport::Notifications.emit(ProbeSqlPayload.new)
+    raise @failure if @fail_at == name
+  end
+end
+
+Rails.application.reloader.prepare
+get_class = Api::V1::Accounts::ConversationsController
+get_request = get_class.new
+before = Rails.logger.events.length
+verify(get_request.send(:process_action, 'show', opaque) == :native_show_return && get_request.calls == 1 &&
+       get_request.received == ['show', opaque], 'compact GET changed process_action arguments or return')
+get_event = Rails.logger.events.last
+verify(Rails.logger.events.length == before + 1 && get_event['event'] == 'nevidimy_compact_get_timing' &&
+       get_event['http_status'] == 200 && get_event['sql']['uncached']['count'] == 8, 'compact GET root missing callbacks SQL')
+verify(get_request.order == get_class::HOOKS + [:show], 'compact GET changed native callback ordering')
+verify(get_event['spans'].keys.sort == NevidimyTurnTiming::COMPACT_GET_SPANS.map(&:to_s).sort &&
+       get_event['spans'].values.all? { |value| value['count'] == 1 }, 'compact GET fixed stages missing')
+report[:compact_get_full_native_stages_and_sql] = true
+
+[{ query: '' }, { query: 'other=nevidimy_turn_state=PRIVATE_SENTINEL' }, { get: false }].each do |options|
+  before = Rails.logger.events.length
+  ordinary = get_class.new(**options)
+  verify(ordinary.send(:process_action, 'show') == :native_show_return && ordinary.calls == 1 &&
+         Rails.logger.events.length == before, 'ordinary request gained compact GET telemetry')
+end
+before = Rails.logger.events.length
+verify(get_class.new.send(:process_action, 'index') == :native_show_return && Rails.logger.events.length == before,
+       'non-show action gained compact GET telemetry')
+report[:compact_get_only_without_pre_auth_params_read] = true
+
+halted = get_class.new(halt_at: :authenticate_access_token!)
+verify(halted.send(:process_action, 'show') == :native_halt && halted.order == get_class::HOOKS.first(2) &&
+       Rails.logger.events.last['http_status'] == 403 && Rails.logger.events.last['spans']['projection']['count'].zero?,
+       'compact GET bypassed authentication halt')
+previous = Object.new
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = previous
+denied = get_class.new(failure: failure, fail_at: :conversation)
+begin
+  denied.send(:process_action, 'show')
+  raise 'compact GET policy exception swallowed'
+rescue ProbeFailure => caught
+  verify(caught.equal?(failure), 'compact GET exception identity changed')
+end
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].equal?(previous) && denied.calls == 1 &&
+       !Rails.logger.events.last.key?('http_status') && Rails.logger.events.last['spans']['projection']['count'].zero?,
+       'compact GET exception leaked scope or continued action')
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+report[:compact_get_native_halts_exceptions_and_context] = true
+
+Rails.logger.failure = failure
+verify(get_class.new.send(:process_action, 'show') == :native_show_return, 'compact GET logger failure changed native work')
+Rails.logger.failure = nil
+Thread.current[:probe_clock_failure] = true
+before = Rails.logger.events.length
+verify(get_class.new.send(:process_action, 'show') == :native_show_return && Rails.logger.events.length == before,
+       'compact GET initialization failure changed native work')
+Thread.current[:probe_clock_failure] = nil
+active_failure = get_class.new(gate: ->(name) { Thread.current[:probe_clock_failure] = true if name == :authenticate_access_token! })
+verify(active_failure.send(:process_action, 'show') == :native_show_return && active_failure.calls == 1,
+       'compact GET active timing failure changed native work')
+Thread.current[:probe_clock_failure] = nil
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'compact GET failed telemetry leaked scope')
+report[:compact_get_optional_telemetry_preserves_work] = true
+
+outer = Object.new
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = outer
+get_class.new(auth_modes: 80).send(:process_action, 'show')
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].equal?(outer), 'compact GET replaced previous scope')
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+bounded_get = Rails.logger.events.last
+verify(bounded_get['timeline'].length == 64 && bounded_get['timeline_dropped'].positive? &&
+       bounded_get['spans']['auth_mode']['count'] == 80 && bounded_get['sql']['uncached']['count'] == 87,
+       'compact GET timeline cap suppressed totals')
+get_events = Rails.logger.events.select { |event| event['event'] == 'nevidimy_compact_get_timing' }
+verify(get_events.all? { |event|
+  (event.keys - (allowed - %w[outgoing_message_id incoming_message_id before_first_after_commit])).empty? &&
+    event['timeline'].all? { |row| NevidimyTurnTiming::COMPACT_GET_SPANS.map(&:to_s).include?(row['span']) }
+}, 'compact GET exported non-fixed metadata')
+verify(!JSON.generate(get_events).include?('PRIVATE_SENTINEL'), 'compact GET exposed query/exception fields')
+report[:compact_get_scope_bounded_numeric_content_free] = true
+
+Rails.application.reloader.prepare
+verify(get_class.ancestors.count(NevidimyTurnTiming::CompactGetController) == 1 &&
+       get_class.private_method_defined?(:process_action) && get_class.public_method_defined?(:show) &&
+       get_class::HOOKS.all? { |name| get_class.private_method_defined?(name) }, 'compact GET reload or visibility changed')
+report[:compact_get_reload_preserves_visibility] = true
+
+scope = NevidimyTurnTiming.start
+scope[:input_job] = true
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+ActiveSupport::Notifications.emit(ProbeSqlPayload.new)
+Message.new(777, outgoing: false).run_callbacks
+first_commit = scope[:before_first_after_commit]
+Message.new(778, outgoing: false).run_callbacks
+verify(first_commit && scope[:before_first_after_commit].equal?(first_commit) &&
+       first_commit[:sql][:uncached][:count] == 1 && scope[:sql][:uncached][:count] == 15,
+       'input pre-after-commit snapshot was late, mutable, or repeated')
+first_commit[:unsafe] = 'PRIVATE_SENTINEL'
+first_commit[:sql][:uncached][:unsafe] = 'PRIVATE_SENTINEL'
+first_commit[:thread_cpu_ms] = Float::NAN
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+NevidimyTurnTiming.finish(scope, nil, completed: true)
+snapshot = Rails.logger.events.last['before_first_after_commit']
+verify(snapshot && (snapshot.keys - %w[elapsed_ms thread_cpu_ms sql]).empty? &&
+       snapshot['elapsed_ms'].finite? && snapshot['elapsed_ms'] >= 0 && snapshot['sql']['uncached']['count'] == 1,
+       'input pre-after-commit export invalid')
+verify(!snapshot.key?('thread_cpu_ms') && !JSON.generate(snapshot).include?('PRIVATE_SENTINEL'),
+       'input pre-after-commit exported unsafe detail')
+report[:input_first_after_commit_cumulative_snapshot_once] = true
+
+scope = NevidimyTurnTiming.start
+scope[:input_job] = true
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = scope
+NevidimyTurnTiming.record_input_commit(Message.new(779, outgoing: true))
+NevidimyTurnTiming.record_input_commit(Message.new(780, outgoing: false, private_message: true))
+verify(!scope.key?(:before_first_after_commit), 'input snapshot accepted outgoing/private row')
+Thread.current[:probe_clock_failure] = true
+verify(Message.new(781, outgoing: false).run_callbacks == Message::CALLBACK_ORDER,
+       'input snapshot failure changed native callbacks')
+Thread.current[:probe_clock_failure] = nil
+Message.new(782, outgoing: false).run_callbacks
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+verify(!scope.key?(:before_first_after_commit), 'failed first input snapshot leaked invalid numbers')
+report[:input_first_commit_guard_and_optional_telemetry] = true
 
 puts JSON.generate(report)

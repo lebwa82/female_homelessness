@@ -1,5 +1,6 @@
 """Neutral producer/actual Python parser contract; no customer dialogue fixtures."""
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -15,6 +16,17 @@ from app.chatwoot.contracts import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_projection_dependency_pins_match_current_sources():
+    dependencies = {
+        "NevidimyTurnTiming::BotEvents": "turn_timing.rb",
+        "#<Class:NevidimyAgentBotConversationProjection>": "agent_bot_conversation_projection.rb",
+    }
+    source = (ROOT / "deploy/timeweb/agent_bot_message_projection.rb").read_text()
+    for owner, filename in dependencies.items():
+        expected = hashlib.sha256((ROOT / "deploy/timeweb" / filename).read_bytes()).hexdigest()
+        assert source.count(f"'{owner}' => '{expected}'") == 1
 
 
 def test_callback_projection_keeps_actual_consumer_event_and_native_fanout():
