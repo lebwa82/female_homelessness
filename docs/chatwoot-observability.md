@@ -70,6 +70,14 @@ API-inbox и acceptance-маркером, никогда на клиентско
 текст и параметры не записываются. Это время тела action без предшествующей
 авторизации и сети, а не end-to-end latency. Вложенные spans нельзя слепо суммировать.
 
+Внутри `dispatch_create_events` отдельно видны `ui_message_created`,
+`ui_conversation_updated`, `bot_message_created`, `bot_conversation_updated`.
+Это вложенные замеры штатных listeners, а не перенос работы или изменение
+порядка событий. `nevidimy_telegram_input_timing` измеряет выполнение нативного
+Telegram job с теми же SQL/CPU/GC-счётчиками и числовым `incoming_message_id`;
+ожидание очереди в него не входит. Аргументы job, текст, URL и исключения не
+читаются для логирования. Тайминги root/job и вложенных listeners пересекаются.
+
 Опциональные `thread_cpu_ms`, `process_gc_ms`, `process_allocated_objects` помогают
 отделить CPU от ожидания. CPU относится к текущему thread; GC и allocations —
 дельты всего процесса и при параллельных запросах включают работу других threads.

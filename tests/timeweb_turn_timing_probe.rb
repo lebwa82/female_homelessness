@@ -101,6 +101,10 @@ class Message
     @outgoing
   end
 
+  def incoming?
+    !@outgoing
+  end
+
   def private?
     @private_message
   end
@@ -118,6 +122,40 @@ class Message
       :native_callback_return
     end
     private name
+  end
+end
+
+class ProbeListener
+  attr_accessor :failure
+
+  def message_created(event)
+    raise failure if failure
+
+    event
+  end
+
+  def conversation_updated(event)
+    raise failure if failure
+
+    event
+  end
+end
+
+class ActionCableListener < ProbeListener; end
+class AgentBotListener < ProbeListener; end
+
+module Webhooks
+  class TelegramEventsJob
+    attr_reader :calls, :received
+    attr_accessor :failure
+
+    def perform(params = {})
+      @calls = (@calls || 0) + 1
+      @received = params
+      row = Message.new(456, outgoing: false, failure: failure, fail_at: failure && :dispatch_create_events)
+      row.run_callbacks
+      :native_input_return
+    end
   end
 end
 
@@ -181,9 +219,13 @@ verify(first['sql'].transform_values { |value| value['count'] } ==
        { 'schema' => 1, 'cached' => 1, 'uncached' => 9 }, 'SQL classification')
 verify(first['sql'].values.all? { |value| (value['elapsed_ms'] - value['count']).abs < 0.001 }, 'SQL duration sum')
 verify(first['outgoing_message_id'] == 123 && first['http_status'] == 201, 'allowed response metadata')
-verify(first['spans'].keys.sort == (['message_builder'] + Message::CALLBACK_ORDER.map(&:to_s)).sort,
+verify(first['spans'].keys.sort == (['message_builder'] + Message::CALLBACK_ORDER.map(&:to_s) +
+       %w[ui_message_created ui_conversation_updated bot_message_created bot_conversation_updated]).sort,
        'span allowlist')
-verify(first['spans'].values.all? { |value| value['count'] == 1 && value['elapsed_ms'] >= 0 }, 'native spans')
+verify((['message_builder'] + Message::CALLBACK_ORDER.map(&:to_s)).all? { |name|
+  first['spans'][name]['count'] == 1 && first['spans'][name]['elapsed_ms'] >= 0
+}, 'native spans')
+verify(NevidimyTurnTiming::LISTENER_SPANS.all? { |name| first['spans'][name.to_s]['count'].zero? }, 'unused listeners measured')
 verify(cold.native_message.order == Message::CALLBACK_ORDER, 'native callback ordering changed')
 verify(!first.key?('process_gc_ms'), 'missing GC API was not optional') unless GC.respond_to?(:total_time)
 report[:cold_native_order_and_sql] = true
@@ -238,6 +280,18 @@ end
 verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'logger failure scope leaked')
 report[:logger_failure_is_optional] = true
 
+load initializer
+2.times { Rails.application.reloader.prepare }
+verify(ActiveSupport::Notifications.subscriptions.length == 1, 'reload duplicated SQL subscriber')
+before = Rails.logger.events.length
+controller_class.new.create
+verify(Rails.logger.events.length == before + 1, 'reload duplicated controller wrapper')
+verify((['message_builder'] + Message::CALLBACK_ORDER.map(&:to_s)).all? { |name|
+  Rails.logger.events.last['spans'][name]['count'] == 1
+}, 'reload duplicated native wrapper')
+verify(Message.private_instance_methods.include?(:send_reply), 'private callback visibility changed')
+report[:reload_idempotency] = true
+
 class << NevidimyTurnTiming
   alias_method :probe_real_monotonic, :monotonic
 
@@ -289,16 +343,6 @@ events = Rails.logger.events.select { |event| [125, 126].include?(event['outgoin
 verify(events.length == 2 && events.all? { |event| event['sql']['uncached']['count'] == 9 &&
                                                event['sql']['schema']['count'].zero? }, 'thread counters mixed')
 report[:thread_scope_isolation] = true
-
-load initializer
-2.times { Rails.application.reloader.prepare }
-verify(ActiveSupport::Notifications.subscriptions.length == 1, 'reload duplicated SQL subscriber')
-before = Rails.logger.events.length
-controller_class.new.create
-verify(Rails.logger.events.length == before + 1, 'reload duplicated controller wrapper')
-verify(Rails.logger.events.last['spans'].values.all? { |value| value['count'] == 1 }, 'reload duplicated native wrapper')
-verify(Message.private_instance_methods.include?(:send_reply), 'private callback visibility changed')
-report[:reload_idempotency] = true
 
 module ProbeResourceCounters
   def self.read(name)
@@ -422,5 +466,79 @@ controller_class.new(private_message: true).create
 verify(!Rails.logger.events.last.key?('outgoing_message_id'), 'private note reported as public reply')
 controller_class.new(gate: -> { NevidimyTurnTiming.record_message(Message.new(77, private_message: true)) }).create
 verify(Rails.logger.events.last['outgoing_message_id'] == 123, 'private note shadowed public reply timing')
+
+opaque = Object.new
+opaque.define_singleton_method(:to_json) { raise 'event must not be serialized' }
+opaque.define_singleton_method(:inspect) { raise 'event must not be inspected' }
+ui, bot = ActionCableListener.new, AgentBotListener.new
+controller_class.new(gate: -> {
+  verify(ui.message_created(opaque).equal?(opaque), 'UI native return changed')
+  verify(ui.conversation_updated(opaque).equal?(opaque), 'UI update return changed')
+  verify(bot.message_created(opaque).equal?(opaque), 'bot native return changed')
+  verify(bot.conversation_updated(opaque).equal?(opaque), 'bot update return changed')
+}).create
+verify(NevidimyTurnTiming::LISTENER_SPANS.all? { |name|
+  Rails.logger.events.last['spans'][name.to_s]['count'] == 1
+}, 'listener attribution or reload count changed')
+before = Rails.logger.events.length
+verify(ui.message_created(opaque).equal?(opaque) && Rails.logger.events.length == before, 'unscoped UI event changed')
+report[:listeners_preserve_arguments_returns_and_have_fixed_nested_spans] = true
+
+ui.failure = failure
+begin
+  controller_class.new(gate: -> { ui.message_created(opaque) }).create
+  raise 'listener exception swallowed'
+rescue ProbeFailure => caught
+  verify(caught.equal?(failure), 'listener exception identity changed')
+end
+verify(Rails.logger.events.last['spans']['ui_message_created']['count'] == 1 &&
+       !Rails.logger.events.last.key?('http_status'), 'raising listener not measured')
+ui.failure = nil
+report[:listener_exceptions_and_scope_cleanup_remain_native] = true
+
+input_job = Webhooks::TelegramEventsJob.new
+before = Rails.logger.events.length
+verify(input_job.perform(opaque) == :native_input_return && input_job.calls == 1 &&
+       input_job.received.equal?(opaque), 'input arguments or return changed')
+input_event = Rails.logger.events.last
+verify(Rails.logger.events.length == before + 1 && input_event['event'] == 'nevidimy_telegram_input_timing' &&
+       input_event['incoming_message_id'] == 456 && !input_event.key?('outgoing_message_id') &&
+       !input_event.key?('http_status'), 'input event metadata changed')
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'input scope leaked')
+report[:native_input_root_uses_only_integer_message_metadata] = true
+
+input_job.failure = failure
+begin
+  input_job.perform(opaque)
+  raise 'input exception swallowed'
+rescue ProbeFailure => caught
+  verify(caught.equal?(failure), 'input exception identity changed')
+end
+verify(input_job.calls == 2 && Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'input failure retried or leaked')
+input_job.failure = nil
+Rails.logger.failure = RuntimeError.new('PRIVATE_SENTINEL')
+verify(input_job.perform(opaque) == :native_input_return && input_job.calls == 3, 'input logger changed native work')
+Rails.logger.failure = nil
+Thread.current[:probe_clock_failure] = true
+before = Rails.logger.events.length
+verify(input_job.perform(opaque) == :native_input_return && input_job.calls == 4 &&
+       Rails.logger.events.length == before, 'input clock failure changed native work')
+Thread.current[:probe_clock_failure] = nil
+report[:input_failure_logger_and_clock_do_not_change_processing] = true
+
+before = Rails.logger.events.length
+controller_class.new(gate: -> { input_job.perform(opaque) }).create
+verify(Rails.logger.events.length == before + 1 && Rails.logger.events.last['event'] == 'nevidimy_atomic_turn_timing',
+       'nested input replaced parent scope')
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY].nil?, 'nested input leaked scope')
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = false
+input_job.perform(opaque)
+verify(Thread.current[NevidimyTurnTiming::SCOPE_KEY] == false, 'inactive previous input scope changed')
+Thread.current[NevidimyTurnTiming::SCOPE_KEY] = nil
+allowed << 'incoming_message_id'
+verify(Rails.logger.events.all? { |event| (event.keys - allowed).empty? &&
+       %w[nevidimy_atomic_turn_timing nevidimy_telegram_input_timing].include?(event['event']) }, 'input event allowlist')
+verify(!JSON.generate(Rails.logger.events).include?('PRIVATE_SENTINEL'), 'input sensitive sentinel logged')
+report[:input_nesting_and_content_free_allowlist] = true
 
 puts JSON.generate(report)

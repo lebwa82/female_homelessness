@@ -1,4 +1,4 @@
-# Content-free attribution of native work inside an atomic-create request.
+# Content-free attribution of native atomic-create and Telegram input work.
 # Observation only: native callbacks, delivery, exceptions and ordering are unchanged.
 require 'json'
 
@@ -9,7 +9,9 @@ module NevidimyTurnTiming
     set_conversation_activity dispatch_create_events send_reply
     execute_message_template_hooks update_contact_activity
   ].freeze unless const_defined?(:CALLBACKS, false)
-  SPANS = ([:message_builder] + CALLBACKS).freeze unless const_defined?(:SPANS, false)
+  LISTENER_EVENTS = %i[message_created conversation_updated].freeze unless const_defined?(:LISTENER_EVENTS, false)
+  LISTENER_SPANS = %i[ui_message_created ui_conversation_updated bot_message_created bot_conversation_updated].freeze unless const_defined?(:LISTENER_SPANS, false)
+  SPANS = ([:message_builder] + CALLBACKS + LISTENER_SPANS).freeze unless const_defined?(:SPANS, false)
   SQL_KINDS = %i[schema cached uncached].freeze unless const_defined?(:SQL_KINDS, false)
 
   def self.monotonic
@@ -79,9 +81,13 @@ module NevidimyTurnTiming
 
   def self.record_message(message)
     scope = Thread.current[SCOPE_KEY]
-    return unless scope && message.outgoing? && !message.private? && message.id.is_a?(Integer) && message.id.positive?
+    return unless scope && !message.private? && message.id.is_a?(Integer) && message.id.positive?
 
-    scope[:outgoing_message_id] ||= message.id
+    if scope[:input_job] == true
+      scope[:incoming_message_id] ||= message.id if message.incoming?
+    elsif message.outgoing?
+      scope[:outgoing_message_id] ||= message.id
+    end
   rescue StandardError
     nil
   end
@@ -117,7 +123,7 @@ module NevidimyTurnTiming
     process_allocated = counter_delta(scope[:process_allocated_started], process_allocated_objects)
     # Reconstruct the event from fixed keys; never serialize request/model data.
     event = {
-      event: 'nevidimy_atomic_turn_timing',
+      event: scope[:input_job] == true ? 'nevidimy_telegram_input_timing' : 'nevidimy_atomic_turn_timing',
       elapsed_ms: ((monotonic - scope.fetch(:started)) * 1000).round(3),
       spans: counters(scope.fetch(:spans), SPANS),
       sql: counters(scope.fetch(:sql), SQL_KINDS)
@@ -125,10 +131,11 @@ module NevidimyTurnTiming
     event[:thread_cpu_ms] = thread_cpu_ms unless thread_cpu_ms.nil?
     event[:process_gc_ms] = process_gc_ms unless process_gc_ms.nil?
     event[:process_allocated_objects] = process_allocated unless process_allocated.nil?
-    message_id = scope[:outgoing_message_id]
-    event[:outgoing_message_id] = message_id if message_id.is_a?(Integer) && message_id.positive?
+    id_field = scope[:input_job] == true ? :incoming_message_id : :outgoing_message_id
+    message_id = scope[id_field]
+    event[id_field] = message_id if message_id.is_a?(Integer) && message_id.positive?
     # On an exception, middleware may still change the final HTTP status.
-    status = controller.response.status if completed
+    status = controller.response.status if completed && controller
     event[:http_status] = status if status.is_a?(Integer) && status.between?(100, 599)
     Rails.logger.info(event.to_json)
   rescue StandardError
@@ -162,12 +169,48 @@ module NevidimyTurnTiming
     end
   end
 
+  module TelegramInput
+    def perform(params = {})
+      previous = Thread.current[SCOPE_KEY]
+      return super if previous
+
+      scope = NevidimyTurnTiming.start
+      return super unless scope
+
+      scope[:input_job] = true
+      Thread.current[SCOPE_KEY] = scope
+      begin
+        super
+      ensure
+        Thread.current[SCOPE_KEY] = previous
+        NevidimyTurnTiming.finish(scope, nil, completed: $!.nil?)
+      end
+    end
+  end
+
   module MessageCallbacks
     CALLBACKS.each do |name|
       define_method(name) do
+        NevidimyTurnTiming.record_message(self) if name == :dispatch_create_events
         NevidimyTurnTiming.measure(name) { super() }
       end
       private name
+    end
+  end
+
+  module UiEvents
+    LISTENER_EVENTS.each do |name|
+      define_method(name) do |event|
+        NevidimyTurnTiming.measure(:"ui_#{name}") { super(event) }
+      end
+    end
+  end
+
+  module BotEvents
+    LISTENER_EVENTS.each do |name|
+      define_method(name) do |event|
+        NevidimyTurnTiming.measure(:"bot_#{name}") { super(event) }
+      end
     end
   end
 
@@ -186,4 +229,16 @@ Rails.application.reloader.to_prepare do
   builder = Messages::MessageBuilder
   builder.prepend(NevidimyTurnTiming::Builder) unless builder < NevidimyTurnTiming::Builder
   Message.prepend(NevidimyTurnTiming::MessageCallbacks) unless Message < NevidimyTurnTiming::MessageCallbacks
+  [[ActionCableListener, NevidimyTurnTiming::UiEvents], [AgentBotListener, NevidimyTurnTiming::BotEvents]].each do |listener, wrapper|
+    next unless NevidimyTurnTiming::LISTENER_EVENTS.all? { |name|
+      listener.public_method_defined?(name) && listener.instance_method(name).arity == 1
+    }
+
+    listener.prepend(wrapper) unless listener < wrapper
+  end
+  job = Webhooks::TelegramEventsJob
+  if job.public_method_defined?(:perform) && job.instance_method(:perform).arity == -1 &&
+     !(job < NevidimyTurnTiming::TelegramInput)
+    job.prepend(NevidimyTurnTiming::TelegramInput)
+  end
 end
