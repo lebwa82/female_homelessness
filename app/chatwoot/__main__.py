@@ -49,6 +49,7 @@ def main() -> None:
         read_token=settings.chatwoot_read_token,
         bot_token=settings.chatwoot_bot_token,
         transport=transport,
+        fast_buttons=settings.chatwoot_fast_buttons,
     )
     service = ChatwootAgentService(
         client,

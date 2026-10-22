@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 import aiohttp
 
+from app.chatwoot.fast_buttons import BUTTON_ATTRIBUTES, UnsupportedFastButton
 from app.chatwoot.telemetry import api_timing, reply_persisted
 from app.domain import Choice
 
@@ -174,11 +175,13 @@ class ChatwootClient:
         read_token: str,
         bot_token: str,
         transport: ChatwootTransport | None = None,
+        fast_buttons: bool = False,
     ) -> None:
         self._account_id = account_id
         self._read_token = read_token
         self._bot_token = bot_token
         self._transport = transport or AiohttpChatwootTransport(base_url)
+        self.fast_buttons = fast_buttons
 
     def _path(self, suffix: str) -> str:
         return f"/api/v1/accounts/{self._account_id}{suffix}"
@@ -188,6 +191,45 @@ class ChatwootClient:
             "GET", self._path(f"/conversations/{conversation_id}"), self._read_token
         )
         return _as_object(payload)
+
+    async def button_snapshot(self, conversation_id: int, message_id: int) -> dict[str, Any]:
+        return _as_object(await self._transport.request(
+            "GET", self._path(
+                f"/conversations/{conversation_id}?nevidimy_turn_state={message_id}"
+            ), self._read_token,
+        ))
+
+    async def commit_button(self, conversation_id: int, message_id: int, version: str,
+                            attributes: dict, reply: dict) -> int | None:
+        payload = _reply_payload(**reply)
+        # A legacy-supported large workflow must not become a permanently
+        # failing queued event. Reject incompatible plans before any POST.
+        encoded = json.dumps(attributes, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        if (not attributes.keys() <= BUTTON_ATTRIBUTES or len(encoded.encode()) > 262_144
+                or not isinstance(reply["text"], str) or len(reply["text"].encode()) > 32_768
+                or attributes.get("scenario_pending_input")
+                or attributes.get("scenario_last_message_id") != message_id):
+            raise UnsupportedFastButton("unsupported_commit_plan")
+        payload["nevidimy_atomic_turn"] = {
+            "input_id": message_id, "version": version, "attributes": attributes,
+        }
+        try:
+            result = _as_object(await self._transport.request(
+                "POST", self._path(f"/conversations/{conversation_id}/messages"),
+                self._bot_token, payload,
+            ))
+        except ChatwootApiError as error:
+            if error.status == 409:
+                return None  # Proven conflict before any write; safe legacy reread.
+            raise  # Unknown POST outcome must retry its stable turn key, not send again.
+        if result.get("outcome") not in {"committed", "duplicate"}:
+            raise ChatwootApiError("atomic_turn_shape", 0)
+        message = _message_id(result)
+        if message is None:
+            raise ChatwootApiError("atomic_turn_message", 0)
+        if result["outcome"] == "committed":
+            reply_persisted(message)
+        return message
 
     async def list_conversations(self, page: int) -> tuple[dict[str, Any], ...]:
         payload = await self._transport.request(
@@ -307,20 +349,9 @@ class ChatwootClient:
         sensitive_content: str | None = None,
         attachment: BinaryAttachment | None = None,
     ) -> int | None:
-        content_attributes: dict[str, Any] = {"bot_turn_key": turn_key}
-        if sensitive_content:
-            content_attributes["bot_sensitive_content"] = sensitive_content
-        payload: dict[str, Any] = {
-            "content": text,
-            "message_type": "outgoing",
-            "private": False,
-            "content_attributes": content_attributes,
-        }
-        if choices:
-            content_attributes["items"] = [
-                {"title": choice.label, "value": choice.id} for choice in choices
-            ]
-            payload["content_type"] = "input_select"
+        payload = _reply_payload(text=text, choices=choices, turn_key=turn_key,
+                                 sensitive_content=sensitive_content)
+        content_attributes = payload["content_attributes"]
         path = self._path(f"/conversations/{conversation_id}/messages")
         if attachment is None:
             response = await self._transport.request("POST", path, self._bot_token, payload)
@@ -403,6 +434,21 @@ class ChatwootClient:
             if loop.time() >= deadline:
                 raise ChatwootApiError("external_delivery", 504)
             await asyncio.sleep(poll_interval_seconds)
+
+
+def _reply_payload(*, text: str, choices: tuple[Choice, ...], turn_key: str,
+                   sensitive_content: str | None = None) -> dict[str, Any]:
+    attributes: dict[str, Any] = {"bot_turn_key": turn_key}
+    if sensitive_content:
+        attributes["bot_sensitive_content"] = sensitive_content
+    result: dict[str, Any] = {
+        "content": text, "message_type": "outgoing", "private": False,
+        "content_attributes": attributes,
+    }
+    if choices:
+        attributes["items"] = [{"title": c.label, "value": c.id} for c in choices]
+        result["content_type"] = "input_select"
+    return result
 
 
 def _connector_receipt(message: dict[str, Any], message_id: int) -> bool:

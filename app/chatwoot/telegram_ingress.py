@@ -45,6 +45,7 @@ class Ingress:
         self.bot, self.http, self.redis = bot, http, redis
         self.base_url = base_url.rstrip("/")
         self.prefix = f"women-help:telegram-ingress:{bot.id}"
+        self._received_at_ms: int | None = None
 
     async def prepare(self) -> None:
         # Do not disable Telegram delivery before the local receiver is ready.
@@ -62,6 +63,11 @@ class Ingress:
         payload = deserialize_telegram_object_to_python(
             update.model_dump(mode="python", by_alias=True, exclude_none=True)
         )
+        # Internal transport metadata, never callback data or user-visible text.
+        # Overwrite any untrusted extra field on the source Telegram object.
+        payload["nevidimy_received_at_ms"] = (
+            self._received_at_ms if self._received_at_ms is not None else time.time_ns() // 1_000_000
+        )
         async with self.http.post(
             f"{self.base_url}/webhooks/telegram/{self.bot.token}",
             json={"telegram": payload},
@@ -69,6 +75,16 @@ class Ingress:
         ) as response:
             if response.status != 200:
                 raise ChatwootUnavailable()
+
+    async def _acknowledge_callback(self, update: Update) -> None:
+        try:
+            await self.bot.answer_callback_query(
+                update.callback_query.id, text="Обрабатываю выбор…", request_timeout=2,
+            )
+        except (TelegramAPIError, TimeoutError) as error:
+            # Progress is best-effort, not an acknowledgement of delivery.
+            # An expired toast or timeout must not prevent storing the click.
+            logger.warning("Callback acknowledgement failed kind=%s", type(error).__name__)
 
     async def poll_once(self) -> int:
         saved = await self.redis.get(f"{self.prefix}:offset")
@@ -82,16 +98,27 @@ class Ingress:
             if offset is not None and update.update_id < offset:
                 continue
             started = time.monotonic()
-            if update.callback_query:
-                try:
-                    await self.bot.answer_callback_query(
-                        update.callback_query.id, text="Обрабатываю выбор…", request_timeout=2,
-                    )
-                except (TelegramAPIError, TimeoutError) as error:
-                    # Progress is best-effort, not an acknowledgement of delivery.
-                    # An expired toast or timeout must not prevent storing the click.
-                    logger.warning("Callback acknowledgement failed kind=%s", type(error).__name__)
-            await self.forward(update)
+            self._received_at_ms = time.time_ns() // 1_000_000
+            acknowledgement = None
+            try:
+                if update.callback_query:
+                    acknowledgement = asyncio.create_task(self._acknowledge_callback(update))
+                    # Start both in creation order; progress no longer adds its
+                    # network round trip to Chatwoot's acceptance critical path.
+                    forwarding = asyncio.create_task(self.forward(update))
+                    await forwarding
+                    await acknowledgement
+                else:
+                    await self.forward(update)
+            finally:
+                if acknowledgement is not None:
+                    if not acknowledgement.done():
+                        acknowledgement.cancel()
+                    # Retrieve cleanup failures without masking the original
+                    # forwarding exception or cancellation. No task is orphaned.
+                    with suppress(asyncio.CancelledError, Exception):
+                        await acknowledgement
+                self._received_at_ms = None
             # A successful HTTP response means Rails has enqueued the native job.
             # Persist before requesting the next batch (Telegram's acknowledgement).
             await self.redis.set(f"{self.prefix}:offset", update.update_id + 1)

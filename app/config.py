@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     chatwoot_account_id: int = Field(default=0, ge=0)
     chatwoot_read_token: str = ""
     chatwoot_bot_token: str = ""
+    chatwoot_fast_buttons: bool = False
     chatwoot_webhook_secret: str = ""
     chatwoot_webhook_hmac_secret: str = ""
     chatwoot_duty_team_id: int = Field(default=0, ge=0)

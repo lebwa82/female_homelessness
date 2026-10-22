@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -20,6 +22,25 @@ class IncomingChatwootMessage:
 @dataclass(frozen=True, slots=True)
 class ConversationChanged:
     conversation_id: int
+
+
+_BOT_BOOKKEEPING_ATTRIBUTES = frozenset({
+    "workflow_state",
+    "workflow_need",
+    "pending_aid_id",
+    "pending_contact_method",
+    "pending_city",
+    "pending_district",
+    "pending_offer",
+    "workflow_navigation",
+    "scenario",
+    "scenario_pending_input",
+    "scenario_last_message_id",
+    "scenario_event_receipts",
+    "scenario_followups",
+    "bot_last_diagnostics",
+    "bot_last_decision",
+})
 
 
 RETURN_TO_BOT = "[women-help:return-to-bot]"
@@ -103,8 +124,65 @@ def parse_conversation_changed(payload: object) -> ConversationChanged | None:
         "conversation_status_changed",
     }:
         return None
+    if payload["event"] == "conversation_updated" and _only_bot_bookkeeping_changed(payload):
+        return None
     conversation_id = _positive_int(payload.get("id"))
     return ConversationChanged(conversation_id) if conversation_id else None
+
+
+def _only_bot_bookkeeping_changed(payload: dict[str, Any]) -> bool:
+    """Ignore only proven workflow writes, never ownership/routing or unknown deltas."""
+    changes = payload.get("changed_attributes")
+    if not isinstance(changes, list) or not changes:
+        return False
+    attributes = None
+    seen = set()
+    # Native BaseListener serializes previous_changes as single-key objects,
+    # with complete old/new custom-attribute hashes rather than a partial patch.
+    for item in changes:
+        if not isinstance(item, dict) or len(item) != 1:
+            return False
+        name, delta = next(iter(item.items()))
+        if name not in {"custom_attributes", "updated_at"} or name in seen:
+            return False
+        seen.add(name)
+        if not isinstance(delta, dict) or set(delta) != {"previous_value", "current_value"}:
+            return False
+        if name == "custom_attributes":
+            attributes = delta
+        else:
+            try:
+                if not all(
+                    isinstance(value, str) and datetime.fromisoformat(value).tzinfo is not None
+                    for value in delta.values()
+                ):
+                    return False
+            except ValueError:
+                return False
+    if attributes is None:
+        return False
+    previous, current = attributes["previous_value"], attributes["current_value"]
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return False
+    keys = previous.keys() | current.keys()
+    if not all(isinstance(key, str) for key in keys):
+        return False
+    try:
+        previous_values = {
+            key: json.dumps(value, sort_keys=True, allow_nan=False)
+            for key, value in previous.items()
+        }
+        current_values = {
+            key: json.dumps(value, sort_keys=True, allow_nan=False)
+            for key, value in current.items()
+        }
+        changed_keys = {
+            key for key in keys
+            if previous_values.get(key) != current_values.get(key)
+        }
+    except (TypeError, ValueError):
+        return False
+    return bool(changed_keys) and changed_keys <= _BOT_BOOKKEEPING_ATTRIBUTES
 
 
 def parse_message_created(payload: object) -> IncomingChatwootMessage | None:

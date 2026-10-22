@@ -41,6 +41,22 @@ x-telegram-callback: &telegram-callback
   bind:
     create_host_path: false
 
+x-telegram-transport: &telegram-transport
+  type: bind
+  source: ../timeweb/telegram_transport.rb
+  target: /app/config/initializers/nevidimy_telegram_transport.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+x-atomic-turn: &atomic-turn
+  type: bind
+  source: ../timeweb/atomic_turn.rb
+  target: /app/config/initializers/nevidimy_atomic_turn.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   chatwoot:
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
@@ -59,6 +75,8 @@ services:
       - *telegram-avatar
       - *telegram-avatar-job
       - *telegram-callback
+      - *telegram-transport
+      - *atomic-turn
     healthcheck:
       # Rails enforces HTTPS; mirror the header set by the trusted proxy.
       test:
@@ -88,12 +106,15 @@ services:
       - *telegram-avatar
       - *telegram-avatar-job
       - *telegram-callback
+      - *telegram-transport
+      - *atomic-turn
 
   agent-bot:
     # The offline PII-model probe already peaks near 370 MiB before HTTP work.
     mem_limit: 768m
     environment:
       PGSSLROOTCERT: /run/certs/postgresql-ca.crt
+      CHATWOOT_FAST_BUTTONS: "true"
     volumes:
       - *database-ca
 

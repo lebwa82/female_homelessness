@@ -3,6 +3,7 @@
 module NevidimyTelegramCallback
   BOT_NAMES = %w[nevidima_bot_mvp_bot nevidima_bot].freeze
   DATA_ATTRIBUTE = 'nevidimy_telegram_callback_data'.freeze
+  RECEIVED_AT_ATTRIBUTE = 'nevidimy_received_at_ms'.freeze
 
   private
 
@@ -26,9 +27,17 @@ module NevidimyTelegramCallback
 
   def telegram_params_content_attributes
     attributes = super
-    return attributes unless nevidimy_callback?
+    return attributes unless BOT_NAMES.include?(inbox.channel.bot_name)
 
-    attributes.merge(DATA_ATTRIBUTE => callback_query_data)
+    attributes = attributes.merge(DATA_ATTRIBUTE => callback_query_data) if nevidimy_callback?
+    received_at = params[RECEIVED_AT_ATTRIBUTE] || params[RECEIVED_AT_ATTRIBUTE.to_sym]
+    # Unix milliseconds, bounded against malformed/future values. Old queued
+    # work remains measurable; no source timestamp is inferred from user text.
+    now_ms = (Time.now.to_f * 1000).to_i
+    if received_at.is_a?(Integer) && received_at.between?(1_577_836_800_000, now_ms + 300_000)
+      attributes = attributes.merge(RECEIVED_AT_ATTRIBUTE => received_at)
+    end
+    attributes
   end
 end
 
