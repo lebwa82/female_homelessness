@@ -44,6 +44,41 @@ module NevidimyTelegramTransport
     (Time.now.to_f * 1000).to_i
   end
 
+  def self.request_clock
+    monotonic
+  rescue StandardError
+    nil
+  end
+
+  def self.request_delta(started, finished)
+    return unless started.is_a?(Numeric) && finished.is_a?(Numeric)
+
+    elapsed = (finished - started) * 1000
+    elapsed if elapsed.finite? && elapsed >= 0
+  rescue StandardError
+    nil
+  end
+
+  def self.record_raw_request(timing, started, headers, callback_ms, finished)
+    raw_ms = request_delta(started, finished)
+    headers_ms = request_delta(started, headers)
+    headers_ms = nil if raw_ms && headers_ms && headers_ms > raw_ms
+    block_ms = callback_ms if headers_ms && callback_ms.is_a?(Numeric) && callback_ms.finite? && callback_ms >= 0
+    tail_ms = raw_ms - headers_ms - block_ms if raw_ms && headers_ms && block_ms
+    if tail_ms && tail_ms < -0.000001
+      block_ms = tail_ms = nil
+    elsif tail_ms
+      tail_ms = [tail_ms, 0.0].max
+    end
+    { raw_request_ms: raw_ms, request_to_headers_ms: headers_ms,
+      response_block_ms: block_ms, response_tail_ms: tail_ms }.each do |key, value|
+      timing[key] = value&.round(3)
+    end
+  rescue StandardError
+    # Optional timing, including a failed clock/recorder, must not alter delivery.
+    nil
+  end
+
   def self.verified_connection(uri, options)
     unless destination?(uri) || uri.to_s == 'https://api.telegram.org/'
       raise ArgumentError, 'Telegram transport destination is not allowed'
@@ -79,6 +114,8 @@ module NevidimyTelegramTransport
       http_elapsed_ms: timing[:http_elapsed_ms]&.round,
       pool_checkout_ms: timing[:pool_checkout_ms]&.round(3),
       connection_reused: timing[:connection_reused], tls_setup_ms: timing[:tls_setup_ms]&.round(3),
+      raw_request_ms: timing[:raw_request_ms], request_to_headers_ms: timing[:request_to_headers_ms],
+      response_block_ms: timing[:response_block_ms], response_tail_ms: timing[:response_tail_ms],
       send_elapsed_ms: ((monotonic - timing[:started]) * 1000).round,
       accepted_at_ms: accepted_at, source_to_accepted_ms: elapsed,
       success: timing[:success], outcome_class: timing[:outcome_class]
@@ -117,7 +154,33 @@ module NevidimyTelegramTransport
         ensure
           timing[:tls_setup_ms] = reused ? 0.0 : (monotonic - setup) * 1000 if timing
         end
-        response = connection.request(*arguments, &block)
+        raw_started = NevidimyTelegramTransport.request_clock if timing
+        headers, observed_headers, callback_ms = nil, false, 0.0
+        begin
+          if timing && block
+            response = connection.request(*arguments) do |native_response|
+              entered = NevidimyTelegramTransport.request_clock
+              headers = entered unless observed_headers
+              observed_headers = true
+              begin
+                block.call(native_response)
+              ensure
+                elapsed = NevidimyTelegramTransport.request_delta(entered, NevidimyTelegramTransport.request_clock)
+                callback_ms = callback_ms && elapsed ? callback_ms + elapsed : nil
+              end
+            end
+          else
+            # Do not introduce a response block into a blockless native request.
+            response = connection.request(*arguments, &block)
+          end
+        ensure
+          if timing
+            # Ordinary HTTParty reads the body after its callback; streaming
+            # callers can instead read it inside the original response block.
+            NevidimyTelegramTransport.record_raw_request(timing, raw_started, headers, callback_ms,
+                                                         NevidimyTelegramTransport.request_clock)
+          end
+        end
         reusable = !response.connection_close?
         response
       ensure
