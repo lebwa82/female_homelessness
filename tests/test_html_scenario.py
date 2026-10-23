@@ -119,9 +119,12 @@ async def test_write_button_does_not_submit_an_empty_request(flow, screen, targe
 @pytest.mark.asyncio
 async def test_old_unsent_waitlist_draft_shows_paused_availability_without_submission(flow):
     service, record, store = flow
-    turn = await service.scenario_flow.show(record, "i8", aid_id="food_card")
+    await store.update(record, state="scenario", scenario={
+        "screen": "i8", "variant": 0, "aid_id": "food_card",
+    })
     assert not store.actions
-    reply = await service.scenario_flow.callback(record, choice_for(turn, "i8"), "submit")
+    callback = f"sc:i8:0:{record.navigation['revision']}"
+    reply = await service.scenario_flow.callback(record, callback, "submit")
     assert not store.actions
     assert reply.text == CERTIFICATE_PAUSED_TEXT
     assert record.scenario["certificate_paused"] is True

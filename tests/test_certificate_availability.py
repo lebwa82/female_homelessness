@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from test_chatwoot_service import StubGateway, ordinary_evaluation
 
+from app.agents import format_agent_context
 from app.catalog import CERTIFICATE_AID_IDS
 from app.chatwoot.certificates import CertificateInventory
 from app.domain import IncomingMessage, PolicyEffect, ResolvedTurn
@@ -12,8 +13,9 @@ from app.service import ConversationService, available_catalog
 from app.store import CertificateClaimResult, InMemoryConversationStore, StoredCertificate
 
 PAUSED_TEXT = (
-    "За последние сутки мы получили больше обращений, чем можем обработать и пока что, "
-    "к сожалению, сертификаты недоступны. Из того, что можно выбрать прямо сейчас:"
+    "Сейчас сертификатов нет. Мы пока не можем обещать их появление или выдачу. "
+    "Мы выдаём не больше одного сертификата на человека. Если вы уже получали сертификат, "
+    "повторно выдать его не сможем. Сейчас можно выбрать другую помощь:"
 )
 CONSULTATION_LABELS = (
     "Консультация психолога",
@@ -74,6 +76,10 @@ async def test_model_context_respects_new_certificate_pause(
     certificate_ids = {item["id"] for item in context.catalog if item["fulfillment"] == "certificate"}
     assert certificate_ids == (set() if html_scenario else CERTIFICATE_AID_IDS)
     assert context.new_certificates_unavailable is html_scenario
+    if html_scenario:
+        prompt = format_agent_context(context, "")
+        assert "Не обещай сообщить, когда сертификаты появятся." in prompt
+        assert "На человека выдаётся не больше одного сертификата" in prompt
     assert not store.aid_requests
 
 
@@ -162,7 +168,7 @@ async def test_old_waitlist_prompt_cannot_submit_a_new_certificate_request(flow,
 
 
 @pytest.mark.parametrize("legacy", (False, True))
-async def test_previously_submitted_waitlist_acknowledgement_is_unchanged(flow, legacy):
+async def test_previously_submitted_waitlist_acknowledgement_is_replaced_by_pause(flow, legacy):
     service, record, store = flow
     await store.update(
         record, state="scenario",
@@ -173,8 +179,55 @@ async def test_previously_submitted_waitlist_acknowledgement_is_unchanged(flow, 
     replay = await service.handle_callback(incoming(12), callback)
 
     assert replay.text == before.text
-    assert replay.text != PAUSED_TEXT
+    assert replay.text == PAUSED_TEXT
+    assert not store.aid_requests
+    assert not store.escalations
     assert not any(action[3].get("kind") == "certificate_waitlist" for action in store.actions)
+
+
+@pytest.mark.parametrize("screen,variant,submitted", (
+    ("i8", 0, False), ("i8", 1, True), ("i9", 1, False),
+    ("s31", 0, False), ("s32", 0, False), ("s33", 0, False), ("s37", 0, False),
+))
+def test_old_certificate_screens_never_render_waitlist_promises(screen, variant, submitted):
+    turn = render(screen, variant=variant, context={"submitted": submitted})
+    assert turn.text == PAUSED_TEXT
+    assert turn.audit["scenario_screen"] == "i8"
+    assert tuple(c.label for c in turn.choices if c.id != "human") == CONSULTATION_LABELS
+
+
+@pytest.mark.parametrize("aid_id", (
+    "food_card", "medicine_card", "hostel_3_nights", "children_card",
+))
+async def test_old_certificate_selection_from_submitted_waitlist_shows_pause(flow, aid_id):
+    service, record, store = flow
+    await store.update(record, state="scenario", scenario={
+        "screen": "i8", "variant": 1, "submitted": True, "aid_id": "food_card",
+    })
+
+    turn = await service.handle_callback(incoming(13), f"aid:{aid_id}")
+
+    assert turn.text == PAUSED_TEXT
+    assert turn.attachment is None
+    assert not store.aid_requests
+    assert not store.escalations
+
+
+async def test_old_issued_menu_refreshes_before_consultation_buttons_can_be_used(flow):
+    service, record, store = flow
+    await store.update(record, state="scenario", scenario={"screen": "i9", "variant": 1})
+    current = await service._state_turn(record)
+    assert current.text == PAUSED_TEXT
+    actions = list(store.actions)
+
+    refreshed = await service.handle_callback(incoming(14), current.choices[0].id)
+    assert refreshed.text == PAUSED_TEXT
+    assert record.scenario["certificate_paused"] is True
+    assert store.actions == actions
+
+    consultation = await service.handle_callback(incoming(15), refreshed.choices[0].id)
+    assert consultation.audit["scenario_screen"] == "s34"
+    assert not store.aid_requests
 
 
 async def test_saved_certificate_preview_cannot_create_a_new_request(flow):
@@ -193,7 +246,8 @@ async def test_saved_certificate_preview_cannot_create_a_new_request(flow):
         scenario={"screen": "s31", "variant": 0, "draft_key": "saved-draft"},
     )
     before = service.scenario_flow.current(record)
-    assert any(choice.id == "certificate:confirm" for choice in before.choices)
+    assert before.text == PAUSED_TEXT
+    assert not any(choice.id == "certificate:confirm" for choice in before.choices)
 
     turn = await service.handle_callback(incoming(8), "certificate:confirm")
     assert turn.text == PAUSED_TEXT
