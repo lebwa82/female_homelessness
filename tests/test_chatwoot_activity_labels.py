@@ -80,7 +80,7 @@ def test_label_is_taken_from_matching_button_not_first_button():
 
 
 @pytest.mark.parametrize("action", ["sc:s35:0:4", "need:legal", "aid:legal_consultation",
-                                    "back:4", "human", "certificate:confirm", "followup:better", "continue"])
+                                    "back:4", "home:4", "human", "certificate:confirm", "followup:better", "continue"])
 def test_all_callback_families_keep_original_action_and_show_button_title(action):
     message, = ruby_outputs([callback_fixture(data=action, keyboard=[[
         {"text": "Тестовый выбор", "callback_data": action},

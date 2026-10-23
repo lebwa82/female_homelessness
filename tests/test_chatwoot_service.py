@@ -275,15 +275,18 @@ async def test_reserved_certificate_is_resumed_and_delivered_directly_through_ch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("takeover", [None, "download", "delivery"])
+@pytest.mark.parametrize("readable", [False, True])
 async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
-    takeover,
+    takeover, readable, tmp_path,
 ) -> None:
+    from scripts.generate_test_certificate_pdfs import generate
+
     api = FakeChatwoot()
     api.conversation["custom_attributes"].update(
         workflow_state="certificate_preview", workflow_need="food_money",
         pending_aid_id="food_card", scenario={"screen": "s31", "variant": 0},
     )
-    payload = b"%PDF-1.7 test"
+    payload = generate(tmp_path, 1)[0].read_bytes() if readable else b"%PDF-1.7 test"
 
     class Store:
         async def download(self, ref: CertificateObjectRef) -> bytes:
@@ -334,6 +337,13 @@ async def test_pdf_certificate_is_sent_before_followup_and_marked_submitted(
     assert len(api.replies) == 2
     assert api.replies[0]["turn_key"] == "message:42:certificate"
     assert api.replies[0]["attachment"].data == payload
+    context = api.replies[0]["attachment"].certificate_context
+    if readable:
+        assert context["source"] == "certificate_pdf"
+        assert context["deadline_kind"] in {"activation", "validity"}
+        assert "activation_code" not in context
+    else:
+        assert context is None
     assert api.replies[1]["turn_key"] == "message:42"
     assert api.replies[1]["text"] == "Что можно сделать дальше?"
     assert api.replies[1]["attachment"] is None

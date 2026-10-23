@@ -95,9 +95,10 @@ async def test_new_certificate_request_shows_only_available_consultations(flow, 
 
     assert turn.text == PAUSED_TEXT
     assert tuple(choice.label for choice in turn.choices
-                 if choice.id != "human" and not choice.id.startswith("back:")) == CONSULTATION_LABELS
+                 if choice.id != "human" and not choice.id.startswith("home:")) == CONSULTATION_LABELS
     assert any(choice.id == "human" for choice in turn.choices)
-    assert any(choice.id.startswith("back:") for choice in turn.choices)
+    assert any(choice.id.startswith("home:") for choice in turn.choices)
+    assert not any(choice.id.startswith("back:") for choice in turn.choices)
     assert record.pending_aid_id is None
     assert not store.aid_requests
     assert not any(action[3].get("kind") == "certificate_waitlist" for action in store.actions)
@@ -138,7 +139,7 @@ async def test_back_from_consultation_restores_pause_and_rejects_stale_confirmat
     paused = await service.handle_callback(incoming(4), "aid:food_card")
     preview = await service.handle_callback(incoming(5), paused.choices[0].id)
     confirm = next(choice.id for choice in preview.choices if choice.id.startswith("sc:"))
-    back = next(choice.id for choice in preview.choices if choice.id.startswith("back:"))
+    back = f"back:{record.navigation['revision']}"  # Previously delivered legacy button.
 
     returned = await service.handle_callback(incoming(6), back)
     stale = await service.handle_callback(incoming(7), confirm)

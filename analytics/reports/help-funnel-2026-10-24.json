@@ -1,0 +1,141 @@
+{
+  "metric_version": "help-funnel-v1",
+  "unit": "unique_contact",
+  "scope": "all_time",
+  "measurement": "observed_strict",
+  "unknown_meaning": "missing_observation_not_proven_refusal",
+  "counts": {
+    "input_rows": 160,
+    "included_contacts": 159,
+    "excluded_contacts": 1
+  },
+  "cohorts": {
+    "all": {
+      "contacts": 159,
+      "h2": {
+        "denominator_contacts": 159,
+        "numerator_contacts": 112,
+        "conversion_pct": 70.44,
+        "unknown": {
+          "outcome_contacts": 47,
+          "entry_contacts": 0
+        }
+      },
+      "h3": {
+        "denominator_contacts": 105,
+        "numerator_contacts": 34,
+        "conversion_pct": 32.38,
+        "unknown": {
+          "outcome_contacts": 71,
+          "entry_contacts": 54
+        },
+        "certificate_after_answer_contacts": 34,
+        "consultation_after_answer_contacts": 0,
+        "both_outcomes_after_answer_contacts": 0
+      },
+      "coverage": {
+        "contacts_with_messages": 159,
+        "menu_shown_contacts": 150,
+        "aid_selected_contacts": 88,
+        "aid_selected_after_menu_answer_contacts": 88,
+        "menu_answers_without_observed_menu_contacts": 0,
+        "menu_answers_without_prior_observed_menu_contacts": 0,
+        "continues_without_prior_observed_start_contacts": 0
+      },
+      "subset_checks": {
+        "h2_numerator_within_denominator": true,
+        "h3_numerator_within_denominator": true,
+        "h3_outcome_union_matches_numerator": true
+      }
+    },
+    "native": {
+      "contacts": 122,
+      "h2": {
+        "denominator_contacts": 122,
+        "numerator_contacts": 112,
+        "conversion_pct": 91.8,
+        "unknown": {
+          "outcome_contacts": 10,
+          "entry_contacts": 0
+        }
+      },
+      "h3": {
+        "denominator_contacts": 101,
+        "numerator_contacts": 34,
+        "conversion_pct": 33.66,
+        "unknown": {
+          "outcome_contacts": 67,
+          "entry_contacts": 21
+        },
+        "certificate_after_answer_contacts": 34,
+        "consultation_after_answer_contacts": 0,
+        "both_outcomes_after_answer_contacts": 0
+      },
+      "coverage": {
+        "contacts_with_messages": 122,
+        "menu_shown_contacts": 113,
+        "aid_selected_contacts": 85,
+        "aid_selected_after_menu_answer_contacts": 85,
+        "menu_answers_without_observed_menu_contacts": 0,
+        "menu_answers_without_prior_observed_menu_contacts": 0,
+        "continues_without_prior_observed_start_contacts": 0
+      },
+      "subset_checks": {
+        "h2_numerator_within_denominator": true,
+        "h3_numerator_within_denominator": true,
+        "h3_outcome_union_matches_numerator": true
+      }
+    },
+    "imported": {
+      "contacts": 37,
+      "h2": {
+        "denominator_contacts": 37,
+        "numerator_contacts": 0,
+        "conversion_pct": 0,
+        "unknown": {
+          "outcome_contacts": 37,
+          "entry_contacts": 0
+        }
+      },
+      "h3": {
+        "denominator_contacts": 4,
+        "numerator_contacts": 0,
+        "conversion_pct": 0,
+        "unknown": {
+          "outcome_contacts": 4,
+          "entry_contacts": 33
+        },
+        "certificate_after_answer_contacts": 0,
+        "consultation_after_answer_contacts": 0,
+        "both_outcomes_after_answer_contacts": 0
+      },
+      "coverage": {
+        "contacts_with_messages": 37,
+        "menu_shown_contacts": 37,
+        "aid_selected_contacts": 3,
+        "aid_selected_after_menu_answer_contacts": 3,
+        "menu_answers_without_observed_menu_contacts": 0,
+        "menu_answers_without_prior_observed_menu_contacts": 0,
+        "continues_without_prior_observed_start_contacts": 0
+      },
+      "subset_checks": {
+        "h2_numerator_within_denominator": true,
+        "h3_numerator_within_denominator": true,
+        "h3_outcome_union_matches_numerator": true
+      }
+    }
+  },
+  "subset_checks": {
+    "cohorts_partition_all": true
+  },
+  "source_snapshot": {
+    "checked_at": "2026-10-24T00:28:46+03:00",
+    "first_message_at": "2026-09-15T07:05:58.245448+00:00",
+    "last_message_at": "2026-10-23T20:01:03.159758+00:00",
+    "source_messages": 4658,
+    "source_conversations": 160,
+    "imported_messages": 1107,
+    "read_only": true,
+    "dialogue_text_exported": false
+  }
+}

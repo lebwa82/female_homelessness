@@ -141,15 +141,24 @@ async def test_stale_callback_cannot_create_request(flow):
     assert not store.actions
 
 
-def test_test_certificate_uses_seven_days_and_navigation_does_not_reveal_code():
+def test_certificate_keeps_its_expiry_and_navigation_does_not_reveal_code():
     issued = datetime(2026, 10, 3, 10, tzinfo=UTC)
     certificate = StoredCertificate(aid_id="food_card", provider="test", nominal_rubles=3000,
                                     activation_code="TEST-ONLY", serial_number="TEST",
                                     issued_at=issued, expires_at=issued + timedelta(days=90), is_test=True)
     context = certificate_context(certificate)
-    assert datetime.fromisoformat(context["expires_at"]) == issued + timedelta(days=7)
+    assert datetime.fromisoformat(context["expires_at"]) == issued + timedelta(days=90)
     assert "TEST-ONLY" in render("s31b", context=context).text
     assert "TEST-ONLY" not in render("s31b", context={"aid_id": "food_card"}).text
+
+
+@pytest.mark.parametrize("screen,activation", (("s31b", False), ("s32b", True),
+                                               ("s33b", True), ("s37b", False)))
+def test_certificate_deadline_copy_matches_supplier_terms(screen, activation):
+    text = SCREENS[screen]["texts"][0]
+    assert ("Активировать сертификат нужно до [ДАТА]" in text) == activation
+    assert ("Срок действия, указанный в сертификате, — до [ДАТА]" in text) != activation
+    assert "7 дней" not in text
 
 
 @pytest.mark.parametrize("hour,day,expected", ((5, 3, 7), (9, 3, 9), (17, 4, 7), (22, 4, 7)))
@@ -349,6 +358,12 @@ async def test_returning_after_day_keeps_actual_answer_without_a_second_greeting
     assert await service.process(event("Hello", 41))
     assert api.replies[-1]["text"] == draft
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "i9"
+    home = next(choice.id for choice in api.replies[-1]["choices"]
+                if choice.id.startswith("home:"))
+    revision = api.conversation["custom_attributes"]["workflow_navigation"]["revision"]
+    assert home == f"home:{revision}"
+    assert await service.process(event(home, 42))
+    assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s2"
 
 
 @pytest.mark.asyncio
