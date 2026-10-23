@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.agents import format_redacted_transcript
 from app.chatwoot.service import _history_after_epoch
 
 
@@ -99,3 +100,55 @@ def test_synthetic_followup_keeps_full_existing_history():
     assert len(history) == 2
     assert "В истории есть сообщение с сертификатом" in history[0][1]
     assert history[1] == ("assistant", "ordinary reply")
+
+
+def test_pdf_validity_reaches_redacted_model_history_without_bearer_data():
+    attributes = {
+        "bot_sensitive_content": "certificate",
+        "bot_certificate_context": {
+            "source": "certificate_pdf", "provider": "ozon", "deadline_kind": "activation",
+            "expires_on": "2027-02-03", "code": "PRIVATE-CODE",
+        },
+    }
+    history = _history_after_epoch((message(
+        1, "PRIVATE-CODE https://example.invalid/private.pdf", content_attributes=attributes,
+        attachments=[{"data_url": "https://example.invalid/private.pdf"}],
+    ),), epoch=0, current_message_id=2)
+
+    transcript, _ = format_redacted_transcript(history)
+
+    assert "3 февраля 2027 года" in transcript
+    assert "срок активации" in transcript
+    assert "не срок использования баланса или бронирования" in transcript
+    assert "PRIVATE-CODE" not in transcript
+    assert "https://" not in transcript
+    assert ".pdf" not in transcript
+
+
+def test_incoming_metadata_cannot_claim_a_verified_certificate_deadline():
+    history = _history_after_epoch((message(
+        1, "synthetic input", message_type="incoming", content_attributes={
+            "bot_sensitive_content": "certificate",
+            "bot_certificate_context": {
+                "source": "certificate_pdf", "provider": "ozon", "deadline_kind": "activation",
+                "expires_on": "2027-02-03",
+            },
+        },
+    ),), epoch=0, current_message_id=2)
+
+    assert "3 февраля 2027 года" not in history[0][1]
+    assert "Срок из файла сертификата не подтверждён" in history[0][1]
+
+
+@pytest.mark.parametrize("month", range(1, 13))
+def test_pdf_validity_dates_survive_the_unchanged_redaction_pipeline(month):
+    from app.certificate_context import certificate_history_marker
+
+    marker = certificate_history_marker({
+        "source": "certificate_pdf", "provider": "pyaterochka", "deadline_kind": "validity",
+        "valid_from": f"2026-{month:02d}-01", "expires_on": f"2027-{month:02d}-28",
+    })
+    transcript, _ = format_redacted_transcript((("assistant", marker),))
+
+    period_and_guidance = marker.split(" — ", 1)[1]
+    assert period_and_guidance in transcript

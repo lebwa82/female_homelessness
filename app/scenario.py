@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -97,7 +96,7 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
     for index in button_indices(screen, variant):
         button = SCREENS[screen]["buttons"][index]
         label, target = button["label"], button["target"]
-        if label == "Вернуться на шаг назад" or target == "i1" and screen != "i1":
+        if label.startswith("Вернуться") or target == "i1" and screen != "i1":
             continue
         if context.get("awaiting_text") and label.startswith("Написать"):
             continue
@@ -155,6 +154,16 @@ class ScenarioFlow:
         return render(data["screen"], revision=record.navigation.get("revision", 0),
                       context=data, variant=data.get("variant", 0))
 
+    async def home(self, record):
+        """Return to help categories without touching requests, certificates or history."""
+        await self.store.update(
+            record, state=ConversationState.DISCOVERING_NEED.value,
+            need=None, pending_aid_id=None, pending_contact_method=None,
+            pending_city=None, pending_district=None, pending_offer=None,
+            scenario={"screen": "s2", "variant": 0, "awaiting_text": False},
+        )
+        return self.current(record)
+
     async def event(self, record, kind: str, request_key: str, **payload):
         key = hashlib.sha256(f"{record.id}:{request_key}:{kind}".encode()).hexdigest()[:24]
         await self.store.record_action(record, "scenario_event", "completed",
@@ -171,6 +180,16 @@ class ScenarioFlow:
                 # Old indices refer to waitlist/issued buttons, not the new
                 # consultation menu. Refresh it instead of reinterpreting them.
                 return await self.show(record, "i8", certificate_paused=True)
+            if screen in SCREENS and not (screen == "i8" and data.get("certificate_paused")):
+                # Retain original indices for already-delivered navigation buttons.
+                # Navigation is not a survey answer or consultation confirmation.
+                navigation = {
+                    f"sc:{screen}:{index}:{record.navigation.get('revision', 0)}"
+                    for index in button_indices(screen, data.get("variant", 0))
+                    if SCREENS[screen]["buttons"][index]["label"].startswith("Вернуться")
+                }
+                if callback in navigation:
+                    return await self.home(record)
             if not screen or callback not in {c.id for c in self.current(record).choices}:
                 return await self.service._state_turn(record)
             index = int(callback.split(":")[2])
@@ -210,6 +229,8 @@ class ScenarioFlow:
             return await self.show(record, target, **(
                 {"draft_key": request_key, "job_key": None} if target in AIDS else {}
             ))
+        if callback == "restart":
+            return await self.home(record)
         if callback == "continue" and record.state == ConversationState.GREETING.value:
             return await self.show(record, "s2")
         if callback == "pause" and record.state == ConversationState.GREETING.value:
@@ -262,10 +283,7 @@ class ScenarioFlow:
 
 
 def certificate_context(certificate) -> dict:
-    received = certificate.issued_at or datetime.now(UTC)
-    # Test inventory follows the agreed HTML product contract. Real inventory
-    # must satisfy the same supplier terms before external launch.
-    expiry = received + timedelta(days=7) if certificate.is_test else certificate.expires_at
+    expiry = certificate.expires_at
     return {"aid_id": certificate.aid_id, "code": certificate.activation_code,
             "expires_at": expiry.isoformat(),
             "expiry_date": expiry.astimezone(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y")}

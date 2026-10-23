@@ -74,7 +74,8 @@ async def test_reopened_conversation_back_skips_i2_to_meaningful_screen():
     journal = deepcopy(record.navigation)
     messages = deepcopy(store.messages)
     actions = deepcopy(store.actions)
-    (token,) = [choice.id for choice in resumed.choices if choice.id.startswith("back:")]
+    assert not any(choice.id.startswith("back:") for choice in resumed.choices)
+    token = f"back:{record.navigation['revision']}"  # Previously delivered legacy button.
 
     await service.handle_callback(incoming(2), token)
 
@@ -84,10 +85,11 @@ async def test_reopened_conversation_back_skips_i2_to_meaningful_screen():
     assert store.actions[: len(actions)] == actions
 
 
-async def test_ordinary_scenario_back_is_unchanged():
+async def test_ordinary_scenario_legacy_back_is_unchanged():
     service, _, record = service_with_root("s2", "discovering_need")
     turn = await service.handle_callback(incoming(1), "need:legal")
-    (token,) = [choice.id for choice in turn.choices if choice.id.startswith("back:")]
+    assert not any(choice.id.startswith("back:") for choice in turn.choices)
+    token = f"back:{record.navigation['revision']}"
 
     await service.handle_callback(incoming(2), token)
 
@@ -98,7 +100,8 @@ async def test_clear_still_disconnects_navigation_without_deleting_retained_data
     service, store, record = service_with_root("s2", "discovering_need")
     await service.scenario_flow.show(record, "i2", variant=1)
     resumed = await service.handle_text(incoming(1, "Hello"))
-    (token,) = [choice.id for choice in resumed.choices if choice.id.startswith("back:")]
+    assert not any(choice.id.startswith("back:") for choice in resumed.choices)
+    token = f"back:{record.navigation['revision']}"
     await store.record_action(record, "synthetic_business_event", "completed", {"key": "keep"})
     entries = deepcopy(record.navigation["entries"])
     messages = deepcopy(store.messages)

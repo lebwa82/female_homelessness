@@ -667,11 +667,13 @@ class Acceptance:
             preview = await self.choose(cid, menu, "s35")
             confirmed = await self.choose(cid, preview, "s35b")
             before = copy.deepcopy((await self.attrs(cid))["scenario_requests"])
-            back = next(v for v in self.choices(confirmed) if v.startswith("back:"))
-            await self.send(cid, back)
-            await self.check_screen(cid, "s35")
-            await self.send(cid, back)  # Old Back cannot rewind twice.
-            await self.check_screen(cid, "s35")
+            home = next(v for v in self.choices(confirmed) if v.startswith("home:"))
+            assert not any(v.startswith("back:") for v in self.choices(confirmed))
+            await self.send(cid, home)
+            await self.check_screen(cid, "s2")
+            await self.send(cid, "need:children")
+            await self.send(cid, home)  # An old Home cannot reset a newer branch.
+            await self.check_screen(cid, "s25")
             assert (await self.attrs(cid))["scenario_requests"] == before
             await self.send(cid, "/clear")
             await self.send(cid, self.choices(preview)[0])  # Old confirmation is inert.

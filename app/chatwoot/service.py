@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from app.agents import YandexAgentGateway
 from app.catalog import get_aid_item
+from app.certificate_context import certificate_context_from_pdf, certificate_history_marker
 from app.certificate_documents import CertificateObjectRef, CertificateObjectStore
 from app.chatwoot.client import BinaryAttachment, StaleButtonVersion
 from app.chatwoot.contracts import (
@@ -41,10 +42,6 @@ from app.store import CertificateClaimResult, ConversationRecord, InMemoryConver
 from app.ui import HUMAN_CHOICE
 
 _CONTEXT_MARKER_PREFIX = "[women-help/context-epoch:"
-_CERTIFICATE_HISTORY_MARKER = (
-    "[SENSITIVE_DELIVERY] В истории есть сообщение с сертификатом; реквизиты скрыты. "
-    "Это не подтверждает получение или использование и не означает доступность нового сертификата."
-)
 logger = logging.getLogger(__name__)
 _WORKFLOW_ATTRS = (
     "workflow_state",
@@ -340,7 +337,7 @@ class ChatwootAgentService:
                         and returning_after_day(messages, event.message_id, self._scenario_effects.clock())):
                     welcome = await legacy_service.scenario_flow.show(seeded.record, "i9", variant=0)
                     choices = {c.id: c for c in (*welcome.choices, *turn.choices)
-                               if not c.id.startswith("back:")}
+                               if not c.id.startswith(("back:", "home:"))}
                     # The model already answered the current text, possibly with a
                     # greeting. Restore the menu without prepending a second welcome.
                     turn = turn.model_copy(update={"choices": tuple(choices.values())})
@@ -441,6 +438,7 @@ class ChatwootAgentService:
                     sha256=attachment.sha256,
                     size=attachment.size,
                 ))
+                certificate_context = await asyncio.to_thread(certificate_context_from_pdf, payload)
                 if not _bot_owns(await self._sync_owner(conversation_id)):
                     return False
                 message_id = await self._api.send_reply(
@@ -453,6 +451,7 @@ class ChatwootAgentService:
                         filename=attachment.filename,
                         content_type=attachment.content_type,
                         data=payload,
+                        certificate_context=certificate_context,
                     ),
                 )
                 if message_id is None:
@@ -835,7 +834,9 @@ def _history_after_epoch(
             isinstance(attributes, dict)
             and attributes.get("bot_sensitive_content") == "certificate"
         ):
-            content = _CERTIFICATE_HISTORY_MARKER
+            content = certificate_history_marker(
+                attributes.get("bot_certificate_context") if role == "assistant" else None
+            )
         history.append((role, content.strip()))
     return tuple(history)
 
@@ -865,7 +866,7 @@ def _is_callback(content: str) -> bool:
         "level2:later",
         "support:psychologist",
         "restart",
-    } or content.startswith(("need:", "aid:", "contact:", "back:", "certificate:", "extra:"))
+    } or content.startswith(("need:", "aid:", "contact:", "back:", "home:", "certificate:", "extra:"))
 
 
 def _context_marker(epoch: int) -> str:

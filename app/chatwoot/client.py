@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 import aiohttp
 
+from app.certificate_context import validated_certificate_context
 from app.chatwoot.fast_buttons import (
     BUTTON_ATTRIBUTES,
     UnsupportedFastButton,
@@ -40,6 +41,7 @@ class BinaryAttachment:
     filename: str
     content_type: str
     data: bytes
+    certificate_context: dict[str, str] | None = None
 
 
 class ChatwootTransport(Protocol):
@@ -386,6 +388,10 @@ class ChatwootClient:
         payload = _reply_payload(text=text, choices=choices, turn_key=turn_key,
                                  sensitive_content=sensitive_content)
         content_attributes = payload["content_attributes"]
+        if sensitive_content == "certificate" and attachment is not None:
+            context = validated_certificate_context(attachment.certificate_context)
+            if context is not None:
+                content_attributes["bot_certificate_context"] = context
         path = self._path(f"/conversations/{conversation_id}/messages")
         if attachment is None:
             response = await self._transport.request("POST", path, self._bot_token, payload)

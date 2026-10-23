@@ -454,6 +454,13 @@ class ConversationService:
         callback_id: str,
         request_key: str,
     ) -> AgentTurn:
+        if self.scenario_flow and callback_id.startswith("home:"):
+            synchronization = checkpoint_update(record, {})
+            if synchronization:
+                await self.store.update(record, **synchronization)
+            if callback_id == f"home:{record.navigation.get('revision', 0)}":
+                return await self.scenario_flow.home(record)
+            return await self._state_turn(record)
         if callback_id.startswith("back:"):
             synchronization = checkpoint_update(record, {})
             if synchronization:
@@ -1350,12 +1357,25 @@ class ConversationService:
             }
         )
 
-    @staticmethod
-    def _with_back_choice(record: ConversationRecord, turn: AgentTurn) -> AgentTurn:
+    def _with_back_choice(self, record: ConversationRecord, turn: AgentTurn) -> AgentTurn:
         if record.channel == "chatwoot":
             turn = turn.model_copy(update={"choices": tuple(
                 HUMAN if choice.id == "human" else choice for choice in turn.choices
             )})
+        if self.scenario_flow:
+            # Keep a replayed home token bound to its original workflow revision.
+            if any(choice.id.startswith("home:") for choice in turn.choices):
+                return turn
+            choices = tuple(choice for choice in turn.choices
+                            if not choice.id.startswith("back:") and choice.id != "restart")
+            if turn.audit.get("scenario_screen") not in {"s1", "s2"}:
+                choices = (
+                    *(choice for choice in choices if choice.id != "human"),
+                    Choice(id=f"home:{record.navigation.get('revision', 0)}",
+                           label="Вернуться в начало"),
+                    *(choice for choice in choices if choice.id == "human"),
+                )
+            return turn.model_copy(update={"choices": choices})
         # Keep a stored outcome's original token: replay must not turn an old
         # button into permission to navigate a newer workflow.
         if any(choice.id.startswith("back:") for choice in turn.choices):

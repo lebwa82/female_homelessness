@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock
@@ -179,6 +180,10 @@ async def test_certificate_reply_is_marked_as_sensitive_chatwoot_content() -> No
 async def test_pdf_certificate_uses_private_multipart_attachment_and_returns_message_id() -> None:
     path = "/api/v1/accounts/12/conversations/23/messages"
     transport = RecordingTransport(responses={("POST", path): {"id": 91}})
+    context = {
+        "source": "certificate_pdf", "provider": "ozon", "deadline_kind": "activation",
+        "expires_on": "2027-02-03",
+    }
 
     message_id = await client(transport).send_reply(
         23,
@@ -187,7 +192,8 @@ async def test_pdf_certificate_uses_private_multipart_attachment_and_returns_mes
         turn_key="message:42:certificate",
         sensitive_content="certificate",
         attachment=BinaryAttachment(
-            filename="certificate.pdf", content_type="application/pdf", data=b"%PDF-test"
+            filename="certificate.pdf", content_type="application/pdf", data=b"%PDF-test",
+            certificate_context={**context, "code": "PRIVATE-CODE"},
         ),
     )
 
@@ -197,6 +203,8 @@ async def test_pdf_certificate_uses_private_multipart_attachment_and_returns_mes
     assert token == "bot-token"
     assert attachment.filename == "certificate.pdf"
     assert "bot_sensitive_content" in fields["content_attributes"]
+    assert json.loads(fields["content_attributes"])["bot_certificate_context"] == context
+    assert "PRIVATE-CODE" not in fields["content_attributes"]
 
 
 @pytest.mark.asyncio
