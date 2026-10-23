@@ -75,6 +75,44 @@ async def test_generic_paused_screen_with_old_aid_context_does_not_record_demand
     assert api.replies[0]["text"] == CERTIFICATE_PAUSED_TEXT
 
 
+@pytest.mark.parametrize("fast", (False, True))
+@pytest.mark.parametrize("scenario", (
+    {"screen": "i8", "variant": 0, "aid_id": "food_card"},
+    {"screen": "i8", "variant": 1, "aid_id": "food_card", "submitted": True},
+    {"screen": "i9", "variant": 1},
+    {"screen": "s32", "variant": 0, "draft_key": "old-draft"},
+))
+@pytest.mark.parametrize("callback", (
+    "aid:medicine_card", "certificate:request", "sc:i8:0:0", "sc:i8:0:999",
+))
+async def test_legacy_certificate_buttons_never_replay_promises_or_submit_again(
+    fast, scenario, callback,
+):
+    api = FastChatwoot() if fast else FakeChatwoot()
+    api.fast_buttons = fast
+    api, service, recorder = runtime(api)
+    api.conversation["custom_attributes"].update({
+        "workflow_state": "scenario", "scenario": scenario,
+        "scenario_certificate": {"aid_id": "food_card", "issuance_key": "previous-send"},
+    })
+    service._certificate_claim = AsyncMock(side_effect=AssertionError("unexpected new claim"))
+    service._certificate_resume = AsyncMock(side_effect=AssertionError("unexpected resume"))
+
+    assert await service.process(event(callback))
+
+    assert len(api.replies) == 1
+    assert api.replies[0]["text"] == CERTIFICATE_PAUSED_TEXT
+    assert api.replies[0]["attachment"] is None
+    assert not api.notes
+    recorder.assert_not_awaited()
+    service._certificate_claim.assert_not_awaited()
+    service._certificate_resume.assert_not_awaited()
+    if fast:
+        api.duplicate_reply_id = api.replies[0]["message_id"]
+    assert not await service.process(event(callback))
+    assert len(api.replies) == 1
+
+
 async def test_speculative_fast_plan_does_not_write_request_and_fallback_records_once():
     api, service, recorder = runtime(FastChatwoot())
     api.fast_buttons = True
