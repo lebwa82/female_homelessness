@@ -156,6 +156,21 @@ def test_managed_compose_fails_closed_when_database_host_is_missing(compose_comm
     assert "Set the managed PostgreSQL host" in result.stderr
 
 
+def test_prompt_storage_is_shared_persistent_and_backend_read_only(compose_command):
+    result = render(compose_command, managed=True, timeweb=True, domain_https=True)
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    assert "support_prompt_data" in config["volumes"]
+    for name, read_only in (("agent-bot", True), ("certificate-admin-bot", False)):
+        service = config["services"][name]
+        directory = service["environment"]["SUPPORT_PROMPT_DIR"]
+        mount = next(item for item in service["volumes"] if item["target"] == directory)
+        assert directory == "/var/lib/nevidimy/support-prompt"
+        assert mount["source"] == "support_prompt_data"
+        assert mount["type"] == "volume"
+        assert mount.get("read_only", False) is read_only
+
+
 def test_timeweb_ip_https_publishes_only_tls_proxy_and_preserves_internal_services(
     compose_command,
 ) -> None:

@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     llm_provider: Literal["yandex", "timeweb"] = "yandex"
     timeweb_ai_api_key: str = ""
     timeweb_ai_model: str = ""
+    support_prompt_dir: Path | None = None
     yandex_ai_api_key: str = ""
     yandex_cloud_folder_id: str = DEFAULT_YANDEX_CLOUD_FOLDER_ID
     yandex_ai_model: str = "qwen3.6-35b-a3b"
