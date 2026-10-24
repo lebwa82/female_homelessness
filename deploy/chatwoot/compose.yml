@@ -96,6 +96,9 @@ services:
       - /etc/women-help-agent.env
     environment:
       PYTHONUNBUFFERED: "1"
+      SUPPORT_PROMPT_DIR: /var/lib/nevidimy/support-prompt
+    volumes:
+      - support_prompt_data:/var/lib/nevidimy/support-prompt:ro
     profiles: ["agent"]
     healthcheck:
       test: ["CMD", "/app/.venv/bin/python", "-m", "app.chatwoot.healthcheck"]
@@ -111,6 +114,9 @@ services:
       - /etc/women-help-agent.env
     environment:
       PYTHONUNBUFFERED: "1"
+      SUPPORT_PROMPT_DIR: /var/lib/nevidimy/support-prompt
+    volumes:
+      - support_prompt_data:/var/lib/nevidimy/support-prompt
     command: ["/app/.venv/bin/python", "-m", "app.certificate_admin_bot"]
     profiles: ["certificate-admin"]
     restart: unless-stopped
@@ -151,6 +157,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  support_prompt_data:
   chatwoot_postgres_data:
   chatwoot_redis_data:
   chatwoot_storage:

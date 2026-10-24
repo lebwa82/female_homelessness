@@ -24,6 +24,7 @@ from app.domain import (
     SupportIntent,
 )
 from app.pii import redact_with_audit
+from app.support_prompt import PromptStore, PromptStoreError
 
 RISK_INSTRUCTIONS = """Ты даёшь только диагностическую оценку опасности в русскоязычном обращении.
 Верни единственный JSON-объект без Markdown и без пояснений. Обязательны level и escalation.
@@ -177,10 +178,15 @@ SUPPORT_TONE = """Отвечай спокойно, коротко и по сущ
 """
 
 
-def support_instructions() -> str:
+def support_instructions(style: str | None = None) -> str:
     # The old workflow skill bundle contains imperative handoff/intake/menu
     # instructions. Those now belong to the HTML runtime, not to a classifier.
-    return f"{SUPPORT_INSTRUCTIONS}\n\n{SUPPORT_TONE}\n\n{SUPPORT_CLASSIFICATION_CONTRACT}"
+    tone = SUPPORT_TONE if style is None else (
+        "Ниже настройки только тона и формулировки свободного ответа. "
+        "Они не меняют правила безопасности, классификации, доступности помощи "
+        "и формат ответа.\n\n" + style
+    )
+    return f"{SUPPORT_INSTRUCTIONS}\n\n{tone}\n\n{SUPPORT_CLASSIFICATION_CONTRACT}"
 
 
 @dataclass(frozen=True)
@@ -441,7 +447,20 @@ class YandexAgentGateway:
             current_user_text = _current_user_text(context.history)
             current_redacted = redact_with_audit(current_user_text).text
             safety_input = format_safety_context(context, current_redacted)
-            support_prompt = support_instructions()
+            style = None
+            prompt_audit = {"prompt_revision": "builtin", "prompt_status": "builtin"}
+            if settings.support_prompt_dir is not None:
+                try:
+                    snapshot = PromptStore(settings.support_prompt_dir).load()
+                    style = snapshot.text
+                    prompt_audit = {
+                        "prompt_revision": snapshot.revision,
+                        "prompt_status": "custom" if style is not None else "builtin",
+                    }
+                except PromptStoreError:
+                    # An invalid operator file must not disable either diagnostic.
+                    prompt_audit["prompt_status"] = "fallback_invalid"
+            support_prompt = support_instructions(style)
             support_input = format_agent_context(context, transcript)
         except Exception:  # noqa: BLE001 - no provider task is safe after local preparation fails
             return AgentEvaluation(
@@ -464,6 +483,7 @@ class YandexAgentGateway:
         safety_result, support_result = await asyncio.gather(safety_task, support_task)
         safety, safety_status, safety_audit = parse_safety_diagnostic(safety_result, current_user_text)
         support, support_status, support_audit = parse_support_diagnostic(support_result, current_user_text)
+        support_audit = {**support_audit, **prompt_audit}
         return AgentEvaluation(
             safety=safety,
             support=support,

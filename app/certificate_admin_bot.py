@@ -1,9 +1,11 @@
-"""Private Telegram interface for importing PDF bearer certificates."""
+"""Private Telegram interface for certificate imports and AI response settings."""
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import secrets
 from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
@@ -13,10 +15,12 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    LinkPreviewOptions,
     Message,
     ReplyKeyboardMarkup,
 )
@@ -34,6 +38,13 @@ from app.certificate_documents import (
 )
 from app.chatwoot.certificates import POOL_AIDS, CertificateInventory, database_url
 from app.config import settings
+from app.support_prompt import (
+    MAX_PROMPT_BYTES,
+    PromptConflictError,
+    PromptStore,
+    PromptStoreError,
+    validate_prompt_bytes,
+)
 from scripts.certificate_pdf_runtime import services
 
 logger = logging.getLogger(__name__)
@@ -41,6 +52,8 @@ CLEANUP_INTERVAL_SECONDS = 10 * 60
 UPLOAD_DEBOUNCE_SECONDS = 2.0
 UPLOAD_PROGRESS_INTERVAL_SECONDS = 5.0
 UPLOAD_CONCURRENCY = 4
+PROMPT_DRAFT_TTL_SECONDS = 15 * 60
+MAX_PROMPT_DRAFTS = 64
 
 POOL_LABELS = {"ozon": "Ozon", "pyaterochka": "Пятёрочка"}
 AID_LABELS = {
@@ -70,6 +83,7 @@ def _main_keyboard(admin: CertificateAdmin) -> ReplyKeyboardMarkup:
     rows = [["Загрузить сертификаты"], ["Остатки"]]
     if admin.role == "owner":
         rows.append(["Администраторы"])
+        rows.append(["Настройки ИИ"])
     return _reply_keyboard(rows)
 
 
@@ -215,15 +229,242 @@ async def _delete_refs(
             logger.warning("Certificate staging cleanup failed kind=%s", type(error).__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _PromptAction:
+    kind: str
+    revision: str
+    token: str
+    expires_at: float
+    text: str | None = None
+
+
+class _PromptBuffer(io.BytesIO):
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > MAX_PROMPT_BYTES:
+            raise ValueError("prompt file too large")
+        return super().write(data)
+
+
+class _PromptControls:
+    """Owner-only, expiring confirmations; uploaded names never become local paths."""
+
+    def __init__(
+        self, repository: CertificateAdminRepository, store: PromptStore | None
+    ) -> None:
+        self.repository = repository
+        self.store = store
+        self._states: dict[int, _PromptAction] = {}
+
+    def _prune(self) -> None:
+        now = monotonic()
+        for user_id, state in list(self._states.items()):
+            if state.expires_at <= now:
+                self._states.pop(user_id, None)
+
+    def cancel(self, user_id: int) -> bool:
+        self._prune()
+        return self._states.pop(user_id, None) is not None
+
+    async def _owner(self, user_id: int) -> CertificateAdmin | None:
+        admin = await self.repository.admin(user_id)
+        self._prune()
+        if admin is None or admin.role != "owner":
+            self._states.pop(user_id, None)
+            return None
+        return admin
+
+    async def _available(self, bot: Bot, user_id: int) -> bool:
+        if await self._owner(user_id) is None:
+            await bot.send_message(user_id, "Настройки ИИ доступны только действующему владельцу.")
+            return False
+        if self.store is None:
+            await bot.send_message(user_id, "Настройки ИИ пока не подключены на сервере.")
+            return False
+        return True
+
+    def _action(self, user_id: int, kind: str, revision: str, text: str | None = None) -> _PromptAction:
+        self._prune()
+        if user_id not in self._states and len(self._states) >= MAX_PROMPT_DRAFTS:
+            raise PromptStoreError("too many drafts")
+        action = _PromptAction(
+            kind, revision, secrets.token_urlsafe(12), monotonic() + PROMPT_DRAFT_TTL_SECONDS, text
+        )
+        self._states[user_id] = action
+        return action
+
+    async def _text(self, bot: Bot, user_id: int, text: str) -> bool:
+        # Keep below Telegram's UTF-16 message limit even for supplementary characters.
+        for offset in range(0, len(text), 1800):
+            if await self._owner(user_id) is None:
+                return False
+            await bot.send_message(
+                user_id, text[offset:offset + 1800], parse_mode=None,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        return True
+
+    async def menu(self, message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private":
+            return
+        user_id = message.from_user.id
+        if not await self._available(bot, user_id):
+            return
+        self.cancel(user_id)
+        await bot.send_message(
+            user_id,
+            "Настройки ИИ: только стиль и содержание свободного ответа. "
+            "Сценарии, правила безопасности и выдача помощи здесь не меняются.\n"
+            "TXT: UTF-8, не больше 16 КиБ. Не добавляйте персональные данные и секреты.",
+            reply_markup=_keyboard([
+                [("Показать инструкцию", "ai:show"), ("Скачать TXT", "ai:download")],
+                [("Загрузить TXT", "ai:upload")],
+                [("Вернуть предыдущую версию", "ai:rollback")],
+                [("Меню", "menu:main")],
+            ]),
+        )
+
+    async def callback(self, query: CallbackQuery, bot: Bot) -> None:
+        if query.message is None or query.message.chat.type != "private":
+            return
+        user_id = query.from_user.id
+        await query.answer()
+        if not await self._available(bot, user_id):
+            return
+        assert self.store is not None
+        data = query.data or ""
+        try:
+            if data.startswith(("ai:apply:", "ai:cancel:")):
+                state = self._states.get(user_id)
+                if state is None or data not in {
+                    f"ai:apply:{state.token}", f"ai:cancel:{state.token}"
+                }:
+                    await bot.send_message(user_id, "Подтверждение устарело. Откройте настройки ИИ снова.")
+                    return
+                # Recheck immediately before mutation, then consume without another await.
+                if await self._owner(user_id) is None:
+                    return
+                if self._states.get(user_id) is not state:
+                    await bot.send_message(user_id, "Подтверждение уже обработано или отменено.")
+                    return
+                self._states.pop(user_id)
+                if data.startswith("ai:cancel:"):
+                    await bot.send_message(user_id, "Изменение инструкции отменено.")
+                    return
+                if state.kind == "apply" and state.text is not None:
+                    self.store.publish(state.text, actor_id=user_id, expected_revision=state.revision)
+                elif state.kind == "rollback":
+                    self.store.rollback(actor_id=user_id, expected_revision=state.revision)
+                else:
+                    await bot.send_message(user_id, "Сначала загрузите TXT и проверьте черновик.")
+                    return
+                await bot.send_message(user_id, "Инструкция применена к следующим свободным ответам ИИ.")
+                return
+            snapshot = self.store.load()
+            if data in {"ai:show", "ai:download"}:
+                if snapshot.text is None:
+                    from app.agents import SUPPORT_TONE
+
+                    text = SUPPORT_TONE
+                else:
+                    text = snapshot.text
+                if data == "ai:show":
+                    await self._text(bot, user_id, text)
+                elif await self._owner(user_id) is not None:
+                    await bot.send_document(
+                        user_id, BufferedInputFile(text.encode("utf-8"), filename="ai-instruction.txt"),
+                        caption="Редактируемая инструкция свободного ответа ИИ.", parse_mode=None,
+                    )
+            elif data == "ai:upload":
+                action = self._action(user_id, "upload", snapshot.revision)
+                await bot.send_message(
+                    user_id, "Пришлите TXT в UTF-8 до 16 КиБ. Черновик действует 15 минут; "
+                    "до подтверждения текущая инструкция не меняется.",
+                    reply_markup=_keyboard([[("Отменить", f"ai:cancel:{action.token}")]]),
+                )
+            elif data == "ai:rollback":
+                if snapshot.previous_revision is None:
+                    await bot.send_message(user_id, "Предыдущей версии для отката нет.")
+                    return
+                action = self._action(user_id, "rollback", snapshot.revision)
+                await bot.send_message(
+                    user_id, "Вернуть предыдущую инструкцию свободного ответа? "
+                    "Текущая версия изменится только после подтверждения.",
+                    reply_markup=_keyboard([[
+                        ("Подтвердить откат", f"ai:apply:{action.token}"),
+                        ("Отменить", f"ai:cancel:{action.token}"),
+                    ]]),
+                )
+        except PromptConflictError:
+            await bot.send_message(user_id, "Инструкция уже изменилась. Заново откройте настройки ИИ.")
+        except (PromptStoreError, OSError):
+            await bot.send_message(
+                user_id, "Не удалось подтвердить состояние инструкции. "
+                "Откройте настройки ИИ заново и проверьте текущую версию.",
+            )
+
+    def handles_document(self, user_id: int, filename: str) -> bool:
+        self._prune()
+        state = self._states.get(user_id)
+        return filename.lower().endswith(".txt") or (
+            state is not None and state.kind == "upload" and not filename.lower().endswith(".pdf")
+        )
+
+    async def document(self, message: Message, bot: Bot) -> None:
+        if message.from_user is None or message.chat.type != "private" or message.document is None:
+            return
+        user_id = message.from_user.id
+        if not await self._available(bot, user_id):
+            return
+        state = self._states.get(user_id)
+        if state is None or state.kind != "upload":
+            await bot.send_message(user_id, "Сначала выберите «Настройки ИИ» → «Загрузить TXT».")
+            return
+        document = message.document
+        if not (document.file_name or "").lower().endswith(".txt") or (
+            document.file_size is not None and document.file_size > MAX_PROMPT_BYTES
+        ):
+            await bot.send_message(user_id, "Нужен TXT в UTF-8 размером не больше 16 КиБ.")
+            return
+        try:
+            with _PromptBuffer() as buffer:
+                await bot.download(document, destination=buffer, chunk_size=MAX_PROMPT_BYTES + 1)
+                text = validate_prompt_bytes(buffer.getvalue())
+        except Exception:  # noqa: BLE001 - download errors may contain URLs, tokens or file content
+            await bot.send_message(user_id, "TXT не принят: нужен непустой UTF-8 текст до 16 КиБ.")
+            return
+        if await self._owner(user_id) is None:
+            return
+        if self._states.get(user_id) is not state:
+            await bot.send_message(user_id, "Загрузка отменена или устарела. Откройте настройки ИИ снова.")
+            return
+        action = self._action(user_id, "apply", state.revision, text)
+        if not await self._text(bot, user_id, "Черновик инструкции (пока не применяется):\n\n" + text):
+            return
+        if await self._owner(user_id) is not None and self._states.get(user_id) is action:
+            await bot.send_message(
+                user_id, "Применить эту инструкцию к свободным ответам ИИ?",
+                reply_markup=_keyboard([[
+                    ("Применить", f"ai:apply:{action.token}"),
+                    ("Отменить", f"ai:cancel:{action.token}"),
+                ]]),
+            )
+
+
 def build_dispatcher(
     repository: CertificateAdminRepository,
     inventory: CertificateInventory,
     object_store: S3CertificateObjectStore,
+    prompt_store: PromptStore | None = None,
 ) -> Dispatcher:
     dispatcher = Dispatcher()
     bot_username: str | None = None
     progress = UploadProgressCoordinator(repository)
     upload_slots = asyncio.Semaphore(UPLOAD_CONCURRENCY)
+    prompt_controls = _PromptControls(repository, prompt_store)
+    dispatcher.message.register(prompt_controls.menu, F.text == "Настройки ИИ")
+    dispatcher.callback_query.register(
+        prompt_controls.callback, (F.message.chat.type == "private") & F.data.startswith("ai:")
+    )
 
     async def admin_for(user_id: int, display_name: str) -> CertificateAdmin | None:
         admin = await repository.admin(user_id)
@@ -232,6 +473,7 @@ def build_dispatcher(
         return admin
 
     async def show_menu(bot: Bot, user_id: int, display_name: str) -> None:
+        prompt_controls.cancel(user_id)
         admin = await admin_for(user_id, display_name)
         if admin is None:
             await bot.send_message(user_id, "Доступ к этому боту не предоставлен.")
@@ -315,6 +557,9 @@ def build_dispatcher(
             return
         admin = await admin_for(message.from_user.id, message.from_user.full_name)
         if admin is None:
+            return
+        if prompt_controls.cancel(message.from_user.id):
+            await message.answer("Изменение инструкции отменено.", reply_markup=_main_keyboard(admin))
             return
         batch = await repository.active_batch(admin.telegram_user_id)
         if batch is None:
@@ -412,6 +657,11 @@ def build_dispatcher(
         admin = await admin_for(message.from_user.id, message.from_user.full_name)
         if admin is None:
             return  # Never download an unauthorized user's file.
+        filename = message.document.file_name or ""
+        if prompt_controls.handles_document(admin.telegram_user_id, filename):
+            await prompt_controls.document(message, bot)
+            return
+        filename = filename or "certificate.pdf"
         batch = await repository.active_batch(admin.telegram_user_id)
         if batch is None or batch.status != "collecting":
             await message.answer(
@@ -419,7 +669,6 @@ def build_dispatcher(
                 reply_markup=_main_keyboard(admin),
             )
             return
-        filename = message.document.file_name or "certificate.pdf"
         await progress.begin(bot, admin.telegram_user_id, batch.id)
         try:
             async with upload_slots:
@@ -727,7 +976,8 @@ async def run() -> None:
     await inventory.initialize()
     await repository.initialize(owner_ids)
     proxy = settings.resolved_telegram_proxy_url()
-    dispatcher = build_dispatcher(repository, inventory, object_store)
+    prompt_store = PromptStore(settings.support_prompt_dir) if settings.support_prompt_dir else None
+    dispatcher = build_dispatcher(repository, inventory, object_store, prompt_store=prompt_store)
     try:
         async with Bot(
             settings.certificate_admin_bot_token,
