@@ -46,7 +46,9 @@ async def test_housing_text_opens_the_same_scenario_as_the_button(monkeypatch, l
     assert await service.process(event("мне некуда пойти помогите"))
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s21"
     assert api.replies[-1]["text"] == SCREENS["s21"]["texts"][0]
-    assert any(c.id == "aid:hostel_3_nights" for c in api.replies[-1]["choices"])
+    assert [c.id for c in api.replies[-1]["choices"] if c.id.startswith("aid:")] == [
+        "aid:legal_consultation", "aid:psychologist_3_sessions",
+    ]
     assert api.teams == []
     assert not api.conversation["custom_attributes"].get("handoff_requested")
     assert gateway.calls == 1

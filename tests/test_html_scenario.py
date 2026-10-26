@@ -72,15 +72,67 @@ async def test_start_menu_and_catalog_are_explicit(flow):
     service, record, store = flow
     menu = await service.scenario_flow.callback(record, "continue", "m2")
     assert menu.audit["scenario_screen"] == "s2"
-    assert len([c for c in menu.choices if c.id.startswith("need:")]) == 6
+    assert [(c.id, c.label) for c in menu.choices] == [
+        ("need:housing", "Жильё / некуда идти"),
+        ("need:food_money", "Продукты или лекарства"),
+        ("need:legal", "Документы / юридический вопрос"),
+        ("need:support", "Поговорить / нужна поддержка"),
+        ("need:children", "Вопрос про детей"),
+        ("need:other", "Здесь нет того, что мне нужно"),
+        ("human", "💬 Поговорить с человеком"),
+    ]
     for need, target, aids in (
         ("legal", "s23", {"legal_consultation"}),
-        ("children", "s25", {"children_card", "legal_consultation", "psychologist_3_sessions"}),
+        ("children", "s25", {"legal_consultation", "psychologist_3_sessions"}),
     ):
         await service.scenario_flow.show(record, "s2")
         result = await service.scenario_flow.callback(record, f"need:{need}", "m3")
         assert result.audit["scenario_screen"] == target
         assert {c.id[4:] for c in result.choices if c.id.startswith("aid:")} == aids
+    assert not store.aid_requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("need,screen,alternatives", (
+    ("housing", "s21", (
+        ("legal_consultation", "Консультация юриста", "s35"),
+        ("psychologist_3_sessions", "Консультация психолога", "s34"),
+    )),
+    ("food_money", "s22", (
+        ("psychologist_3_sessions", "Консультация психолога", "s34"),
+        ("legal_consultation", "Консультация юриста", "s35"),
+        ("peer_consultation", "Разговор с равной консультанткой", "s38"),
+    )),
+    ("children", "s25", (
+        ("legal_consultation", "Консультация юриста", "s35"),
+        ("psychologist_3_sessions", "Консультация психолога", "s34"),
+    )),
+))
+async def test_paused_aid_branches_offer_ordered_alternatives(flow, need, screen, alternatives):
+    service, record, store = flow
+    scene = service.scenario_flow
+    await scene.callback(record, "continue", "menu")
+    turn = await scene.callback(record, f"need:{need}", "need")
+
+    assert turn.audit["scenario_screen"] == screen
+    fallback = choice_for(turn, "s36")
+    assert [(choice.id, choice.label) for choice in turn.choices] == [
+        *((f"aid:{aid}", label) for aid, label, _ in alternatives),
+        (fallback, "Здесь нет того, что мне нужно"),
+        ("human", "💬 Поговорить с человеком"),
+    ]
+    for aid, _, preview_screen in alternatives:
+        await scene.show(record, screen)
+        preview = await scene.callback(record, f"aid:{aid}", f"preview:{aid}")
+        assert preview.audit["scenario_screen"] == preview_screen
+        assert record.pending_aid_id == aid
+        assert not store.actions
+        assert not store.aid_requests
+
+    turn = await scene.show(record, screen)
+    other = await scene.callback(record, choice_for(turn, "s36"), "other")
+    assert other.audit["scenario_screen"] == "s36"
+    assert not store.actions
     assert not store.aid_requests
 
 
