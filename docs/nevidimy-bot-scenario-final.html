@@ -93,15 +93,16 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
         <ul>
           <li><a class="node pick" href="#s21"><span class="id">2.1</span>Жильё / некуда идти</a>
             <ul>
-              <li><a class="node" href="#s33"><span class="id">3.3</span>Сертификат на проживание → <span class="id">3.3.1</span> выдача → <span class="id">3.3.2</span> что ещё доступно</a></li>
               <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста → <span class="id">3.5.1</span> запрос и тема → <span class="id">3.5.3</span> записано</a></li>
+              <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
             </ul>
           </li>
           <li><a class="node pick" href="#s22"><span class="id">2.2</span>Продукты или лекарства</a>
             <ul>
-              <li><a class="node" href="#s31"><span class="id">3.1</span>Сертификат на продукты → <span class="id">3.1.1</span> выдача</a></li>
-              <li><a class="node" href="#s32"><span class="id">3.2</span>Сертификат на лекарства → <span class="id">3.2.1</span> выдача</a></li>
+              <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога</a></li>
+              <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста</a></li>
+              <li><a class="node" href="#s38"><span class="id">3.8</span>Разговор с равной консультанткой</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
             </ul>
           </li>
@@ -120,7 +121,6 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
           </li>
           <li><a class="node pick" href="#s25"><span class="id">2.5</span>Вопрос про детей</a>
             <ul>
-              <li><a class="node" href="#s37"><span class="id">3.7</span>Сертификат на детские товары → <span class="id">3.7.1</span> выдача</a></li>
               <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста</a></li>
               <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
@@ -241,14 +241,13 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">2.1</span><span class="stitle">Жильё, некуда идти</span>
   <span class="swhen">Выбрана кнопка «Жильё / некуда идти».</span></div>
   <div class="bubble">
-    <p>Сейчас мы можем помочь с оплатой нескольких ночей в хостеле, консультацией юриста или разговором с человеком из команды поддержки.</p>
+    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с оплатой нескольких ночей в хостеле, но можно выбрать консультацию юриста, психолога или разговор с человеком из команды поддержки.</p>
     <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
   <div class="keys">
-    <a class="key" href="#s33">Сертификат на несколько ночей в хостеле</a>
-    <span class="keyrule"></span>
     <a class="key" href="#s35">Консультация юриста</a>
+    <a class="key" href="#s34">Консультация психолога</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
     <span class="keyrule"></span>
@@ -261,13 +260,13 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">2.2</span><span class="stitle">Продукты или лекарства</span>
   <span class="swhen">Выбрана кнопка «Продукты или лекарства».</span></div>
   <div class="bubble">
-    <p>Сейчас мы можем помочь с оплатой продуктов или лекарств.</p>
-    <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
+    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с оплатой продуктов или лекарств, но можно выбрать консультацию психолога, юриста, разговор с равной консультанткой.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
   <div class="keys">
-    <a class="key" href="#s31">Сертификат на продукты</a>
-    <a class="key" href="#s32">Сертификат на лекарства</a>
+    <a class="key" href="#s34">Консультация психолога</a>
+    <a class="key" href="#s35">Консультация юриста</a>
+    <a class="key" href="#s38">Разговор с равной консультанткой</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
     <span class="keyrule"></span>
@@ -317,13 +316,11 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">2.5</span><span class="stitle">Вопрос про детей</span>
   <span class="swhen">Выбрана кнопка «Вопрос про детей».</span></div>
   <div class="bubble">
-    <p>Сейчас мы можем помочь с покупкой товаров для детей, консультацией юриста или психолога, а также разговором с человеком из команды поддержки.</p>
+    <p>Из-за большого количества обращений сейчас мы временно не можем помочь покупкой товаров для детей, но можно выбрать консультацией юриста или психолога, а также разговором с человеком из команды поддержки.</p>
     <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
   <div class="keys">
-    <a class="key" href="#s37">Сертификат на товары для детей</a>
-    <span class="keyrule"></span>
     <a class="key" href="#s35">Консультация юриста</a>
     <a class="key" href="#s34">Консультация психолога</a>
     <span class="keyrule"></span>

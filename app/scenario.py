@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.catalog import available_aid_for_need
 from app.domain import AgentTurn, Choice, ConversationState, NeedKind
 
 SCREENS = json.loads(Path(__file__).with_name("scenario_copy.json").read_text())
@@ -256,6 +257,12 @@ class ScenarioFlow:
             if not screen:
                 screen = next((k for k, v in NEEDS.items() if v.value == record.need), "s2")
             allowed = {b["target"] for b in SCREENS.get(screen, {}).get("buttons", [])}
+            if screen in NEEDS:
+                # Previously sent certificate buttons still reach the paused flow.
+                allowed.update(
+                    AID_SCREENS[item.id] for item in available_aid_for_need(NEEDS[screen])
+                    if item.id in CERTIFICATES
+                )
             return (await self._select_aid(record, target, request_key)
                     if target in allowed else await self.show(record, screen))
         if callback.startswith("extra:"):
