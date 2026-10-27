@@ -36,7 +36,18 @@ CERTIFICATE_PAUSED_CONSULTATIONS = (
 )
 
 
-def copy_text(screen: str, variant: int = 0) -> str:
+def copy_text(screen: str, variant: int = 0, *, context: dict | None = None) -> str:
+    if (context and context.get("historical_survey") is True
+            and context.get("aid_id") in CERTIFICATES):
+        if screen == "s5":
+            subject = {
+                "food_card": "продукты", "medicine_card": "лекарства",
+                "hostel_3_nights": "проживание", "children_card": "детские товары",
+            }[context["aid_id"]]
+            return f"Удалось ли вам воспользоваться сертификатом на {subject}?"
+        if screen == "s56":
+            return ("Спасибо за ответ. Если с сертификатом возникли сложности, "
+                    "можно написать человеку из команды.")
     return SCREENS[screen]["texts"][variant]
 
 
@@ -86,7 +97,7 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
         return AgentTurn(text=CERTIFICATE_PAUSED_TEXT, choices=(*choices, HUMAN),
                          audit={"scenario_screen": screen})
     texts = SCREENS[screen]["texts"]
-    body = copy_text(screen, variant)
+    body = copy_text(screen, variant, context=context)
     if screen in {"s31b", "s32b", "s33b", "s37b"} and "code" not in context:
         body = "Сертификат сохранён в предыдущем сообщении этого чата."
     if screen == "s51":
@@ -129,6 +140,10 @@ class ScenarioFlow:
             screen, variant = "i8", 0
             context = {**context, "certificate_paused": True}
         data = {**record.scenario, **context, "screen": screen, "awaiting_text": False}
+        if (screen in {"s5", "s59"} and "job_key" in context
+                and context["job_key"] != record.scenario.get("job_key")
+                and "historical_survey" not in context):
+            data.pop("historical_survey", None)
         if screen != "i8":
             data.pop("certificate_paused", None)
         data["variant"] = variant_for(screen, data) if variant is None else variant
