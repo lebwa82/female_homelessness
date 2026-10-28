@@ -299,18 +299,25 @@ class ScenarioFlow:
     async def text(self, record, value: str, request_key: str) -> AgentTurn | None:
         data = record.scenario
         screen = data.get("screen")
+        # The caller has already checked safety and human-handoff policy.
+        # Accept a written certificate reply without guessing a button answer.
+        certificate_reply = (screen in {"s5", "s51", "s59"}
+                             and data.get("aid_id") in CERTIFICATES)
         # Explicit fields accept text directly too; clicking 'write' only opens the field.
-        if screen not in TEXT_TARGETS or screen == "i1" and data.get("variant") == 1:
+        if (not certificate_reply and screen not in TEXT_TARGETS
+                or screen == "i1" and data.get("variant") == 1):
             return None
         if screen == "s57" and data.get("variant") == 1:
             return None
         kinds = {"s35d": "legal_topic", "s36": "other_request", "s511": "certificate_usage",
                  "s57": "certificate_problem", "s6": "general_feedback",
                  "s74": "consultation_feedback", "i1": "human_message"}
-        await self.event(record, kinds[screen], request_key, text=value,
+        kind = "certificate_usage" if certificate_reply else kinds[screen]
+        target = "s52" if certificate_reply else TEXT_TARGETS[screen]
+        await self.event(record, kind, request_key, text=value,
                          request_id=data.get("request_key"), job_key=data.get("job_key"),
                          aid_id=data.get("aid_id"))
-        return await self.show(record, TEXT_TARGETS[screen],
+        return await self.show(record, target,
                                variant=1 if screen in {"s57", "i1"} else 0)
 
 
