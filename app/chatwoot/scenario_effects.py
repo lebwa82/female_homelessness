@@ -6,6 +6,7 @@ message history copy, external scheduler, or timer lost at a process restart.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,7 @@ from app.catalog import get_aid_item
 from app.scenario import CERTIFICATES
 
 MSK = ZoneInfo("Europe/Moscow")
+SUCCESS_CONSULTATIONS = frozenset({"psychologist_3_sessions", "legal_consultation"})
 NOTIFY = {"consultation_requested", "consultation_retry", "other_request",
           "certificate_waitlist", "certificate_problem", "negative_feedback", "human_message"}
 EVENT_TITLES = {
@@ -70,13 +72,14 @@ def attrs(conversation: dict) -> dict:
     return conversation.get("custom_attributes") or {}
 
 
-def review_job(jobs: dict, key: str, request: dict, end: datetime) -> dict:
+def review_job(jobs: dict, key: str, request: dict, end: datetime,
+               *, delay: timedelta = timedelta(hours=2)) -> dict:
     """Move an unsent review, but never send a second review for the same request."""
     job_key = f"review:{key}"
     if jobs.get(job_key, {}).get("state") in {"sent", "answered"}:
         return jobs
     return {**jobs, job_key: {
-        "screen": "s7", "due_at": daytime(end + timedelta(hours=2)).isoformat(),
+        "screen": "s7", "due_at": daytime(end + delay).isoformat(),
         "state": "pending", "context": {"aid_id": request["aid_id"], "request_key": key},
     }}
 
@@ -122,11 +125,14 @@ class ScenarioEffects:
                     "aid_id": payload["aid_id"], "state": "requested",
                     "requested_at": now.isoformat(),
                 })
-                jobs = schedule(jobs, f"check:{key}", "s5",
-                                datetime.fromisoformat(request["requested_at"]) + timedelta(days=4),
-                                {"aid_id": payload["aid_id"], "request_key": key})
-                if current.get("scenario_certificate"):
-                    jobs[f"check:{key}"] = {**jobs[f"check:{key}"], "state": "cancelled"}
+                # Psychologist/legal surveys now require explicit staff confirmation.
+                # Keep the existing contact-check flow for the peer consultation.
+                if payload["aid_id"] not in SUCCESS_CONSULTATIONS:
+                    jobs = schedule(jobs, f"check:{key}", "s5",
+                                    datetime.fromisoformat(request["requested_at"]) + timedelta(days=4),
+                                    {"aid_id": payload["aid_id"], "request_key": key})
+                    if current.get("scenario_certificate"):
+                        jobs[f"check:{key}"] = {**jobs[f"check:{key}"], "state": "cancelled"}
             job_key = payload.get("job_key")
             if job_key and job_key in jobs:
                 jobs[job_key] = {**jobs[job_key], "state": "answered"}
@@ -183,6 +189,8 @@ class ScenarioEffects:
         })
 
     async def complete(self, event) -> bool:
+        if event.consultation_aid_id is not None:
+            return await self._complete_success(event)
         current = attrs(await self.api.get_conversation(event.conversation_id))
         requests = dict(current.get("scenario_requests") or {})
         selected = [key for key, value in requests.items()
@@ -213,6 +221,71 @@ class ScenarioEffects:
             "scenario_requests": requests, "scenario_followups": jobs,
             "reopen_with_bot": True, "scenario": {}, "workflow_state": "open_conversation",
         })
+        return True
+
+    async def _complete_success(self, event) -> bool:
+        """One staff confirmation schedules independent +1h and +4d surveys."""
+        aid = event.consultation_aid_id
+        if aid not in SUCCESS_CONSULTATIONS:
+            return False
+        current = attrs(await self.api.get_conversation(event.conversation_id))
+        requests = dict(current.get("scenario_requests") or {})
+        chosen = event.request_id or str(current.get("consultation_request_id") or "").strip()
+        matching = {k: r for k, r in requests.items() if r.get("aid_id") == aid}
+        selected = [k for k, r in matching.items()
+                    if (k == chosen if chosen else r.get("state") == "requested")]
+        retry = [k for k, r in matching.items()
+                 if r.get("success_message_id") == event.message_id]
+        if retry:
+            selected = retry
+        if len(selected) > 1 or chosen and not selected:
+            await self.api.add_private_note(event.conversation_id,
+                "Опросы не назначены: укажите ID нужной заявки в поле «ID консультации» "
+                "и повторите макрос выбранного вида консультации.",
+                event_key=f"success-ambiguous:{event.message_id}")
+            return False
+        if not selected:
+            if any(r.get("state") == "completed" for r in matching.values()):
+                await self.api.add_private_note(event.conversation_id,
+                    "Эта консультация уже отмечена завершённой. Повторные опросы не созданы. "
+                    "Для следующей консультации нужна новая заявка.",
+                    event_key=f"success-already-completed:{event.message_id}")
+                return False
+            # Manual consultations need no invented client request or new table.
+            key = hashlib.sha256(f"staff-success:{event.conversation_id}:{aid}".encode()).hexdigest()[:24]
+            selected = [key]
+            requests[key] = {"aid_id": aid, "source": "staff_confirmation"}
+        key = selected[0]
+        request = requests[key]
+        if request.get("state") == "completed" and not retry:
+            await self.api.add_private_note(event.conversation_id,
+                "Консультация уже завершена; расписание опросов сохранено.",
+                event_key=f"success-already-completed:{event.message_id}")
+            return False
+        marked_at = request.get("success_marked_at") or event.occurred_at or self.clock().isoformat()
+        stamp = datetime.fromisoformat(marked_at)
+        requests[key] = {**request, "state": "completed", "completed_at": marked_at,
+                         "completed_message_id": event.message_id, "success_marked_at": marked_at,
+                         "success_message_id": event.message_id, "confirmed_by": event.sender_id}
+        jobs = dict(current.get("scenario_followups") or {})
+        jobs = review_job(jobs, key, request, stamp, delay=timedelta(hours=1))
+        jobs = schedule(jobs, f"wellbeing:{key}", "s52", stamp + timedelta(days=4),
+                        {"aid_id": aid, "request_key": key})
+        # The old request-based contact check must not replace the new wellbeing survey.
+        for obsolete in (f"check:{key}", f"reminder:check:{key}"):
+            if jobs.get(obsolete, {}).get("state") == "pending":
+                jobs[obsolete] = {**jobs[obsolete], "state": "cancelled"}
+        await self.api.set_custom_attributes(event.conversation_id, {
+            "scenario_requests": requests, "scenario_followups": jobs,
+        })
+        review = datetime.fromisoformat(jobs[f"review:{key}"]["due_at"]).astimezone(MSK)
+        wellbeing = datetime.fromisoformat(jobs[f"wellbeing:{key}"]["due_at"]).astimezone(MSK)
+        await self.api.add_private_note(event.conversation_id,
+            f"Консультация отмечена завершённой. ID: {key}. "
+            f"Оценка консультации: {review:%d.%m.%Y %H:%M} МСК. "
+            f"Вопрос о самочувствии: {wellbeing:%d.%m.%Y %H:%M} МСК. "
+            "Сроки считаются от первого нажатия макроса, не от фактической даты встречи.",
+            event_key=f"consultation-success:{key}")
         return True
 
     async def plan_consultation(self, event) -> None:

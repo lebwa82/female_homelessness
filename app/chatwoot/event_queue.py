@@ -54,6 +54,12 @@ class DurableEventQueue:
             payload.pop("button_snapshot")
         else:
             payload = asdict(event)
+            if isinstance(event, StaffMessage):
+                # Keep ordinary/legacy staff events readable across rollback.
+                # Only the new, explicitly provisioned commands need new fields.
+                for field in ("consultation_aid_id", "occurred_at"):
+                    if payload[field] is None:
+                        payload.pop(field)
         fields = {"type": kind, "payload": json.dumps(payload, ensure_ascii=False)}
         if isinstance(event, IncomingChatwootMessage):
             snapshot = validated_button_snapshot(event.button_snapshot, event)

@@ -568,6 +568,9 @@ class ChatwootAgentService:
         if event.message_id <= max(_epoch(attrs.get("ownership_last_staff_message_id")),
                                   _epoch(attrs.get("scenario_last_message_id"))):
             return
+        if event.consultation_aid_id:
+            await self._scenario_effects.complete(event)
+            return  # Recording success does not release a staff-owned conversation.
         if event.consultation_completed and not await self._scenario_effects.complete(event):
             return
         release = event.return_to_bot or event.consultation_completed

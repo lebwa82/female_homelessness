@@ -322,11 +322,13 @@ async def test_partial_delivery_retry_does_not_lose_or_duplicate_consultation():
     restarted = ChatwootAgentService(api, duty_team_id=9)
     assert await restarted.process(event(callback, 45))
     assert len(api.conversation["custom_attributes"]["scenario_requests"]) == 1
-    assert len(api.conversation["custom_attributes"]["scenario_followups"]) == 2  # cancelled idle + check
+    jobs = api.conversation["custom_attributes"]["scenario_followups"]
+    assert set(jobs) == {"idle:0"}  # Consultation surveys now wait for staff confirmation.
+    assert jobs["idle:0"]["state"] == "cancelled"
     assert len([n for n in api.note_keys if n.startswith("scenario:")]) == 1
     await restarted.process(event("/clear", 46))
     assert len(api.conversation["custom_attributes"]["scenario_requests"]) == 1
-    assert len(api.conversation["custom_attributes"]["scenario_followups"]) == 2
+    assert set(api.conversation["custom_attributes"]["scenario_followups"]) == {"idle:0"}
     assert not await restarted.process(event(callback, 45))
 
 
@@ -363,6 +365,11 @@ async def test_certificate_prioritizes_block_five_and_completion_review_has_no_r
     await effects.apply(23, 41, [(23, "scenario_event", "completed", {
         "key": "a" * 24, "kind": "consultation_requested", "aid_id": "legal_consultation",
     })])
+    # Existing pre-policy contact checks still coexist with certificate delivery.
+    api.conversation["custom_attributes"]["scenario_followups"]["check:" + "a" * 24] = {
+        "screen": "s5", "state": "pending", "due_at": (now + timedelta(days=4)).isoformat(),
+        "context": {"aid_id": "legal_consultation", "request_key": "a" * 24},
+    }
     await effects.certificate_delivered(23, "cert", {
         "aid_id": "food_card", "expires_at": (now + timedelta(days=7)).isoformat(),
     })

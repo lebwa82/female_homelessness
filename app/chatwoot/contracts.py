@@ -6,7 +6,7 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from app.chatwoot.fast_buttons import CAPABILITY, PRIVATE_NOTES_FEATURE
@@ -55,6 +55,10 @@ RETURN_TO_BOT = "[women-help:return-to-bot]"
 CONSULTATION_COMPLETED = "[women-help:consultation-completed]"
 CONSULTATION_SCHEDULE = "[women-help:consultation-schedule]"
 CONSULTATION_CANCEL = "[women-help:consultation-cancel]"
+CONSULTATION_SUCCESS = {
+    "[women-help:consultation-success:psychologist_3_sessions]": "psychologist_3_sessions",
+    "[women-help:consultation-success:legal_consultation]": "legal_consultation",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,8 @@ class StaffMessage:
     consultation_completed: bool = False
     request_id: str | None = None
     consultation_schedule: str | None = None
+    consultation_aid_id: str | None = None
+    occurred_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +114,9 @@ def parse_staff_message(payload: object) -> StaffMessage | None:
     returning = payload.get("private") is True and payload.get("content") == RETURN_TO_BOT
     content = payload.get("content") or ""
     completed = payload.get("private") is True and content == CONSULTATION_COMPLETED
+    aid_id = (CONSULTATION_SUCCESS.get(content)
+              if payload.get("private") is True and isinstance(content, str) else None)
+    completed = completed or aid_id is not None
     scheduling = ({CONSULTATION_SCHEDULE: "schedule", CONSULTATION_CANCEL: "cancel"}.get(content)
                   if payload.get("private") is True and isinstance(content, str) else None)
     request_id = None
@@ -124,7 +133,24 @@ def parse_staff_message(payload: object) -> StaffMessage | None:
         return None
     return StaffMessage(*ids, return_to_bot=returning,
                         consultation_completed=completed, request_id=request_id,
-                        consultation_schedule=scheduling)
+                        consultation_schedule=scheduling, consultation_aid_id=aid_id,
+                        occurred_at=_staff_event_time(payload.get("created_at")) if aid_id else None)
+
+
+def _staff_event_time(value: object) -> str | None:
+    """Use the private macro message time, not its delayed processing time."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, UTC).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+        return stamp.isoformat() if stamp.tzinfo is not None else None
+    except ValueError:
+        return None
 
 
 def parse_conversation_changed(payload: object) -> ConversationChanged | None:
