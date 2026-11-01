@@ -118,7 +118,7 @@ def test_legacy_payload_with_inbox_channel_hint_is_still_supported():
 
 
 async def test_every_category_click_reaches_html_scenario_without_a_model_call():
-    from app.scenario import NEEDS, SCREENS
+    from app.scenario import NEEDS, SCREENS, STOCK_MENU_SPLITS
 
     for screen, need in NEEDS.items():
         api = FakeChatwoot()
@@ -133,7 +133,7 @@ async def test_every_category_click_reaches_html_scenario_without_a_model_call()
         parsed = parse_message_created({**_message_event(), **message, "id": 44})
         assert await service.process(parsed)
         assert api.conversation["custom_attributes"]["scenario"]["screen"] == screen
-        assert api.replies[-1]["text"] == SCREENS[screen]["texts"][0]
+        assert api.replies[-1]["text"] == SCREENS[screen]["texts"][int(screen in STOCK_MENU_SPLITS)]
         assert gateway.calls == 0
         assert not await service.process(parsed)
         assert len(api.replies) == 3

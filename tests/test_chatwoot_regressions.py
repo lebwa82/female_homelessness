@@ -45,9 +45,9 @@ async def test_housing_text_opens_the_same_scenario_as_the_button(monkeypatch, l
     service = ChatwootAgentService(api, gateway=gateway, duty_team_id=9)
     assert await service.process(event("мне некуда пойти помогите"))
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s21"
-    assert api.replies[-1]["text"] == SCREENS["s21"]["texts"][0]
+    assert api.replies[-1]["text"] == SCREENS["s21"]["texts"][1]
     assert [c.id for c in api.replies[-1]["choices"] if c.id.startswith("aid:")] == [
-        "aid:legal_consultation", "aid:psychologist_3_sessions",
+        "aid:legal_consultation",
     ]
     assert api.teams == []
     assert not api.conversation["custom_attributes"].get("handoff_requested")
@@ -64,7 +64,7 @@ async def test_bot_owned_housing_dialogue_can_leave_the_previous_false_safety_ro
     service = ChatwootAgentService(api, gateway=StubGateway(housing_evaluation()), duty_team_id=9)
     assert await service.process(event("мне некуда пойти помогите"))
     assert api.conversation["custom_attributes"]["scenario"]["screen"] == "s21"
-    assert api.replies[-1]["text"] == SCREENS["s21"]["texts"][0]
+    assert api.replies[-1]["text"] == SCREENS["s21"]["texts"][1]
     assert api.conversation["custom_attributes"]["reply_owner"] == "bot"
 
 

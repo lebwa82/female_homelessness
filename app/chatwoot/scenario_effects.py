@@ -15,6 +15,11 @@ from app.scenario import CERTIFICATES
 
 MSK = ZoneInfo("Europe/Moscow")
 SUCCESS_CONSULTATIONS = frozenset({"psychologist_3_sessions", "legal_consultation"})
+REFERRAL_JOB = "referral:source"
+REFERRAL_SOURCES = {
+    "website": "Сайт", "friend": "Знакомые", "organization": "Организация",
+    "leaflet": "Листовка", "other": "Другое", "skipped": "Пропущено",
+}
 NOTIFY = {"consultation_requested", "consultation_retry", "other_request",
           "certificate_waitlist", "certificate_problem", "negative_feedback", "human_message"}
 EVENT_TITLES = {
@@ -31,6 +36,7 @@ EVENT_TITLES = {
     "certificate_usage": "Уточнено использование сертификата",
     "general_feedback": "Получен отзыв",
     "consultation_feedback": "Получен отзыв о консультации",
+    "referral_source": "Уточнено, откуда узнали о нас",
 }
 
 
@@ -41,6 +47,8 @@ def scenario_note(payload: dict) -> str:
         item = get_aid_item(payload["aid_id"])
         lines.append(f"Вид помощи: {item.label if item else 'неизвестный вид помощи'}")
     answer = payload.get("label") or payload.get("answer")
+    if payload["kind"] == "referral_source":
+        answer = REFERRAL_SOURCES.get(payload.get("source"), "Источник не указан")
     if isinstance(answer, str) and answer:
         lines.append(f"Ответ: {answer}")
     if payload.get("text"):
@@ -70,6 +78,31 @@ def schedule(jobs: dict, key: str, screen: str, due: datetime, context: dict) ->
 
 def attrs(conversation: dict) -> dict:
     return conversation.get("custom_attributes") or {}
+
+
+def schedule_referral(jobs: dict, current: dict, now: datetime) -> dict:
+    if current.get("scenario_referral_source"):
+        return jobs
+    return schedule(jobs, REFERRAL_JOB, "s39", now + timedelta(minutes=3), {})
+
+
+def referral_ready(current: dict) -> bool:
+    scenario = current.get("scenario") or {}
+    if (scenario.get("awaiting_text") or current.get("scenario_pending_input")
+            or any(current.get(name) for name in (
+                "pending_aid_id", "pending_contact_method", "pending_city",
+                "pending_district", "pending_offer",
+            ))):
+        return False
+    if current.get("workflow_state") not in {
+        None, "scenario", "open_conversation", "discovering_need", "aid_requested", "closed",
+    }:
+        return False
+    # Completed requests and the main menu are safe. In particular, do not
+    # replace a consultation draft, the legal-topic form or another survey.
+    return scenario.get("screen") in {
+        "s2", "s31b", "s32b", "s33c", "s37b", "s34b", "s35c", "s38b", "i2", "s1a",
+    } or scenario.get("screen") == "s39" and scenario.get("job_key") == REFERRAL_JOB
 
 
 def review_job(jobs: dict, key: str, request: dict, end: datetime,
@@ -121,6 +154,7 @@ class ScenarioEffects:
             jobs = dict(current.get("scenario_followups") or {})
             now = self.clock()
             if event_kind == "consultation_requested":
+                new_request = key not in requests
                 request = requests.setdefault(key, {
                     "aid_id": payload["aid_id"], "state": "requested",
                     "requested_at": now.isoformat(),
@@ -133,6 +167,8 @@ class ScenarioEffects:
                                     {"aid_id": payload["aid_id"], "request_key": key})
                     if current.get("scenario_certificate"):
                         jobs[f"check:{key}"] = {**jobs[f"check:{key}"], "state": "cancelled"}
+                if new_request:
+                    jobs = schedule_referral(jobs, current, now)
             job_key = payload.get("job_key")
             if job_key and job_key in jobs:
                 jobs[job_key] = {**jobs[job_key], "state": "answered"}
@@ -141,9 +177,15 @@ class ScenarioEffects:
                     jobs[reminder] = {**jobs[reminder], "state": "cancelled"}
             # Save business facts before acknowledgement. They are not part of
             # the navigable workflow and cannot be undone by Back or /clear.
-            await self.api.set_custom_attributes(conversation_id, {
+            changes = {
                 "scenario_requests": requests, "scenario_followups": jobs,
-            })
+            }
+            if event_kind == "referral_source":
+                changes["scenario_referral_source"] = current.get("scenario_referral_source") or {
+                    "source": payload["source"], "answered_at": now.isoformat(),
+                    **({"text": payload["text"]} if payload.get("text") else {}),
+                }
+            await self.api.set_custom_attributes(conversation_id, changes)
             await self.api.add_private_note(
                 conversation_id, scenario_note(payload), event_key=f"scenario:{key}",
             )
@@ -176,7 +218,10 @@ class ScenarioEffects:
 
     async def certificate_delivered(self, conversation_id: int, key: str, context: dict) -> None:
         current = attrs(await self.api.get_conversation(conversation_id))
-        jobs = schedule(dict(current.get("scenario_followups") or {}), f"certificate:{key}",
+        jobs = dict(current.get("scenario_followups") or {})
+        if f"certificate:{key}" not in jobs:
+            jobs = schedule_referral(jobs, current, self.clock())
+        jobs = schedule(jobs, f"certificate:{key}",
                         "s5", self.clock() + timedelta(days=4), context)
         # When both kinds exist, block 5 asks about the certificate. Block 7
         # remains a separate review after an explicitly completed consultation.
@@ -383,6 +428,8 @@ class ScenarioEffects:
         # A due post-meeting review takes precedence over an older contact check.
         for key, job in sorted(jobs.items(), key=lambda p: (p[1]["screen"] != "s7", p[1]["due_at"])):
             if job["state"] != "pending" or datetime.fromisoformat(job["due_at"]) > now:
+                continue
+            if job["screen"] == "s39" and not referral_ready(current):
                 continue
             if job["screen"] == "i4":
                 # Also check stored messages: an incoming webhook may still be

@@ -87,22 +87,21 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 <ul class="tree">
   <li><a class="node" href="#s1"><span class="id">1</span>Старт</a>
     <ul>
-      <li><a class="node exit" href="#s1a"><span class="id">1а</span>Не сейчас</a></li>
+      <li><a class="node exit" href="#s2a"><span class="id">1а</span>Не сейчас</a></li>
       <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
       <li><a class="node" href="#s2"><span class="id">2</span>Что сейчас важнее всего</a>
         <ul>
           <li><a class="node pick" href="#s21"><span class="id">2.1</span>Жильё / некуда идти</a>
             <ul>
+              <li><a class="node" href="#s33"><span class="id">3.3</span>Сертификат на проживание → <span class="id">3.3.1</span> выдача → <span class="id">3.3.2</span> что ещё доступно</a></li>
               <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста → <span class="id">3.5.1</span> запрос и тема → <span class="id">3.5.3</span> записано</a></li>
-              <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
             </ul>
           </li>
           <li><a class="node pick" href="#s22"><span class="id">2.2</span>Продукты или лекарства</a>
             <ul>
-              <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога</a></li>
-              <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста</a></li>
-              <li><a class="node" href="#s38"><span class="id">3.8</span>Разговор с равной консультанткой</a></li>
+              <li><a class="node" href="#s31"><span class="id">3.1</span>Сертификат на продукты → <span class="id">3.1.1</span> выдача</a></li>
+              <li><a class="node" href="#s32"><span class="id">3.2</span>Сертификат на лекарства → <span class="id">3.2.1</span> выдача</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
             </ul>
           </li>
@@ -121,6 +120,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
           </li>
           <li><a class="node pick" href="#s25"><span class="id">2.5</span>Вопрос про детей</a>
             <ul>
+              <li><a class="node" href="#s37"><span class="id">3.7</span>Сертификат на детские товары → <span class="id">3.7.1</span> выдача</a></li>
               <li><a class="node" href="#s35"><span class="id">3.5</span>Консультация юриста</a></li>
               <li><a class="node" href="#s34"><span class="id">3.4</span>Консультация психолога</a></li>
               <li><a class="node" href="#i1"><span class="id">И1</span>Поговорить с человеком</a></li>
@@ -135,6 +135,17 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 </ul>
 
 <span class="branchlabel">Кнопка «Здесь нет того, что мне нужно» есть на каждом из экранов 2.1–2.5 и ведёт в одну и ту же ветку 3.6</span>
+
+<span class="branchlabel">Если сертификаты закончились, экраны <a href="#s21">2.1</a>, <a href="#s22">2.2</a> и <a href="#s25">2.5</a> показываются в другом варианте — без сертификата, только с консультациями и разговором с человеком. Когда сертификаты появляются, бот автоматически возвращается к обычному варианту.</span>
+
+<span class="branchlabel">Сразу после выдачи сертификата или принятия запроса на консультацию — всем</span>
+<ul class="tree">
+  <li><a class="node" href="#s39"><span class="id">3.9</span>Как узнали о нас</a>
+    <ul>
+      <li><a class="node" href="#s39b"><span class="id">3.9.1</span>«Другое» → можно написать или пропустить</a></li>
+    </ul>
+  </li>
+</ul>
 
 <span class="branchlabel">Через четыре дня — всем, кто получил помощь</span>
 <ul class="tree">
@@ -193,7 +204,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 <h2><span class="n">03</span>Первый разговор</h2>
 <section class="screen" id="s1">
   <div class="shead"><span class="sid">1</span><span class="stitle">Старт</span>
-  <span class="swhen">Появляется после команды /start или перехода по ссылке или QR-коду.</span></div>
+  <span class="swhen">Появляется сразу после перехода по ссылке или QR-коду. Сюда же ведёт кнопка «Вернуться в начало».</span></div>
   <div class="bubble">
     <p>Здравствуйте!</p>
     <p>Мы — команда поддержки для женщин. Здесь можно бесплатно получить помощь — представляться или объяснять свою ситуацию не обязательно.</p>
@@ -239,15 +250,16 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 </section>
 <section class="screen" id="s21">
   <div class="shead"><span class="sid">2.1</span><span class="stitle">Жильё, некуда идти</span>
-  <span class="swhen">Выбрана кнопка «Жильё / некуда идти».</span></div>
+  <span class="swhen">Выбрана кнопка «Жильё / некуда идти». У экрана два варианта: обычный и на случай, когда свободных сертификатов нет.</span></div>
   <div class="bubble">
-    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с оплатой нескольких ночей в хостеле, но можно выбрать консультацию юриста, психолога или разговор с человеком из команды поддержки.</p>
+    <p>Сейчас мы можем помочь с оплатой нескольких ночей в хостеле, консультацией юриста или разговором с человеком из команды поддержки.</p>
     <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
   <div class="keys">
+    <a class="key" href="#s33">Сертификат на несколько ночей в хостеле</a>
+    <span class="keyrule"></span>
     <a class="key" href="#s35">Консультация юриста</a>
-    <a class="key" href="#s34">Консультация психолога</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
     <span class="keyrule"></span>
@@ -255,17 +267,50 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
     <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться в начало</a>
   </div>
+  <div class="variant">Если свободных сертификатов на проживание нет</div>
+  <div class="bubble">
+    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с оплатой нескольких ночей в хостеле, но можно выбрать консультацию юриста или разговор с человеком из команды поддержки.</p>
+    <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
+    <p>Что вам сейчас нужнее?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s35">Консультация юриста</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s2">Вернуться в начало</a>
+  </div>
+  <div class="second">Когда сертификаты появляются, бот автоматически возвращается к обычному варианту экрана.</div>
 </section>
 <section class="screen" id="s22">
   <div class="shead"><span class="sid">2.2</span><span class="stitle">Продукты или лекарства</span>
-  <span class="swhen">Выбрана кнопка «Продукты или лекарства».</span></div>
+  <span class="swhen">Выбрана кнопка «Продукты или лекарства». У экрана два варианта: обычный и на случай, когда свободных сертификатов нет.</span></div>
   <div class="bubble">
-    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с оплатой продуктов или лекарств, но можно выбрать консультацию психолога, юриста, разговор с равной консультанткой.</p>
+    <p>Сейчас мы можем помочь с оплатой продуктов или лекарств.</p>
+    <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
+    <p>Что вам сейчас нужнее?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s31">Сертификат на продукты</a>
+    <a class="key" href="#s32">Сертификат на лекарства</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s2">Вернуться в начало</a>
+  </div>
+  <div class="variant">Если свободных сертификатов на продукты и лекарства нет</div>
+  <div class="bubble">
+    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с оплатой продуктов или лекарств, но можно выбрать консультацию психолога, юриста или разговор с равной консультанткой.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
   <div class="keys">
     <a class="key" href="#s34">Консультация психолога</a>
     <a class="key" href="#s35">Консультация юриста</a>
+    <span class="keyrule"></span>
     <a class="key" href="#s38">Разговор с равной консультанткой</a>
     <span class="keyrule"></span>
     <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
@@ -274,6 +319,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
     <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться в начало</a>
   </div>
+  <div class="second">Когда сертификаты появляются, бот автоматически возвращается к обычному варианту экрана.</div>
 </section>
 <section class="screen" id="s23">
   <div class="shead"><span class="sid">2.3</span><span class="stitle">Документы, юридический вопрос</span>
@@ -314,9 +360,27 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 </section>
 <section class="screen" id="s25">
   <div class="shead"><span class="sid">2.5</span><span class="stitle">Вопрос про детей</span>
-  <span class="swhen">Выбрана кнопка «Вопрос про детей».</span></div>
+  <span class="swhen">Выбрана кнопка «Вопрос про детей». У экрана два варианта: обычный и на случай, когда свободных сертификатов нет.</span></div>
   <div class="bubble">
-    <p>Из-за большого количества обращений сейчас мы временно не можем помочь покупкой товаров для детей, но можно выбрать консультацией юриста или психолога, а также разговором с человеком из команды поддержки.</p>
+    <p>Сейчас мы можем помочь с покупкой товаров для детей, консультацией юриста или психолога, а также разговором с человеком из команды поддержки.</p>
+    <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
+    <p>Что вам сейчас нужнее?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s37">Сертификат на товары для детей</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s35">Консультация юриста</a>
+    <a class="key" href="#s34">Консультация психолога</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s36">Здесь нет того, что мне нужно</a>
+    <span class="keyrule"></span>
+    <a class="key human" href="#i1">💬 Поговорить с человеком</a>
+    <span class="keyrule"></span>
+    <a class="key quiet" href="#s2">Вернуться в начало</a>
+  </div>
+  <div class="variant">Если свободных сертификатов на товары для детей нет</div>
+  <div class="bubble">
+    <p>Из-за большого количества обращений сейчас мы временно не можем помочь с покупкой товаров для детей, но можно выбрать консультацию юриста или психолога, а также разговор с человеком из команды поддержки.</p>
     <p>Объяснять, почему вам нужна помощь, не обязательно.</p>
     <p>Что вам сейчас нужнее?</p>
   </div>
@@ -330,12 +394,13 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
     <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться в начало</a>
   </div>
+  <div class="second">Когда сертификаты появляются, бот автоматически возвращается к обычному варианту экрана.</div>
 </section>
 <section class="screen" id="s31">
   <div class="shead"><span class="sid">3.1</span><span class="stitle">Продукты: описание</span>
   <span class="swhen">Выбран сертификат на продукты на экране 2.2.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат в магазин «Пятёрочка» на 3 000 ₽ и купить продукты, которые нужны именно вам.</p>
+    <p>Можно получить электронный сертификат в магазин «Пятёрочка» на 2 000 ₽ и купить продукты, которые нужны именно вам.</p>
     <p>Присылать список покупок, чеки или объяснять свой выбор не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
     <p>Срок и условия использования указаны в самом сертификате.</p>
@@ -350,7 +415,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.1.1</span><span class="stitle">Продукты: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат в магазин «Пятёрочка» на 3 000 ₽:</p>
+    <p>Вот ваш сертификат в магазин «Пятёрочка» на 2 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
     <p>Как воспользоваться:</p>
     <ul>
@@ -374,7 +439,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.2</span><span class="stitle">Лекарства: описание</span>
   <span class="swhen">Выбран сертификат на лекарства на экране 2.2.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат Ozon на 3 000 ₽.</p>
+    <p>Можно получить электронный сертификат Ozon на 2 000 ₽.</p>
     <p>Им можно оплатить лекарства, средства гигиены и другие нужные товары.</p>
     <p>Что именно покупать, решаете вы. Отчитываться о покупках не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
@@ -390,7 +455,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.2.1</span><span class="stitle">Лекарства: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат на лекарства на 3 000 ₽:</p>
+    <p>Вот ваш сертификат на лекарства на 2 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
     <p class="step-head">1. Зарегистрируйтесь или войдите на Ozon</p>
     <ul>
@@ -425,7 +490,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.3</span><span class="stitle">Проживание: описание</span>
   <span class="swhen">Выбран сертификат на проживание на экране 2.1.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат на проживание на 3 000 ₽. Обычно этой суммы хватает примерно на три ночи в хостеле.</p>
+    <p>Можно получить электронный сертификат на проживание на 2 000 ₽. Обычно этой суммы хватает примерно на три ночи в хостеле.</p>
     <p>Вы сами выбираете город, даты и место на Ozon Travel. Сообщать нам, где вы остановитесь и почему понадобилось жильё, не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
     <p>Срок и условия использования указаны в самом сертификате.</p>
@@ -440,7 +505,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.3.1</span><span class="stitle">Проживание: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат на проживание на 3 000 ₽:</p>
+    <p>Вот ваш сертификат на проживание на 2 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
     <p class="step-head">1. Активируйте сертификат</p>
     <ul>
@@ -490,7 +555,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.7</span><span class="stitle">Товары для детей: описание</span>
   <span class="swhen">Выбран сертификат на товары для детей на экране 2.5.</span></div>
   <div class="bubble">
-    <p>Можно получить электронный сертификат в магазин «Пятёрочка» на 3 000 ₽.</p>
+    <p>Можно получить электронный сертификат в магазин «Пятёрочка» на 2 000 ₽.</p>
     <p>Им можно оплатить детское питание, подгузники, средства гигиены и другие товары для детей.</p>
     <p>Что именно покупать, решаете вы. Отчитываться о покупках не обязательно.</p>
     <p>Сертификат придёт прямо в этот чат.</p>
@@ -506,7 +571,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
   <div class="shead"><span class="sid">3.7.1</span><span class="stitle">Товары для детей: сертификат и инструкция</span>
   <span class="swhen">Нажато «Выбрать сертификат».</span></div>
   <div class="bubble">
-    <p>Вот ваш сертификат в магазин «Пятёрочка» на 3 000 ₽:</p>
+    <p>Вот ваш сертификат в магазин «Пятёрочка» на 2 000 ₽:</p>
     <p><span class="ph">[НОМЕР СЕРТИФИКАТА]</span></p>
     <p>Как воспользоваться:</p>
     <ul>
@@ -665,6 +730,48 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
     <span class="keyrule"></span>
     <a class="key quiet" href="#s2">Вернуться в начало</a>
     <a class="key quiet" href="#i2">Завершить</a>
+  </div>
+</section>
+<section class="screen" id="s39">
+  <div class="shead"><span class="sid">3.9</span><span class="stitle">Как узнали о нас</span>
+  <span class="swhen">Отдельным сообщением, через несколько минут после того как сертификат выдан (экраны 3.1.1, 3.2.1, 3.3.1, 3.7.1) или запрос на консультацию принят (экраны 3.4.1, 3.5.1, 3.8.1).</span></div>
+  <div class="bubble">
+    <p>Кстати, можно спросить — как вы узнали про нас?</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s39c">Сама нашла сайт в интернете</a>
+    <a class="key" href="#s39c">Рассказала подруга или знакомая</a>
+    <a class="key" href="#s39c">Направили из другой организации</a>
+    <a class="key" href="#s39c">Дали листовку</a>
+    <span class="keyrule"></span>
+    <a class="key" href="#s39b">Другое</a>
+  </div>
+</section>
+<section class="screen" id="s39b">
+  <div class="shead"><span class="sid">3.9.1</span><span class="stitle">«Другое» — можно написать</span>
+  <span class="swhen">Выбрано «Другое».</span></div>
+  <div class="bubble">
+    <p>Если хотите, напишите в двух словах. Можно и пропустить.</p>
+  </div>
+  <div class="keys">
+    <a class="key" href="#s39c">Написать</a>
+    <a class="key quiet" href="#s39c">Пропустить</a>
+  </div>
+</section>
+<section class="screen" id="s39c">
+  <div class="shead"><span class="sid">3.9.2</span><span class="stitle">Спасибо</span>
+  <span class="swhen">После любого варианта ответа или пропуска. Дальше — как обычно.</span></div>
+  <div class="bubble">
+    <p>Спасибо, что поделились! Если вы знаете женщину, которой сейчас тоже может быть непросто, можете переслать ей ссылку на этот чат. Здесь можно получить поддержку анонимно, без объяснений и условий.</p>
+  </div>
+  <div class="keys">
+    <a class="key quiet" href="#i2">Завершить</a>
+    <a class="key" href="#s39c">Скопировать ссылку</a>
+    <a class="key quiet" href="#s2">Вернуться в начало</a>
+  </div>
+  <div class="second">По кнопке «Скопировать ссылку» появляется ссылка на бот:</div>
+  <div class="bubble">
+    <p>t.me/nevidima_bot</p>
   </div>
 </section>
 <h2><span class="n">04</span>Через четыре дня</h2>
@@ -1126,7 +1233,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 <section class="screen" id="i3">
   <div class="shead"><span class="sid">И3</span><span class="stitle">Вернуться в начало</span></div>
   <div class="keys">
-    <a class="key quiet" href="#s2">Вернуться в начало — экран 2</a>
+    <a class="key quiet" href="#s2">Вернуться в начало</a>
   </div>
   <div class="second">«Вернуться в начало» открывает экран 2 «Что сейчас важнее всего?» без повторного приветствия. Переписка, сохранённые заявки и выданные сертификаты не стираются. На экранах 1 и 2 эта кнопка не отображается.</div>
 </section>
@@ -1183,7 +1290,7 @@ a.key.human:hover{background:var(--flag);color:#fff;border-style:solid}
 </section>
 <section class="screen" id="i8">
   <div class="shead"><span class="sid">И8</span><span class="stitle">Сертификатов сейчас нет</span>
-  <span class="swhen">Она нажала «Выбрать сертификат», а свободных сертификатов не осталось.</span></div>
+  <span class="swhen">Она нажала «Выбрать сертификат», а свободных сертификатов не осталось. Обычно до этого не доходит: когда сертификатов нет, экраны 2.1, 2.2 и 2.5 сразу показываются в варианте без сертификата. Этот экран нужен на случай, если сертификаты закончились, пока она выбирала.</span></div>
   <div class="bubble">
     <p>Сейчас свободных сертификатов этого вида нет.</p>
     <p>Я могу передать ваш запрос человеку из команды, чтобы вам написали, когда они появятся.</p>

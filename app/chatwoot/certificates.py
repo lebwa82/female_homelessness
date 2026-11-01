@@ -25,6 +25,14 @@ POOL_AIDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "pyaterochka": ("Пятёрочка", ("food_card", "children_card")),
 }
 
+_CLAIMABLE_CERTIFICATE_SQL = """
+    c.record_kind = 'certificate'
+    AND c.status = 'available'
+    AND (c.valid_from IS NULL OR c.valid_from <= now())
+    AND c.expires_at > now()
+    AND ((NOT c.is_test AND c.nominal_rubles = 2000) OR (c.is_test AND :allow_test))
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class CertificatePoolStock:
@@ -82,10 +90,13 @@ def database_url(password: str) -> str:
 
 
 class CertificateInventory:
-    def __init__(self, database_url: str, *, identity_key: str, account_id: int) -> None:
+    def __init__(
+        self, database_url: str, *, identity_key: str, account_id: int, allow_test: bool = False,
+    ) -> None:
         self._engine: AsyncEngine = create_async_engine(database_url, pool_pre_ping=True)
         self._identity_key = identity_key.encode()
         self._account_id = account_id
+        self._allow_test = allow_test
 
     async def initialize(self) -> None:
         async with self._engine.begin() as connection:
@@ -183,6 +194,16 @@ class CertificateInventory:
                 reason=reason,
             )
 
+    async def available_aid_ids(self) -> frozenset[str]:
+        """Read currently claimable aids globally, without reserving a document."""
+        async with self._engine.connect() as connection:
+            rows = await connection.execute(text(f"""
+                SELECT DISTINCT a.aid_id FROM women_help_pdf_certificates c
+                JOIN women_help_certificate_pool_aids a ON a.pool_id = c.pool_id
+                WHERE {_CLAIMABLE_CERTIFICATE_SQL}
+            """), {"allow_test": self._allow_test})
+            return frozenset(rows.scalars())
+
     async def claim(
         self, aid_id: str, issuance_key: str, recipient_id: int
     ) -> CertificateClaimResult:
@@ -197,18 +218,13 @@ class CertificateInventory:
             existing = await self._existing_claim(connection, params)
             if existing is not None:
                 return existing
-            row = (await connection.execute(text("""
+            row = (await connection.execute(text(f"""
                 SELECT c.id FROM women_help_pdf_certificates c
                 JOIN women_help_certificate_pool_aids a ON a.pool_id = c.pool_id
-                WHERE a.aid_id = :aid_id AND c.record_kind = 'certificate'
-                  AND c.status = 'available'
-                  AND (c.valid_from IS NULL OR c.valid_from <= now())
-                  AND c.expires_at > now()
-                  AND (c.is_test OR (c.nominal_rubles = 3000
-                       AND c.expires_at >= now() + interval '7 days'))
+                WHERE a.aid_id = :aid_id AND {_CLAIMABLE_CERTIFICATE_SQL}
                 ORDER BY c.expires_at, c.id
                 FOR UPDATE OF c SKIP LOCKED LIMIT 1
-            """), {"aid_id": aid_id})).first()
+            """), {"aid_id": aid_id, "allow_test": self._allow_test})).first()
             if row is None:
                 return CertificateClaimResult("unavailable")
             issued = (await connection.execute(text("""
@@ -242,6 +258,8 @@ class CertificateInventory:
               AND c.record_kind = 'certificate'
         """), params)).mappings().first()
         if existing is not None:
+            if existing["is_test"] and not self._allow_test:
+                return CertificateClaimResult("already_issued")
             return CertificateClaimResult("issued", _certificate(existing))
         if exact_only:
             return None
@@ -251,7 +269,8 @@ class CertificateInventory:
             WHERE c.recipient_hash = :recipient_hash LIMIT 1
         """), params)).mappings().first()
         if prior is not None:
-            if prior["record_kind"] == "historical_issuance":
+            if (prior["record_kind"] == "historical_issuance"
+                    or (prior["is_test"] and not self._allow_test)):
                 return CertificateClaimResult("already_issued")
             # A transport failure must reuse the existing bearer document.
             if prior["status"] in {"reserved", "failed"}:
@@ -479,24 +498,20 @@ class CertificateInventory:
 
     async def stock(self) -> tuple[CertificatePoolStock, ...]:
         async with self._engine.connect() as connection:
-            rows = (await connection.execute(text("""
+            rows = (await connection.execute(text(f"""
                 SELECT p.slug, p.provider,
                     count(c.id) FILTER (
-                        WHERE c.status = 'available'
-                          AND (c.valid_from IS NULL OR c.valid_from <= now())
-                          AND c.expires_at > now()
+                        WHERE {_CLAIMABLE_CERTIFICATE_SQL}
                     )::int AS available,
                     count(c.id)::int AS total,
                     min(c.expires_at) FILTER (
-                        WHERE c.status = 'available'
-                          AND (c.valid_from IS NULL OR c.valid_from <= now())
-                          AND c.expires_at > now()
+                        WHERE {_CLAIMABLE_CERTIFICATE_SQL}
                     ) AS nearest_expiry
                 FROM women_help_certificate_pools p
                 LEFT JOIN women_help_pdf_certificates c
                     ON c.pool_id = p.id AND c.record_kind = 'certificate'
                 GROUP BY p.id, p.slug, p.provider ORDER BY p.slug
-            """))).mappings()
+            """), {"allow_test": self._allow_test})).mappings()
             return tuple(CertificatePoolStock(**row) for row in rows)
 
     async def reset_test(self) -> int:

@@ -21,7 +21,7 @@ from scripts.backfill_certificate_history import revalidate, verify_saved
 
 
 @pytest.fixture
-async def inventory():
+async def inventory(request):
     socket = os.environ.get("CERTIFICATE_TRACKING_TEST_SOCKET")
     if not socket:
         pytest.skip("explicit disposable local PostgreSQL socket required")
@@ -35,7 +35,10 @@ async def inventory():
     schema = "certificate_test_" + uuid.uuid4().hex
     async with admin.begin() as connection:
         await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    instance = CertificateInventory(str(url), identity_key="synthetic-test-key", account_id=1)
+    options = {"allow_test": True} if getattr(request, "param", False) else {}
+    instance = CertificateInventory(
+        str(url), identity_key="synthetic-test-key", account_id=1, **options,
+    )
     await instance._engine.dispose()
     instance._engine = create_async_engine(
         url, connect_args={"server_settings": {"search_path": schema}},
@@ -56,23 +59,133 @@ def history(contact=7, message=41):
     )
 
 
-async def document(inventory, number=1):
+async def document(inventory, number=1, *, provider="pyaterochka"):
     async with inventory._engine.begin() as connection:
         return (await connection.execute(text("""
             INSERT INTO women_help_pdf_certificates
                 (pool_id, nominal_rubles, activation_code, serial_number, expires_at,
                  pdf_bucket, pdf_object_key, pdf_sha256, pdf_size, pdf_filename)
-            SELECT id, 3000, :code, :serial, now() + interval '30 days',
+            SELECT id, 2000, :code, :serial, now() + interval '30 days',
                 'test-only', :object, :sha, 42, 'synthetic.pdf'
-            FROM women_help_certificate_pools WHERE slug = 'pyaterochka'
+            FROM women_help_certificate_pools WHERE slug = :provider
             RETURNING id
         """), {"code": f"INVALID-{number}", "serial": f"INVALID-SERIAL-{number}",
-               "object": f"synthetic/{number}", "sha": f"{number:064x}"})).scalar_one()
+               "object": f"synthetic/{number}", "sha": f"{number:064x}",
+               "provider": provider})).scalar_one()
 
 
 async def scalar(inventory, query):
     async with inventory._engine.connect() as connection:
         return (await connection.execute(text(query))).scalar_one()
+
+
+@pytest.mark.parametrize(
+    "inventory,nominal,is_test,status,valid_from_seconds,expiry_seconds,eligible", [
+        (False, 2000, False, "available", None, 3600, True),
+        (False, 2000, False, "available", 0, 3600, True),
+        (False, 2000, False, "available", -3600, 3600, True),
+        (False, 2000, False, "available", 3600, 7200, False),
+        (False, 2000, False, "available", None, 0, False),
+        (False, 2000, False, "available", None, -3600, False),
+        (False, 3000, False, "available", None, 2592000, False),
+        (False, 1000, False, "available", None, 2592000, False),
+        (False, 2000, True, "available", None, 3600, False),
+        (False, 3000, True, "available", None, 3600, False),
+        (False, 2000, False, "reserved", None, 3600, False),
+        (False, 2000, False, "submitted", None, 3600, False),
+        (False, 2000, False, "delivered", None, 3600, False),
+        (False, 2000, False, "failed", None, 3600, False),
+        (True, 2000, True, "available", None, 3600, True),
+        (True, 3000, True, "available", None, 3600, True),
+        (True, 3000, False, "available", None, 3600, False),
+        (True, 2000, True, "available", 3600, 7200, False),
+        (True, 2000, True, "available", None, 0, False),
+        (True, 2000, True, "reserved", None, 3600, False),
+    ], indirect=["inventory"],
+)
+async def test_claim_menu_and_stock_share_actual_document_eligibility(
+    inventory, nominal, is_test, status, valid_from_seconds, expiry_seconds, eligible,
+):
+    await inventory.initialize()
+    row_id = await document(inventory)
+    async with inventory._engine.begin() as connection:
+        await connection.execute(text("""
+            UPDATE women_help_pdf_certificates
+            SET nominal_rubles = :nominal, is_test = :is_test, status = :status,
+                valid_from = now() + CAST(:valid_from_seconds AS integer) * interval '1 second',
+                expires_at = now() + CAST(:expiry_seconds AS integer) * interval '1 second'
+            WHERE id = :row_id
+        """), {"nominal": nominal, "is_test": is_test, "status": status,
+               "valid_from_seconds": valid_from_seconds, "expiry_seconds": expiry_seconds,
+               "row_id": row_id})
+
+    expected_aids = frozenset({"food_card", "children_card"}) if eligible else frozenset()
+    assert await inventory.available_aid_ids() == expected_aids
+    stock = {pool.slug: pool for pool in await inventory.stock()}
+    assert stock["pyaterochka"].total == 1
+    assert stock["pyaterochka"].available == int(eligible)
+    assert (stock["pyaterochka"].nearest_expiry is not None) == eligible
+    assert stock["ozon"].total == stock["ozon"].available == 0
+
+    claimed = await inventory.claim("food_card", "eligibility", 8)
+    assert claimed.status == ("issued" if eligible else "unavailable")
+    if eligible:
+        assert claimed.certificate.nominal_rubles == nominal
+        assert claimed.certificate.expires_at == stock["pyaterochka"].nearest_expiry
+    assert await inventory.available_aid_ids() == frozenset()
+    assert all(pool.available == 0 for pool in await inventory.stock())
+
+
+async def test_available_aids_follow_shared_pool_reservation_and_recipient_limit(inventory):
+    await inventory.initialize()
+    await document(inventory)
+    await document(inventory, 2, provider="ozon")
+    assert await inventory.available_aid_ids() == frozenset({
+        "food_card", "children_card", "medicine_card", "hostel_3_nights",
+    })
+
+    first = await inventory.claim("food_card", "first", 8)
+    assert first.status == "issued"
+    assert await inventory.available_aid_ids() == frozenset({"medicine_card", "hostel_3_nights"})
+    retry = await inventory.claim("medicine_card", "different-aid", 8)
+    assert retry.status == "issued" and retry.certificate == first.certificate
+    await inventory.mark_submitted("first", 90)
+    assert (await inventory.claim("medicine_card", "new-request", 8)).status == "already_issued"
+    assert await inventory.available_aid_ids() == frozenset({"medicine_card", "hostel_3_nights"})
+
+    claims = await asyncio.gather(
+        inventory.claim("medicine_card", "parallel-first", 9),
+        inventory.claim("hostel_3_nights", "parallel-second", 10),
+    )
+    assert sorted(claim.status for claim in claims) == ["issued", "unavailable"]
+    assert await inventory.available_aid_ids() == frozenset()
+
+
+@pytest.mark.parametrize("inventory", [True], indirect=True)
+@pytest.mark.parametrize("status", ["reserved", "failed", "submitted", "delivered"])
+async def test_default_inventory_never_resumes_or_replaces_a_prior_test_document(inventory, status):
+    await inventory.initialize()
+    row_id = await document(inventory)
+    async with inventory._engine.begin() as connection:
+        await connection.execute(text("""
+            UPDATE women_help_pdf_certificates SET is_test = true WHERE id = :row_id
+        """), {"row_id": row_id})
+    assert (await inventory.claim("food_card", "synthetic-claim", 8)).status == "issued"
+    async with inventory._engine.begin() as connection:
+        await connection.execute(text("""
+            UPDATE women_help_pdf_certificates SET status = :status WHERE id = :row_id
+        """), {"row_id": row_id, "status": status})
+    await document(inventory, 2)
+    inventory._allow_test = False
+
+    for result in (
+        await inventory.resume("food_card", "synthetic-claim", 8),
+        await inventory.claim("food_card", "synthetic-claim", 8),
+        await inventory.claim("children_card", "new-claim", 8),
+    ):
+        assert result.status == "already_issued" and result.certificate is None
+    assert await inventory.available_aid_ids() == frozenset({"food_card", "children_card"})
+    assert sum(pool.available for pool in await inventory.stock()) == 1
 
 
 async def test_migration_of_existing_document_table_preserves_real_pdf(inventory):
@@ -114,6 +227,7 @@ async def test_seventeen_history_rows_are_atomic_repeatable_and_not_stock(invent
     assert await inventory.import_historical_issuances(rows) == (17, 0)
     assert await inventory.import_historical_issuances(rows) == (0, 17)
     assert sum(pool.total for pool in await inventory.stock()) == 0
+    assert await inventory.available_aid_ids() == frozenset()
     for row in rows:
         claim = await inventory.claim("food_card", "unused", row.contact_id)
         assert claim.status == "already_issued" and claim.certificate is None

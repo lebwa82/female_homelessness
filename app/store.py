@@ -457,7 +457,7 @@ class InMemoryConversationStore:
         request = StoredAidRequest(
             id=next(self._ids),
             conversation_id=record.id,
-            aid_id=aid_id,
+            aid_id=certificate.aid_id if certificate is not None else aid_id,
             contact_method=contact_method,
             contact_value=contact_value,
             city=city,

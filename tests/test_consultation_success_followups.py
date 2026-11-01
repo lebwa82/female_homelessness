@@ -63,7 +63,9 @@ async def test_new_consultation_request_waits_for_staff_confirmation(runtime, ai
         'key': KEY, 'kind': 'consultation_requested', 'aid_id': aid,
     })])
     assert attrs(api)['scenario_requests'][KEY]['state'] == 'requested'
-    assert attrs(api)['scenario_followups'] == {}
+    # Only the separate source-of-referral question is scheduled at request time.
+    assert set(attrs(api)['scenario_followups']) == {'referral:source'}
+    assert attrs(api)['scenario_followups']['referral:source']['screen'] == 's39'
     service._scenario_effects.clock = lambda: NOW+timedelta(days=10)
     assert not await service.send_due_followup(23)
     await service.process(completion(aid))

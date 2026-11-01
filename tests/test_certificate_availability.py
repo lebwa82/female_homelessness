@@ -324,6 +324,7 @@ async def test_reserved_certificate_resumes_by_existing_issuance_without_new_cla
 async def test_inventory_resume_is_exact_and_select_only(matching_key, recipient_id, status):
     inventory = object.__new__(CertificateInventory)
     inventory._identity_key, inventory._account_id = b"test-only", 1
+    inventory._allow_test = True
     now = datetime.now(UTC)
     row = {
         "selected_aid_id": "food_card", "provider": "test", "nominal_rubles": 300,

@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
@@ -68,3 +70,31 @@ async def test_recipient_hash_is_stable_and_scoped_to_chatwoot_account() -> None
         await first.close()
         await second.close()
         await other_account.close()
+
+
+@pytest.mark.parametrize("aids", [(), ("food_card",), ("food_card", "children_card", "food_card")])
+@pytest.mark.parametrize("allow_test", [None, False, True])
+async def test_available_aid_ids_is_a_global_read_only_snapshot(aids, allow_test, monkeypatch) -> None:
+    connection = AsyncMock()
+    result = MagicMock()
+    result.scalars.return_value = aids
+    connection.execute.return_value = result
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = connection
+    monkeypatch.setattr(certificates, "create_async_engine", lambda *args, **kwargs: engine)
+    options = {} if allow_test is None else {"allow_test": allow_test}
+    inventory = CertificateInventory("synthetic", identity_key="test", account_id=1, **options)
+
+    available = await inventory.available_aid_ids()
+
+    assert available == frozenset(aids)
+    assert isinstance(available, frozenset)
+    inventory._engine.begin.assert_not_called()
+    connection.execute.assert_awaited_once()
+    args, kwargs = connection.execute.call_args
+    assert len(args) == 2 and not kwargs
+    assert args[1] == {"allow_test": bool(allow_test)}
+    query = " ".join(str(args[0]).split())
+    assert query.startswith("SELECT DISTINCT a.aid_id ")
+    assert "recipient_hash" not in query
+    assert "FOR UPDATE" not in query

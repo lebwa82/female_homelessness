@@ -26,7 +26,7 @@ from scripts.import_scenario import SOURCE, TARGET, compile_copy
 
 def test_html_copy_is_generated_and_has_valid_targets():
     assert TARGET.read_text() == compile_copy(SOURCE.read_text())
-    assert len(SCREENS) == 57
+    assert len(SCREENS) == 60
     assert all(b["target"] in SCREENS for s in SCREENS.values() for b in s["buttons"])
 
 
@@ -96,7 +96,6 @@ async def test_start_menu_and_catalog_are_explicit(flow):
 @pytest.mark.parametrize("need,screen,alternatives", (
     ("housing", "s21", (
         ("legal_consultation", "Консультация юриста", "s35"),
-        ("psychologist_3_sessions", "Консультация психолога", "s34"),
     )),
     ("food_money", "s22", (
         ("psychologist_3_sessions", "Консультация психолога", "s34"),
@@ -323,12 +322,15 @@ async def test_partial_delivery_retry_does_not_lose_or_duplicate_consultation():
     assert await restarted.process(event(callback, 45))
     assert len(api.conversation["custom_attributes"]["scenario_requests"]) == 1
     jobs = api.conversation["custom_attributes"]["scenario_followups"]
-    assert set(jobs) == {"idle:0"}  # Consultation surveys now wait for staff confirmation.
+    # Outcome surveys still wait for staff; only the separate source survey is new.
+    assert set(jobs) == {"idle:0", "referral:source"}
     assert jobs["idle:0"]["state"] == "cancelled"
     assert len([n for n in api.note_keys if n.startswith("scenario:")]) == 1
     await restarted.process(event("/clear", 46))
     assert len(api.conversation["custom_attributes"]["scenario_requests"]) == 1
-    assert set(api.conversation["custom_attributes"]["scenario_followups"]) == {"idle:0"}
+    assert set(api.conversation["custom_attributes"]["scenario_followups"]) == {
+        "idle:0", "referral:source",
+    }
     assert not await restarted.process(event(callback, 45))
 
 
@@ -344,6 +346,8 @@ async def test_no_survey_while_human_no_expired_reminder():
     await service._scenario_effects.certificate_delivered(23, "cert", {
         "aid_id": "food_card", "expires_at": (now + timedelta(days=7)).isoformat(),
     })
+    # This regression isolates the certificate reminder, not the independent referral survey.
+    api.conversation["custom_attributes"]["scenario_followups"]["referral:source"]["state"] = "answered"
     service._scenario_effects.clock = lambda: now + timedelta(days=4)
     api.conversation["custom_attributes"].update(reply_owner="human", ownership_version=2)
     api.conversation["assignee_id"] = 4

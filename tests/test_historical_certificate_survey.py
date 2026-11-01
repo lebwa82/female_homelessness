@@ -71,7 +71,7 @@ def test_ordinary_certificate_copy_keeps_original_timing_and_expiry():
 def flow():
     store = InMemoryConversationStore()
     record = ConversationRecord(1, "chatwoot", 1, 1, None)
-    return ScenarioFlow(SimpleNamespace(store=store)), record, store
+    return ScenarioFlow(SimpleNamespace(store=store, certificate_available=None)), record, store
 
 
 @pytest.mark.parametrize(("aid_id", "subject"), CERTIFICATE_SUBJECTS)

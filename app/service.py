@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -111,12 +111,20 @@ def _diagnostics_unavailable(error_type: str | None = None) -> AgentEvaluation:
 
 class ConversationService:
     def __init__(self, store: Any | None = None, gateway: YandexAgentGateway | None = None,
-                 *, html_scenario: bool = False) -> None:
+                 *, html_scenario: bool = False,
+                 certificate_available: Callable[[], Awaitable[frozenset[str]]] | None = None) -> None:
         self.store = store or PostgresConversationStore()
         self.gateway = gateway or YandexAgentGateway()
         self._conversation_locks: dict[tuple[str, int], asyncio.Lock] = {}
         # The retired standalone entrypoint retains compatibility with saved old callbacks.
         self.scenario_flow = ScenarioFlow(self) if html_scenario else None
+        self.certificate_available = certificate_available
+
+    async def available_certificate_aids(self) -> frozenset[str]:
+        # Missing inventory access must never make a certificate look available.
+        if self.certificate_available is None:
+            return frozenset()
+        return await self.certificate_available()
 
     def _welcome_turn(self) -> AgentTurn:
         return render("s1") if self.scenario_flow else self._turn(WELCOME, CONTINUE_CHOICES)
@@ -726,7 +734,9 @@ class ConversationService:
             history = await self.store.model_history(record)
             knowledge_query = " ".join(content for role, content in history if role == "user")
             verified_articles = find_verified_articles(knowledge_query)
-            new_certificates_unavailable = self.scenario_flow is not None
+            certificate_aids = (await self.available_certificate_aids()
+                                if self.scenario_flow else frozenset(CERTIFICATES))
+            new_certificates_unavailable = not certificate_aids
             return await self.gateway.evaluate(
                 AgentContext(
                     history=history,
@@ -734,7 +744,7 @@ class ConversationService:
                     pending_offer=record.pending_offer,
                     catalog=tuple(
                         item.model_dump(mode="json") for item in available_catalog()
-                        if not new_certificates_unavailable or item.fulfillment != "certificate"
+                        if item.fulfillment != "certificate" or item.id in certificate_aids
                     ),
                     new_certificates_unavailable=new_certificates_unavailable,
                     knowledge=(format_verified_context(verified_articles),)
@@ -862,7 +872,8 @@ class ConversationService:
         if aid_id is None or get_aid_item(aid_id) is None:
             return await self._state_turn(record)
         contact_method = method.value if method else record.pending_contact_method
-        if self.scenario_flow and aid_id in CERTIFICATES:
+        if (self.scenario_flow and aid_id in CERTIFICATES
+                and self.certificate_available is None):
             request = await self.store.resume_aid_request(record, aid_id, request_key)
             if request.certificate_status in {"unavailable", "review_required"}:
                 return await self.scenario_flow.show(record, "i8", certificate_paused=True)
@@ -889,6 +900,10 @@ class ConversationService:
             )
         if request.certificate_status == "unavailable":
             if self.scenario_flow:
+                await self.scenario_flow.event(
+                    record, "certificate_requested", request_key,
+                    aid_id=aid_id, reason="out_of_stock",
+                )
                 return await self.scenario_flow.show(record, "i8", aid_id=aid_id)
             await self.store.update(record, state=ConversationState.CERTIFICATE_UNAVAILABLE.value)
             return self._turn(
@@ -922,10 +937,11 @@ class ConversationService:
             turn = self._certificate_turn(request.certificate)
             if self.scenario_flow:
                 context = certificate_context(request.certificate)
-                screen = AID_SCREENS[aid_id] + "b"
+                delivered_aid = request.certificate.aid_id
+                screen = AID_SCREENS[delivered_aid] + "b"
                 shown = render(screen, context=context)
                 safe_context = {k: v for k, v in context.items() if k != "code"}
-                next_screen = "s33c" if aid_id == "hostel_3_nights" else screen
+                next_screen = "s33c" if delivered_aid == "hostel_3_nights" else screen
                 next_turn = await self.scenario_flow.show(record, next_screen, **safe_context)
                 turn = turn.model_copy(update={
                     "text": shown.text, "choices": next_turn.choices,

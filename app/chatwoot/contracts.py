@@ -46,6 +46,7 @@ _BOT_BOOKKEEPING_ATTRIBUTES = frozenset({
     "scenario_last_message_id",
     "scenario_event_receipts",
     "scenario_followups",
+    "scenario_referral_source",
     "bot_last_diagnostics",
     "bot_last_decision",
 })

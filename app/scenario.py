@@ -22,7 +22,9 @@ CONSULTATIONS = {"s34": "s34b", "s35": "s35b", "s38": "s38b"}
 CERTIFICATES = ("food_card", "medicine_card", "hostel_3_nights", "children_card")
 CONSULTATION_IDS = ("psychologist_3_sessions", "legal_consultation", "peer_consultation")
 TEXT_TARGETS = {"s35d": "s35c", "s36": "s36b", "s511": "s52", "s57": "s57",
-                "s6": "s61", "s74": "s75", "i1": "i1"}
+                "s6": "s61", "s74": "s75", "i1": "i1", "s39b": "s39c"}
+STOCK_MENU_SPLITS = {"s21": 5, "s22": 5, "s25": 6}
+REFERRAL_SOURCES = ("website", "friend", "organization", "leaflet")
 HUMAN = Choice(id="human", label="💬 Поговорить с человеком")
 CERTIFICATE_PAUSED_TEXT = (
     "Сейчас сертификатов нет. Мы пока не можем обещать их появление или выдачу. "
@@ -70,6 +72,9 @@ def variant_for(screen: str, context: dict) -> int:
 
 def button_indices(screen: str, variant: int) -> range:
     size = len(SCREENS[screen]["buttons"])
+    if screen in STOCK_MENU_SPLITS:
+        split = STOCK_MENU_SPLITS[screen]
+        return range(split) if variant == 0 else range(split, size)
     if screen in {"s5", "s59"}:
         return range(variant * 4, variant * 4 + 4)
     if screen in {"s51", "s7"}:
@@ -85,8 +90,9 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
            variant: int | None = None) -> AgentTurn:
     context = context or {}
     variant = variant_for(screen, context) if variant is None else variant
-    if (screen in AIDS and AIDS[screen] in CERTIFICATES
-            or screen == "i8" or screen == "i9" and variant == 1):
+    if (not context.get("dynamic_certificates") and (
+            screen in AIDS and AIDS[screen] in CERTIFICATES
+            or screen == "i8" or screen == "i9" and variant == 1)):
         # Persisted previews and waitlist acknowledgements cannot replay offers
         # or promises from before the pause.
         screen = "i8"
@@ -100,6 +106,10 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
     body = copy_text(screen, variant, context=context)
     if screen in {"s31b", "s32b", "s33b", "s37b"} and "code" not in context:
         body = "Сертификат сохранён в предыдущем сообщении этого чата."
+    elif screen in {"s31b", "s32b", "s33b", "s37b"} and "nominal_rubles" in context:
+        # Retry an older issued document using its own terms, not today's offer.
+        nominal = f"{int(context['nominal_rubles']):,}".replace(",", " ")
+        body = body.replace("2 000 ₽", f"{nominal} ₽")
     if screen == "s51":
         body = texts[0] + "\n\n" + texts[variant + 1]
     for placeholder, key in (("[ДАТА]", "expiry_date"), ("[НОМЕР СЕРТИФИКАТА]", "code")):
@@ -108,6 +118,10 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
     for index in button_indices(screen, variant):
         button = SCREENS[screen]["buttons"][index]
         label, target = button["label"], button["target"]
+        if (screen in STOCK_MENU_SPLITS and target in AIDS and AIDS[target] in CERTIFICATES
+                and "available_certificate_aids" in context
+                and AIDS[target] not in context["available_certificate_aids"]):
+            continue
         if label.startswith("Вернуться") or target == "i1" and screen != "i1":
             continue
         if context.get("awaiting_text") and label.startswith("Написать"):
@@ -135,8 +149,20 @@ class ScenarioFlow:
         self.store = service.store
 
     async def show(self, record, screen: str, *, variant: int | None = None, **context):
-        if (screen in AIDS and AIDS[screen] in CERTIFICATES
-                or screen == "i8" or screen == "i9" and variant == 1):
+        dynamic = self.service.certificate_available is not None
+        context = {**context, "dynamic_certificates": dynamic}
+        if screen in STOCK_MENU_SPLITS or screen in AIDS and AIDS[screen] in CERTIFICATES:
+            available = await self.service.available_certificate_aids()
+            context["available_certificate_aids"] = sorted(available)
+            if screen in STOCK_MENU_SPLITS:
+                relevant = {AIDS[b["target"]] for b in SCREENS[screen]["buttons"]
+                            if b["target"] in AIDS and AIDS[b["target"]] in CERTIFICATES}
+                variant = int(not (relevant & available))
+            elif dynamic and AIDS[screen] not in available:
+                context["aid_id"] = AIDS[screen]
+                screen, variant = "i8", 0
+        if not dynamic and (screen in AIDS and AIDS[screen] in CERTIFICATES
+                            or screen == "i8" or screen == "i9" and variant == 1):
             screen, variant = "i8", 0
             context = {**context, "certificate_paused": True}
         data = {**record.scenario, **context, "screen": screen, "awaiting_text": False}
@@ -144,7 +170,7 @@ class ScenarioFlow:
                 and context["job_key"] != record.scenario.get("job_key")
                 and "historical_survey" not in context):
             data.pop("historical_survey", None)
-        if screen != "i8":
+        if screen != "i8" or dynamic:
             data.pop("certificate_paused", None)
         data["variant"] = variant_for(screen, data) if variant is None else variant
         state = ConversationState.SCENARIO.value
@@ -188,19 +214,19 @@ class ScenarioFlow:
 
     async def _select_aid(self, record, target: str, request_key: str):
         aid_id = AIDS[target]
-        if aid_id in CERTIFICATES:
-            # Capture the validated selection before show replaces the preview
-            # with the paused screen and clears pending_aid_id. This action is
-            # in memory; the channel adapter commits it after ownership guards.
+        turn = await self.show(record, target, draft_key=request_key, job_key=None)
+        if aid_id in CERTIFICATES and record.scenario.get("screen") == "i8":
             await self.event(record, "certificate_requested", request_key,
-                             aid_id=aid_id, reason="paused")
-        return await self.show(record, target, draft_key=request_key, job_key=None)
+                             aid_id=aid_id, reason=("out_of_stock"
+                                 if self.service.certificate_available is not None else "paused"))
+        return turn
 
     async def callback(self, record, callback: str, request_key: str) -> AgentTurn | None:
         data = record.scenario
         screen = data.get("screen")
         if callback.startswith("sc:"):
-            if (screen in AIDS and AIDS[screen] in CERTIFICATES
+            if not data.get("dynamic_certificates") and (
+                    screen in AIDS and AIDS[screen] in CERTIFICATES
                     or screen == "i8" and not data.get("certificate_paused")
                     or screen == "i9" and data.get("variant") == 1):
                 # Old indices refer to waitlist/issued buttons, not the new
@@ -224,7 +250,25 @@ class ScenarioFlow:
                 return await self.show(record, target, draft_key=request_key, job_key=None)
             button = SCREENS[screen]["buttons"][index]
             target, label = button["target"], button["label"]
-            if data.get("job_key"):
+            if screen == "s39":
+                if target == "s39b":
+                    return await self.show(record, target)
+                await self.event(record, "referral_source", "referral:source",
+                                 source=REFERRAL_SOURCES[index], job_key=data.get("job_key"))
+                return await self.show(record, "s39c")
+            if screen == "s39b" and label == "Пропустить":
+                await self.event(record, "referral_source", "referral:source",
+                                 source="skipped", job_key=data.get("job_key"))
+                return await self.show(record, "s39c")
+            if screen == "s39c" and target == "s39c":
+                return await self.show(record, "s39c", variant=1)
+            if screen == "i8" and target == "i8":
+                aid = data.get("aid_id")
+                if aid in CERTIFICATES and not data.get("submitted"):
+                    await self.event(record, "certificate_requested", request_key,
+                                     aid_id=aid, reason="out_of_stock")
+                return await self.show(record, "i8", variant=1, submitted=True)
+            if data.get("job_key") and screen not in {"s39b", "s39c"}:
                 await self.event(record, "survey_answer", request_key, job_key=data["job_key"],
                                  screen=screen, answer=index, label=label)
             if screen in CONSULTATIONS:
@@ -273,7 +317,7 @@ class ScenarioFlow:
                 screen = next((k for k, v in NEEDS.items() if v.value == record.need), "s2")
             allowed = {b["target"] for b in SCREENS.get(screen, {}).get("buttons", [])}
             if screen in NEEDS:
-                # Previously sent certificate buttons still reach the paused flow.
+                # Previously sent certificate buttons still reach the stock check.
                 allowed.update(
                     AID_SCREENS[item.id] for item in available_aid_for_need(NEEDS[screen])
                     if item.id in CERTIFICATES
@@ -290,6 +334,8 @@ class ScenarioFlow:
         if callback == "certificate:request" and (
             screen == "i8" or record.state == ConversationState.CERTIFICATE_UNAVAILABLE.value
         ):
+            # Legacy waitlist callbacks refresh the current offer instead of
+            # silently creating a request with an unknown selected aid.
             return await self.show(record, "i8", variant=0, certificate_paused=True)
         if callback == "human":
             await self.service._human_turn(record, "button", request_key=request_key)
@@ -309,6 +355,10 @@ class ScenarioFlow:
             return None
         if screen == "s57" and data.get("variant") == 1:
             return None
+        if screen == "s39b":
+            await self.event(record, "referral_source", "referral:source", source="other",
+                             text=value, job_key=data.get("job_key"))
+            return await self.show(record, "s39c")
         kinds = {"s35d": "legal_topic", "s36": "other_request", "s511": "certificate_usage",
                  "s57": "certificate_problem", "s6": "general_feedback",
                  "s74": "consultation_feedback", "i1": "human_message"}
@@ -324,5 +374,6 @@ class ScenarioFlow:
 def certificate_context(certificate) -> dict:
     expiry = certificate.expires_at
     return {"aid_id": certificate.aid_id, "code": certificate.activation_code,
+            "nominal_rubles": certificate.nominal_rubles,
             "expires_at": expiry.isoformat(),
             "expiry_date": expiry.astimezone(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y")}

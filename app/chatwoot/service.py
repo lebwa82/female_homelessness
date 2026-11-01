@@ -114,6 +114,10 @@ class _SeededConversation:
     record: ConversationRecord
 
 
+class _CertificateClaimAborted(Exception):
+    """The inbound turn lost ownership before creating a reservation."""
+
+
 class ChatwootAgentService:
     """Apply one turn while Chatwoot remains the sole durable source of truth."""
 
@@ -126,6 +130,7 @@ class ChatwootAgentService:
         queue_router: QueueRouter | None = None,
         certificate_claim: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
         certificate_resume: Callable[[str, str, int], Awaitable[CertificateClaimResult]] | None = None,
+        certificate_available: Callable[[], Awaitable[frozenset[str]]] | None = None,
         certificate_request: Callable[[str, str, int, int, int, str], Awaitable[bool]] | None = None,
         certificate_store: CertificateObjectStore | None = None,
         certificate_mark_submitted: Callable[[str, int], Awaitable[None]] | None = None,
@@ -141,6 +146,7 @@ class ChatwootAgentService:
         self._locks: dict[int, asyncio.Lock] = {}
         self._certificate_claim = certificate_claim
         self._certificate_resume = certificate_resume
+        self._certificate_available = certificate_available
         self._certificate_request = certificate_request
         self._certificate_store = certificate_store
         self._certificate_mark_submitted = certificate_mark_submitted
@@ -188,6 +194,8 @@ class ChatwootAgentService:
                 if timing:
                     timing.replied = result
                 return result
+            except _CertificateClaimAborted:
+                return False
             finally:
                 lock.release()
 
@@ -322,11 +330,23 @@ class ChatwootAgentService:
                     "workflow": {k: copy.deepcopy(attributes.get(k)) for k in _WORKFLOW_ATTRS},
                 },
             })
+        claim = self._certificate_claim
+
+        async def guarded_claim(
+            aid_id: str, issuance_key: str, recipient_id: int,
+        ) -> CertificateClaimResult:
+            if not await self._bot_may_apply_turn(event):
+                raise _CertificateClaimAborted
+            return await claim(aid_id, issuance_key, recipient_id)
+
         seeded = _seed_conversation(
-            event, conversation, messages, self._certificate_claim, self._certificate_resume,
+            event, conversation, messages,
+            guarded_claim if claim is not None else None, self._certificate_resume,
         )
-        legacy_service = ConversationService(store=seeded.store, gateway=self._gateway,
-                                             html_scenario=True)
+        legacy_service = ConversationService(
+            store=seeded.store, gateway=self._gateway, html_scenario=True,
+            certificate_available=self._certificate_available,
+        )
         with timed_stage("scenario"):
             if is_start_command:
                 turn = await legacy_service.start(seeded.incoming)
@@ -348,24 +368,7 @@ class ChatwootAgentService:
                     turn = turn.model_copy(update={"choices": tuple(choices.values())})
                     turn = legacy_service._with_back_choice(seeded.record, turn)
 
-        # A staff member may have claimed the conversation while Qwen was
-        # evaluating. Never overwrite that ownership with a stale workflow
-        # projection.
-        with timed_stage("ownership_guard"):
-            before_side_effects = await self._sync_owner(event.conversation_id)
-        if not _bot_owns(before_side_effects):
-            return False
-        # A public staff reply can arrive while the LLM holds our local lock,
-        # before that reply's webhook has projected the visible assignment.
-        with timed_stage("staff_guard"):
-            staff = _latest_staff_message(
-                await self._api.get_messages(event.conversation_id, after_id=event.message_id),
-                event.conversation_id,
-                after=max(event.message_id, _epoch(_custom_attributes(before_side_effects).get(
-                    "ownership_last_staff_message_id"))),
-            )
-        if staff is not None:
-            await self._staff_message(staff)
+        if not await self._bot_may_apply_turn(event):
             return False
 
         if seeded.store.agent_runs:
@@ -429,6 +432,24 @@ class ChatwootAgentService:
         await self._api.set_custom_attributes(event.conversation_id, {
             "scenario_pending_input": None, "scenario_last_message_id": event.message_id,
         })
+        return True
+
+    async def _bot_may_apply_turn(self, event: IncomingChatwootMessage) -> bool:
+        # Native assignment and public replies can change while our local lock is held.
+        with timed_stage("ownership_guard"):
+            conversation = await self._sync_owner(event.conversation_id)
+        if not _bot_owns(conversation):
+            return False
+        with timed_stage("staff_guard"):
+            staff = _latest_staff_message(
+                await self._api.get_messages(event.conversation_id, after_id=event.message_id),
+                event.conversation_id,
+                after=max(event.message_id, _epoch(_custom_attributes(conversation).get(
+                    "ownership_last_staff_message_id"))),
+            )
+        if staff is not None:
+            await self._staff_message(staff)
+            return False
         return True
 
     async def _persist_certificate_requests(
@@ -634,10 +655,10 @@ class ChatwootAgentService:
         # A retry after writing the reset but before sending its acknowledgement
         # must not increment the epoch a second time.
         if attrs.get("last_clear_message_id") != event.message_id:
-            await ConversationService(store=seeded.store, gateway=self._gateway,
-                                      html_scenario=True).clear(
-                seeded.incoming
-            )
+            await ConversationService(
+                store=seeded.store, gateway=self._gateway, html_scenario=True,
+                certificate_available=self._certificate_available,
+            ).clear(seeded.incoming)
             await self._persist_workflow(
                 event.conversation_id,
                 seeded.record,
@@ -737,8 +758,10 @@ class ChatwootAgentService:
             # Timers do not invoke LLMs and never copy customer history.
             incoming = IncomingChatwootMessage(0, conversation_id, 0, 0, "")
             seeded = _seed_conversation(incoming, conversation, ())
-            service = ConversationService(store=seeded.store, gateway=self._gateway,
-                                          html_scenario=True)
+            service = ConversationService(
+                store=seeded.store, gateway=self._gateway, html_scenario=True,
+                certificate_available=self._certificate_available,
+            )
             turn = await service.scenario_flow.show(
                 seeded.record, job["screen"],
                 **self._scenario_effects.context(conversation, key, job),
