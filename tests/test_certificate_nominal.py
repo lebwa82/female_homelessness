@@ -16,7 +16,7 @@ def parse_amount(monkeypatch, provider, amount):
         monkeypatch.setattr(
             certificate_documents, "_decode_qr_values", lambda _: ("INVALIDTESTONLY",),
         )
-    page = SimpleNamespace(extract_text=lambda: text + amount)
+    page = SimpleNamespace(extract_text=lambda **kwargs: text + amount)
     monkeypatch.setattr(
         certificate_documents, "PdfReader",
         lambda _: SimpleNamespace(is_encrypted=False, pages=[page]),

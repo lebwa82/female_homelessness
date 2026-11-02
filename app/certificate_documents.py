@@ -23,6 +23,10 @@ MOSCOW_TIME = ZoneInfo("Europe/Moscow")
 MAX_CERTIFICATE_PDF_BYTES = 10 * 1024 * 1024
 
 
+class _AmbiguousNominalError(ValueError):
+    """Plain PDF text cannot distinguish a wrapped amount from nearby text."""
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedCertificatePdf:
     provider_slug: str
@@ -136,7 +140,16 @@ def parse_certificate_pdf(pdf_bytes: bytes, filename: str) -> ParsedCertificateP
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     normalized = re.sub(r"[ \t]+", " ", text)
     if _looks_like_ozon(normalized):
-        return _parse_ozon(pdf_bytes, filename, normalized)
+        try:
+            return _parse_ozon(pdf_bytes, filename, normalized)
+        except _AmbiguousNominalError:
+            # Content-stream order can put an unrelated instruction-step number
+            # before the amount. Retry that ambiguity using the visual layout;
+            # keep ordinary text for codes and other fields.
+            layout = "\n".join(
+                page.extract_text(extraction_mode="layout") or "" for page in reader.pages
+            )
+            return _parse_ozon(pdf_bytes, filename, normalized, nominal_text=layout)
     if _looks_like_pyaterochka(normalized):
         return _parse_pyaterochka(pdf_bytes, filename, normalized)
     raise ValueError("unsupported certificate PDF provider")
@@ -150,13 +163,15 @@ def _looks_like_pyaterochka(text: str) -> bool:
     return "Пятёроч" in text or "5ka.ru" in text
 
 
-def _parse_ozon(pdf_bytes: bytes, filename: str, text: str) -> ParsedCertificatePdf:
+def _parse_ozon(
+    pdf_bytes: bytes, filename: str, text: str, *, nominal_text: str | None = None,
+) -> ParsedCertificatePdf:
     activation_code = _match(text, r"Код активации\s+([A-Za-z0-9-]+)")
     expires = _date(
         _match(text, r"Активировать (?:по|до)\s+(\d{2}\.\d{2}\.\d{4})"), end=True
     )
     serial_number = _match(text, r"Серийный номер\s+([A-Za-z0-9-]+)")
-    nominal = _nominal_rubles(text)
+    nominal = _nominal_rubles(text if nominal_text is None else nominal_text)
     return ParsedCertificatePdf(
         provider_slug="ozon",
         provider="Ozon",
@@ -243,7 +258,7 @@ def _nominal_rubles(text: str) -> int:
             rf"[0-9](?:[0-9]|{horizontal_space})*[.,]?)$",
             previous_line[0].strip(),
         ):
-            raise ValueError("certificate nominal is ambiguously wrapped")
+            raise _AmbiguousNominalError("certificate nominal is ambiguously wrapped")
     raw = match.group(1).strip()
     if re.fullmatch(
         rf"(?:[0-9]+|[0-9]{{1,3}}(?:{horizontal_space}+[0-9]{{3}})+)", raw,
