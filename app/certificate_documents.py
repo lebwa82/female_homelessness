@@ -234,7 +234,8 @@ def _nominal_rubles(text: str) -> int:
         previous_line = prefix.rstrip("\r\n").splitlines()[-1:] or [""]
         # A numeric activation/serial number is a separate, labelled field.
         separate_field = re.match(
-            r"(?:Код активации|Серийный номер|Номер)\s+",
+            r"(?:Код активации\s+|Серийный номер\s+|"
+            r"Номер(?: и QR-PAYLOAD)?\s*:?\s*)(?=[A-Za-z0-9])",
             previous_line[0].strip(), re.IGNORECASE,
         )
         if separate_field is None and re.search(

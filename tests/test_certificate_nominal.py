@@ -35,6 +35,8 @@ def parse_amount(monkeypatch, provider, amount):
     ("Серийный номер 123456\n2000 ₽", 2000),
     ("Код активации 123456\n2 000 ₽", 2000),
     ("Номер 123456\n2000 ₽", 2000),
+    ("Номер: 123456\n2000 ₽", 2000),
+    ("Номер и QR-PAYLOAD: 123456\n2 000 ₽", 2000),
 ])
 def test_parse_complete_nominal_before_staging(monkeypatch, provider, amount, expected):
     parsed = parse_amount(monkeypatch, provider, amount)
