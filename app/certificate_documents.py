@@ -156,7 +156,7 @@ def _parse_ozon(pdf_bytes: bytes, filename: str, text: str) -> ParsedCertificate
         _match(text, r"Активировать (?:по|до)\s+(\d{2}\.\d{2}\.\d{4})"), end=True
     )
     serial_number = _match(text, r"Серийный номер\s+([A-Za-z0-9-]+)")
-    nominal = int(_match(text, r"(\d+)\s*(?:₽|руб\.)"))
+    nominal = _nominal_rubles(text)
     return ParsedCertificatePdf(
         provider_slug="ozon",
         provider="Ozon",
@@ -182,7 +182,7 @@ def _parse_pyaterochka(pdf_bytes: bytes, filename: str, text: str) -> ParsedCert
     qr_values = _decode_qr_values(pdf_bytes)
     if qr_values != (number,):
         raise ValueError("certificate QR does not match its printed number")
-    nominal = int(_match(text, r"(\d+)\s*(?:₽|руб\.)"))
+    nominal = _nominal_rubles(text)
     return ParsedCertificatePdf(
         provider_slug="pyaterochka",
         provider="Пятёрочка",
@@ -214,6 +214,44 @@ def _decode_qr_values(pdf_bytes: bytes) -> tuple[str, ...]:
         return tuple(sorted(values))
     finally:
         document.close()
+
+
+def _nominal_rubles(text: str) -> int:
+    # Capture the entire amount-like token: matching only digits before the
+    # currency silently turns '2 000' into 0 or '1 250' into 250.
+    horizontal_space = r"[^\S\r\n]"
+    match = re.search(
+        rf"(?<![\w.,+\-−])([+\-−]?{horizontal_space}*[0-9]"
+        rf"(?:[0-9.,]|{horizontal_space})*)\s*(?:₽|руб\.)",
+        text, re.IGNORECASE,
+    )
+    if match is None:
+        raise ValueError("certificate nominal was not found")
+    # Do not silently accept the suffix of a number wrapped across PDF lines.
+    # A newline between the complete amount and its currency is fine.
+    prefix = text[:match.start(1)].rstrip(" \t")
+    if prefix.endswith(("\n", "\r")):
+        previous_line = prefix.rstrip("\r\n").splitlines()[-1:] or [""]
+        # A numeric activation/serial number is a separate, labelled field.
+        separate_field = re.match(
+            r"(?:Код активации|Серийный номер|Номер)\s+",
+            previous_line[0].strip(), re.IGNORECASE,
+        )
+        if separate_field is None and re.search(
+            rf"(?<![\w.,+\-−])(?:[+\-−]|[+\-−]?{horizontal_space}*"
+            rf"[0-9](?:[0-9]|{horizontal_space})*[.,]?)$",
+            previous_line[0].strip(),
+        ):
+            raise ValueError("certificate nominal is ambiguously wrapped")
+    raw = match.group(1).strip()
+    if re.fullmatch(
+        rf"(?:[0-9]+|[0-9]{{1,3}}(?:{horizontal_space}+[0-9]{{3}})+)", raw,
+    ) is None:
+        raise ValueError("certificate nominal must be integer rubles")
+    nominal = int(re.sub(horizontal_space + "+", "", raw))
+    if not 0 < nominal <= 2_147_483_647:
+        raise ValueError("certificate nominal must be positive and fit inventory")
+    return nominal
 
 
 def _match(text: str, pattern: str) -> str:

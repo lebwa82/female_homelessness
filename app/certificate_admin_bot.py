@@ -98,11 +98,30 @@ def _confirmation_keyboard() -> ReplyKeyboardMarkup:
 def _batch_text(summary: BatchSummary) -> str:
     provider, aids = POOL_AIDS[summary.pool_slug]
     categories = ", ".join(AID_LABELS[aid] for aid in aids)
+    if summary.status == "imported":
+        return f"{provider}\n\nИмпорт завершён.\nКатегории: {categories}."
     return (
-        f"{provider}\n\nПолучено: {summary.received}\n"
-        f"Готово к импорту: {summary.ready}; дубликаты: {summary.duplicates}; "
-        f"ошибки: {summary.invalid}.\nКатегории: {categories}."
+        f"{provider}\n\nБудет добавлено сертификатов: {summary.ready}\n"
+        f"Получено PDF-файлов: {summary.received}\n"
+        f"Дубликаты (не добавятся): {summary.duplicates}\n"
+        f"Ошибки (не добавятся): {summary.invalid}\nКатегории: {categories}."
     )
+
+
+def _confirmation_text(summary: BatchSummary) -> str:
+    text = _batch_text(summary)
+    if summary.status != "awaiting_confirmation" or summary.ready == 0:
+        return text
+    count = summary.ready
+    if 11 <= count % 100 <= 14:
+        noun = "сертификатов"
+    elif count % 10 == 1:
+        noun = "сертификат"
+    elif 2 <= count % 10 <= 4:
+        noun = "сертификата"
+    else:
+        noun = "сертификатов"
+    return f"{text}\n\nДобавить {count} {noun}?"
 
 
 @dataclass(slots=True)
@@ -482,10 +501,10 @@ def build_dispatcher(
         if active is not None:
             summary = await repository.summary(admin.telegram_user_id, active.id)
             if summary is not None:
-                if active.status == "awaiting_confirmation":
+                if active.status == "awaiting_confirmation" and summary.ready > 0:
                     await bot.send_message(
                         user_id,
-                        _batch_text(summary) + "\n\nИмпортировать готовые сертификаты?",
+                        _confirmation_text(summary),
                         reply_markup=_confirmation_keyboard(),
                     )
                 else:
@@ -730,7 +749,11 @@ def build_dispatcher(
             )
             return
         summary = await repository.finish_batch(admin.telegram_user_id, batch_id)
-        if summary is None or summary.status != "awaiting_confirmation":
+        if (
+            summary is None
+            or summary.status != "awaiting_confirmation"
+            or summary.ready == 0
+        ):
             await bot.send_message(
                 admin.telegram_user_id,
                 "В пачке нет готовых сертификатов.",
@@ -740,7 +763,7 @@ def build_dispatcher(
         await progress.forget(admin.telegram_user_id, batch_id)
         await bot.send_message(
             admin.telegram_user_id,
-            _batch_text(summary) + "\n\nИмпортировать готовые сертификаты?",
+            _confirmation_text(summary),
             reply_markup=_confirmation_keyboard(),
         )
 

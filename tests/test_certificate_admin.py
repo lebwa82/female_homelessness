@@ -23,7 +23,7 @@ def test_batch_summary_counts_every_received_document() -> None:
     assert summary.received == 15
     rendered = _batch_text(summary)
     assert "лекарства, хостел" in rendered
-    assert "Получено: 15" in rendered
+    assert "Получено PDF-файлов: 15" in rendered
     assert "ожидаем" not in rendered.lower()
 
 
@@ -54,7 +54,7 @@ async def test_bulk_upload_emits_one_start_and_one_final_status(monkeypatch) -> 
 
     assert bot.send_message.await_count == 2
     assert bot.send_message.await_args_list[0].args[1] == "Получаю и проверяю сертификаты…"
-    assert "Получено: 50" in bot.send_message.await_args_list[1].args[1]
+    assert "Получено PDF-файлов: 50" in bot.send_message.await_args_list[1].args[1]
     assert "Завершить загрузку" in str(
         bot.send_message.await_args_list[1].kwargs["reply_markup"]
     )
