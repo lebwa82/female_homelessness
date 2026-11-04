@@ -104,7 +104,9 @@ for _, key in ipairs({'retry', 'schedule'}) do
     include(n, math.min(now, hi))
   end
 end
-return cjson.encode({count=count, oldest_known=oldest, ready_counts=ready_counts,
+-- Millisecond precision fits cjson's significant-digit budget at epoch scale.
+-- Encoding an unquantized float can round "now" forward and create a false alarm.
+return cjson.encode({count=count, oldest_known=math.floor(oldest*1000)/1000, ready_counts=ready_counts,
                      stream_unread_counts=unread_counts})
 """
 
@@ -213,7 +215,7 @@ def queue_observation(data: object, now: float) -> dict:
 
 async def check_queues(redis, config: dict, now: float) -> dict:
     keys = [f"women-help:chatwoot-events:{config['account_id']}:{lane}" for lane in range(8)]
-    projection = await redis.eval(QUEUE_PROJECTION, 8, *keys, now)
+    projection = await redis.eval_ro(QUEUE_PROJECTION, 8, *keys, now)
     if not isinstance(projection, (str, bytes)) or len(projection) > 8192:
         return observation(False, "queue_metadata_invalid")
     try:

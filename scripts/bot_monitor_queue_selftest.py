@@ -43,12 +43,18 @@ async def run() -> int:
             if int((await redis.info("server"))["redis_version"].split(".", 1)[0]) < 7:
                 raise ValueError("redis_version_unsupported")
 
-            async def observed():
-                return await probe.check_queues(redis, {"account_id": "1"}, NOW)
+            async def observed(now=NOW):
+                return await probe.check_queues(redis, {"account_id": "1"}, now)
 
             await reset(redis)
             assert await observed() == expected(True, "ok")
             passed += 1
+
+            # Redis cjson rounds epoch floats; microseconds must not look future-dated.
+            for fraction in (0.1234567, 0.9999998):
+                result = await observed(NOW + fraction)
+                assert result["ok"] and result["count"] == 0
+                passed += 1
 
             key = STREAMS[7]
             await redis.xadd(key, {"payload": "synthetic-pending"}, id="1700000800000-0")

@@ -142,15 +142,15 @@ def test_queue_observation_never_converts_unknown_to_zero_success(data, ok, reas
 
 async def test_queues_single_bounded_projection_all_eight_lanes():
     redis = AsyncMock()
-    redis.eval.return_value = json.dumps(projection(3, 819))
+    redis.eval_ro.return_value = json.dumps(projection(3, 819))
     result = await probe.check_queues(redis, config(), 1000)
     assert result == queue_result(False, "queue_stalled", 3, 181)
-    args = redis.eval.call_args.args
+    args = redis.eval_ro.call_args.args
     assert args[0] == probe.QUEUE_PROJECTION
     assert args[1] == 8
     assert args[2:10] == tuple(f"women-help:chatwoot-events:1:{i}" for i in range(8))
     assert args[10] == 1000
-    assert redis.eval.await_count == 1
+    assert redis.eval_ro.await_count == 1
     redis.get.assert_not_called()
 
 
@@ -237,7 +237,7 @@ async def test_tls_failure_still_checks_redis_and_cannot_deliver(monkeypatch):
     redis = AsyncMock()
     redis.__aenter__.return_value = redis
     redis.get.return_value = "1000"
-    redis.eval.return_value = json.dumps(projection())
+    redis.eval_ro.return_value = json.dumps(projection())
     monkeypatch.setattr(probe.Redis, "from_url", lambda *args, **kwargs: redis)
     monkeypatch.setattr(probe.time, "time", lambda: 1000)
     def failed_tls(**kwargs):
@@ -257,7 +257,7 @@ async def test_independent_observations_and_alert_failure(monkeypatch):
     redis = AsyncMock()
     redis.__aenter__.return_value = redis
     redis.get.side_effect = RuntimeError("synthetic-password")
-    redis.eval.return_value = json.dumps(projection())
+    redis.eval_ro.return_value = json.dumps(projection())
     monkeypatch.setattr(probe.Redis, "from_url", lambda *args, **kwargs: redis)
     monkeypatch.setattr(probe.time, "time", lambda: 1000)
     context = Mock()
