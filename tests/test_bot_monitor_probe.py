@@ -33,6 +33,29 @@ def config(**changes):
     })
 
 
+def projection(count=0, oldest_known=1000, *, ready=None, unread=None):
+    return {"count": count, "oldest_known": oldest_known,
+            "ready_counts": {"high": 0, "medium": 0, "low": 0, **(ready or {})},
+            "stream_unread_counts": {str(lane): 0 for lane in range(8)} | (unread or {})}
+
+
+def queue_result(ok, reason, count=0, age=0, *, ready=None, unread=None):
+    data = projection(count, ready=ready, unread=unread)
+    return {"ok": ok, "reason": reason, "count": count, "oldest_known_age_seconds": age,
+            "ready_counts": data["ready_counts"],
+            "stream_unread_counts": data["stream_unread_counts"]}
+
+
+def test_lua_uses_metadata_commands_only():
+    source = probe.QUEUE_PROJECTION.upper()
+    for forbidden in ("LINDEX", "LRANGE", "XRANGE", "XREVRANGE", "ZRANGEBYSCORE",
+                      "ZRANGE", "CJSON.DECODE"):
+        assert forbidden not in source
+    assert "XLEN" in source
+    assert "ZCOUNT" in source
+    assert "FOR STEP = 1, 32" in source
+
+
 def test_probe_reason_vocabulary_matches_state_contract():
     tree = ast.parse(Path(probe.__file__).read_text())
     def literals(node):
@@ -94,12 +117,17 @@ def test_strict_config(changes):
 
 
 @pytest.mark.parametrize(("data", "ok", "reason"), [
-    ({"count": 0, "oldest": 1000}, True, "ok"),
-    ({"count": 1, "oldest": 820}, True, "ok"),
-    ({"count": 2, "oldest": 819}, False, "queue_stalled"),
-    ({"count": 1, "oldest": 1001}, False, "queue_metadata_invalid"),
-    ({"count": 1, "oldest": -1}, False, "queue_metadata_invalid"),
-    ({"count": 0, "oldest": float("nan")}, False, "queue_metadata_invalid"),
+    (projection(), True, "ok"),
+    (projection(1, 820), True, "ok"),
+    (projection(2, 819), False, "queue_stalled"),
+    (projection(1, 1001), False, "queue_metadata_invalid"),
+    (projection(1, -1), False, "queue_metadata_invalid"),
+    (projection(0, float("nan")), False, "queue_metadata_invalid"),
+    (projection(1, ready={"high": 1}), True, "ok"),
+    (projection(1, unread={"7": 1}), True, "ok"),
+    (projection(0, ready={"high": 1}), False, "queue_metadata_invalid"),
+    (projection(1, ready={"invalid/name": 1}), False, "queue_metadata_invalid"),
+    (projection(1, unread={"unknown-lane": 1}), False, "queue_metadata_invalid"),
     ({"error": "queue_group_missing"}, False, "queue_group_missing"),
     ({"error": "secret-error-marker"}, False, "queue_metadata_invalid"),
     ({"count": 0, "oldest": 1000, "raw": "secret-marker"}, False,
@@ -114,10 +142,9 @@ def test_queue_observation_never_converts_unknown_to_zero_success(data, ok, reas
 
 async def test_queues_single_bounded_projection_all_eight_lanes():
     redis = AsyncMock()
-    redis.eval.return_value = '{"count":3,"oldest":819}'
+    redis.eval.return_value = json.dumps(projection(3, 819))
     result = await probe.check_queues(redis, config(), 1000)
-    assert result == {"ok": False, "reason": "queue_stalled", "count": 3,
-                      "oldest_age_seconds": 181}
+    assert result == queue_result(False, "queue_stalled", 3, 181)
     args = redis.eval.call_args.args
     assert args[0] == probe.QUEUE_PROJECTION
     assert args[1] == 8
@@ -210,7 +237,7 @@ async def test_tls_failure_still_checks_redis_and_cannot_deliver(monkeypatch):
     redis = AsyncMock()
     redis.__aenter__.return_value = redis
     redis.get.return_value = "1000"
-    redis.eval.return_value = '{"count":0,"oldest":1000}'
+    redis.eval.return_value = json.dumps(projection())
     monkeypatch.setattr(probe.Redis, "from_url", lambda *args, **kwargs: redis)
     monkeypatch.setattr(probe.time, "time", lambda: 1000)
     def failed_tls(**kwargs):
@@ -230,7 +257,7 @@ async def test_independent_observations_and_alert_failure(monkeypatch):
     redis = AsyncMock()
     redis.__aenter__.return_value = redis
     redis.get.side_effect = RuntimeError("synthetic-password")
-    redis.eval.return_value = '{"count":0,"oldest":1000}'
+    redis.eval.return_value = json.dumps(projection())
     monkeypatch.setattr(probe.Redis, "from_url", lambda *args, **kwargs: redis)
     monkeypatch.setattr(probe.time, "time", lambda: 1000)
     context = Mock()
@@ -330,16 +357,15 @@ async def real_redis():
 
 async def test_lua_empty_streams_healthy(real_redis):
     result = await probe.check_queues(real_redis, config(), 1700001000)
-    assert result == {"ok": True, "reason": "ok", "count": 0, "oldest_age_seconds": 0}
+    assert result == queue_result(True, "ok")
 
 
 @pytest.mark.parametrize("timestamp", [1700000800, 1700000800000])
-async def test_lua_sidekiq_seconds_and_milliseconds(real_redis, timestamp):
+async def test_lua_sidekiq_counts_without_reading_seconds_or_milliseconds(real_redis, timestamp):
     await real_redis.lpush("queue:high", json.dumps({"enqueued_at": timestamp,
                                                    "args": ["secret-payload-marker"]}))
     result = await probe.check_queues(real_redis, config(), 1700001000)
-    assert result == {"ok": False, "reason": "queue_stalled", "count": 1,
-                      "oldest_age_seconds": 200}
+    assert result == queue_result(True, "ok", 1, ready={"high": 1})
     assert "secret" not in json.dumps(result)
 
 
@@ -349,7 +375,7 @@ async def test_lua_due_jobs_only(real_redis, key):
                                 "secret-future-job": 1700002000})
     result = await probe.check_queues(real_redis, config(), 1700001000)
     assert result["count"] == 1
-    assert result["oldest_age_seconds"] == 200
+    assert result["oldest_known_age_seconds"] == 200
     assert not result["ok"]
 
 
@@ -360,7 +386,8 @@ async def test_lua_pending_and_unread_all_lanes(real_redis):
     await real_redis.xadd(key, {"payload": "secret-ready"}, id="1700000900000-0")
     result = await probe.check_queues(real_redis, config(), 1700001000)
     assert result["count"] == 2
-    assert result["oldest_age_seconds"] == 200
+    assert result["oldest_known_age_seconds"] == 200
+    assert result["stream_unread_counts"]["7"] == 1
     assert not result["ok"]
 
 
@@ -369,7 +396,7 @@ async def test_lua_missing_group_and_invalid_timestamp_fail(real_redis):
     await real_redis.xgroup_destroy(key, "agent")
     assert (await probe.check_queues(real_redis, config(), 1700001000))["reason"] == "queue_group_missing"
     await real_redis.xgroup_create(key, "agent", "0")
-    await real_redis.lpush("queue:low", '{"enqueued_at":-1,"args":["secret-marker"]}')
+    await real_redis.zadd("retry", {"synthetic-invalid-score": -1})
     result = await probe.check_queues(real_redis, config(), 1700001000)
     assert not result["ok"]
     assert result["reason"] == "queue_metadata_invalid"

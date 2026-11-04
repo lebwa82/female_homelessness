@@ -208,6 +208,19 @@ def test_telegram_start_time_is_fixed_moscow_time_across_date_boundary():
     )
 
 
+def test_queue_backlog_reason_is_debounced_and_formatted_as_observed_interval():
+    bad = observations(queues="queue_backlog")
+    state, events, reported = transition({}, bad, 1000)
+    assert reported["queues"]["ok"] is None
+    assert events == []
+    _, events, reported = transition(state, bad, 1060)
+    assert reported["queues"] == {"ok": False, "reason": "queue_backlog"}
+    assert len(events) == 1
+    text = format_telegram_event(events[0], "https://status.example")
+    assert "Причина: Очередь остаётся непустой более трёх минут" in text
+    assert "queue_backlog" not in text
+
+
 @pytest.mark.parametrize("reason", sorted(REASONS))
 def test_all_bounded_telegram_reasons_have_human_russian_labels(reason):
     _, events, _ = transition({}, observations(host="container_stopped"), 10)

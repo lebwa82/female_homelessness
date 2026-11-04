@@ -26,24 +26,25 @@ TOKEN = re.compile(r"([1-9][0-9]{0,19}):[A-Za-z0-9_-]{10,200}\Z")
 EVENT_ID = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
 CHECKS = ("telegram_poll", "telegram_proxy", "agent", "queues")
 
-# Payloads never leave Redis: only numeric counts/timestamps and fixed errors do.
-# Redis 7 XINFO lag distinguishes unread events from acknowledged retained entries.
+# Only metadata commands: no job bodies, Stream fields or sorted-set members are read.
+# Ready/unread persistence is measured by the host across independent observations.
 QUEUE_PROJECTION = r"""
 local now = tonumber(ARGV[1])
 local function fail(reason) return cjson.encode({error=reason}) end
-local function stamp(value, millis)
+local function stamp(value)
   local n = tonumber(value)
   if not n or n ~= n or n <= 0 or n == math.huge then return nil end
-  if millis or n > 100000000000 then n = n / 1000 end
+  n = n / 1000
   if n > now then return nil end
   return n
 end
 local function idstamp(id)
   if type(id) ~= 'string' then return nil end
   local ms = string.match(id, '^(%d+)%-%d+$')
-  return ms and stamp(ms, true) or nil
+  return ms and stamp(ms) or nil
 end
 local count, oldest = 0, now
+local ready_counts, unread_counts = {}, {}
 local function include(n, t)
   count = count + n
   if n > 0 and t < oldest then oldest = t end
@@ -62,18 +63,15 @@ for lane = 1, 8 do
     return fail('queue_metadata_invalid')
   end
   local pending = redis.call('XPENDING', KEYS[lane], 'agent')
+  if redis.call('XLEN', KEYS[lane]) < pending[1] + group.lag then
+    return fail('queue_metadata_invalid')
+  end
+  unread_counts[tostring(lane-1)] = group.lag
+  count = count + group.lag
   if pending[1] > 0 then
     local t = idstamp(pending[2])
     if not t then return fail('queue_metadata_invalid') end
     include(pending[1], t)
-  end
-  if group.lag > 0 then
-    local ready = redis.call('XRANGE', KEYS[lane], '(' .. group['last-delivered-id'],
-                             '+', 'COUNT', 1)
-    if #ready ~= 1 then return fail('queue_metadata_invalid') end
-    local t = idstamp(ready[1][1])
-    if not t then return fail('queue_metadata_invalid') end
-    include(group.lag, t)
   end
 end
 if redis.call('SCARD', 'queues') > 64 then return fail('queue_metadata_invalid') end
@@ -88,28 +86,26 @@ if #names > 64 then return fail('queue_metadata_invalid') end
 for _, name in ipairs(names) do
   local key = 'queue:' .. name
   local n = redis.call('LLEN', key)
-  if n > 0 then
-    local raw = redis.call('LINDEX', key, -1)
-    if not raw or #raw > 65536 then return fail('queue_metadata_invalid') end
-    local valid, job = pcall(cjson.decode, raw)
-    if not valid or type(job) ~= 'table' or type(job.enqueued_at) ~= 'number' then
-      return fail('queue_metadata_invalid')
-    end
-    local t = stamp(job.enqueued_at, false)
-    if not t then return fail('queue_metadata_invalid') end
-    include(n, t)
-  end
+  ready_counts[name] = n
+  count = count + n
 end
 for _, key in ipairs({'retry', 'schedule'}) do
   local n = redis.call('ZCOUNT', key, '-inf', now)
   if n > 0 then
-    local due = redis.call('ZRANGEBYSCORE', key, '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
-    local t = stamp(due[2], false)
-    if not t then return fail('queue_metadata_invalid') end
-    include(n, t)
+    if redis.call('ZCOUNT', key, '-inf', 0) > 0 then return fail('queue_metadata_invalid') end
+    local lo, hi = 0, math.ceil(now)
+    for step = 1, 32 do
+      if hi-lo <= 1 then break end
+      local mid = math.floor((lo+hi)/2)
+      if redis.call('ZCOUNT', key, '-inf', mid) > 0 then hi = mid else lo = mid end
+    end
+    if hi-lo > 1 then return fail('queue_metadata_invalid') end
+    -- Upper score bound understates age by <1 second, never inventing stale work.
+    include(n, math.min(now, hi))
   end
 end
-return cjson.encode({count=count, oldest=oldest})
+return cjson.encode({count=count, oldest_known=oldest, ready_counts=ready_counts,
+                     stream_unread_counts=unread_counts})
 """
 
 
@@ -192,22 +188,33 @@ def queue_observation(data: object, now: float) -> dict:
     if (isinstance(data, dict) and isinstance(data.get("error"), str)
             and data["error"] in allowed_errors):
         return observation(False, data["error"])
-    if not isinstance(data, dict) or set(data) != {"count", "oldest"}:
+    if (not isinstance(data, dict) or set(data) != {
+            "count", "oldest_known", "ready_counts", "stream_unread_counts"}):
         return observation(False, "queue_metadata_invalid")
-    count, oldest = data["count"], data["oldest"]
+    count, oldest = data["count"], data["oldest_known"]
+    ready, unread = data["ready_counts"], data["stream_unread_counts"]
+    if (not isinstance(ready, dict) or not 3 <= len(ready) <= 64
+            or not {"high", "medium", "low"} <= ready.keys()
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", name)
+                   for name in ready)
+            or not isinstance(unread, dict) or set(unread) != {str(lane) for lane in range(8)}
+            or any(type(n) is not int or not 0 <= n <= 2**53
+                   for n in (*ready.values(), *unread.values()))):
+        return observation(False, "queue_metadata_invalid")
     if (type(count) is not int or not 0 <= count <= 2**53
             or type(oldest) not in {int, float} or not math.isfinite(oldest)
-            or oldest <= 0 or oldest > now):
+            or oldest <= 0 or oldest > now or sum(ready.values()) + sum(unread.values()) > count):
         return observation(False, "queue_metadata_invalid")
     age = now - oldest if count else 0
     return observation(age <= 180, "ok" if age <= 180 else "queue_stalled",
-                       count=count, oldest_age_seconds=round(age, 3))
+                       count=count, oldest_known_age_seconds=round(age, 3),
+                       ready_counts=ready, stream_unread_counts=unread)
 
 
 async def check_queues(redis, config: dict, now: float) -> dict:
     keys = [f"women-help:chatwoot-events:{config['account_id']}:{lane}" for lane in range(8)]
     projection = await redis.eval(QUEUE_PROJECTION, 8, *keys, now)
-    if not isinstance(projection, (str, bytes)) or len(projection) > 4096:
+    if not isinstance(projection, (str, bytes)) or len(projection) > 8192:
         return observation(False, "queue_metadata_invalid")
     try:
         return queue_observation(json.loads(projection), now)

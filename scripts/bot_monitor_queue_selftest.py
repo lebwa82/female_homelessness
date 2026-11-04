@@ -25,6 +25,12 @@ async def reset(redis):
         await redis.xgroup_create(key, "agent", "0", mkstream=True)
 
 
+def expected(ok, reason, count=0, age=0, *, high=0, unread=0):
+    return {"ok": ok, "reason": reason, "count": count, "oldest_known_age_seconds": age,
+            "ready_counts": {"high": high, "medium": 0, "low": 0},
+            "stream_unread_counts": {str(lane): unread if lane == 7 else 0 for lane in range(8)}}
+
+
 async def run() -> int:
     initialized = False
     passed = 0
@@ -41,24 +47,21 @@ async def run() -> int:
                 return await probe.check_queues(redis, {"account_id": "1"}, NOW)
 
             await reset(redis)
-            assert await observed() == {"ok": True, "reason": "ok", "count": 0,
-                                         "oldest_age_seconds": 0}
+            assert await observed() == expected(True, "ok")
             passed += 1
 
             key = STREAMS[7]
             await redis.xadd(key, {"payload": "synthetic-pending"}, id="1700000800000-0")
             await redis.xreadgroup("agent", "synthetic", {key: ">"}, count=1)
             await redis.xadd(key, {"payload": "synthetic-ready"}, id="1700000900000-0")
-            assert await observed() == {"ok": False, "reason": "queue_stalled", "count": 2,
-                                         "oldest_age_seconds": 200}
+            assert await observed() == expected(False, "queue_stalled", 2, 200, unread=1)
             passed += 1
 
             for timestamp in (1700000800, 1700000800000):
                 await reset(redis)
                 await redis.lpush("queue:high", json.dumps({"enqueued_at": timestamp,
                                                            "args": ["synthetic-job"]}))
-                assert await observed() == {"ok": False, "reason": "queue_stalled", "count": 1,
-                                             "oldest_age_seconds": 200}
+                assert await observed() == expected(True, "ok", 1, high=1)
                 passed += 1
 
             await reset(redis)
@@ -68,16 +71,20 @@ async def run() -> int:
             passed += 1
 
             await redis.zadd("retry", {"synthetic-due-job": NOW - 200})
-            assert await observed() == {"ok": False, "reason": "queue_stalled", "count": 1,
-                                         "oldest_age_seconds": 200}
+            assert await observed() == expected(False, "queue_stalled", 1, 200)
             passed += 1
 
-            for timestamp in (-1, NOW + 1):
-                await reset(redis)
-                await redis.lpush("queue:low", json.dumps({"enqueued_at": timestamp}))
-                result = await observed()
-                assert result == {"ok": False, "reason": "queue_metadata_invalid"}
-                passed += 1
+            await reset(redis)
+            await redis.zadd("retry", {"synthetic-invalid-score": -1})
+            assert await observed() == {"ok": False, "reason": "queue_metadata_invalid"}
+            passed += 1
+
+            await reset(redis)
+            await redis.xadd(STREAMS[0], {"payload": "synthetic-future"},
+                             id=f"{(NOW+1)*1000}-0")
+            await redis.xreadgroup("agent", "synthetic", {STREAMS[0]: ">"}, count=1)
+            assert await observed() == {"ok": False, "reason": "queue_metadata_invalid"}
+            passed += 1
 
             await reset(redis)
             await redis.xgroup_destroy(STREAMS[0], "agent")

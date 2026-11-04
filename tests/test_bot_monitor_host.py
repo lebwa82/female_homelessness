@@ -36,7 +36,26 @@ def write_config(path, urls=None, **values):
 
 
 def healthy():
-    return {check: {"ok": True, "reason": "ok"} for check in CHECKS[:-1]}
+    observations = {check: {"ok": True, "reason": "ok"} for check in CHECKS[:-1]}
+    observations["queues"].update(ready_counts={}, stream_unread_counts={})
+    return observations
+
+
+@pytest.fixture
+def backlog_path(tmp_path):
+    directory = tmp_path / "monitor-state"
+    directory.mkdir(mode=0o700)
+    assert directory.stat().st_mode & 0o777 == 0o700
+    return directory / "queue-backlog.json"
+
+
+def queue_metadata(ready=None, unread=None):
+    return {
+        "ok": True,
+        "reason": "ok",
+        "ready_counts": {"default": 1} if ready is None else ready,
+        "stream_unread_counts": {"0": 0} if unread is None else unread,
+    }
 
 
 def fake_items(tmp_path):
@@ -367,6 +386,7 @@ def test_dry_run_sends_no_heartbeat_or_telegram_and_does_not_persist(tmp_path, r
     before = path.read_bytes()
     host.tick(config(), path, dry_run=True)
     assert path.read_bytes() == before
+    assert not path.with_name("queue-backlog.json").exists()
     assert requests == [{}]
     heartbeats.assert_not_called()
 
@@ -438,3 +458,170 @@ def test_pending_reminder_and_recovery_coalesce_to_latest_event_per_check(tmp_pa
     assert set(recovery) == {"telegram_poll"}
     assert "Восстановлено" in recovery["telegram_poll"]["text"]
     assert recovery["telegram_poll"]["delivery_id"] != reminder["telegram_poll"]["delivery_id"]
+
+
+@pytest.mark.parametrize(
+    "ready,unread,key",
+    [
+        ({"default": 3}, {"0": 0}, "sidekiq:default"),
+        ({"default": 0}, {"0": 3}, "stream:0"),
+    ],
+)
+def test_nonempty_backlog_interval_threshold_is_strictly_greater_than_180_seconds(
+    backlog_path,
+    ready,
+    unread,
+    key,
+):
+    metadata = queue_metadata(ready, unread)
+    assert host.backlog_observation(metadata, backlog_path, 1000, persist=True) == metadata
+    assert backlog_path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(backlog_path.read_text()) == {key: 1000}
+    assert host.backlog_observation(metadata, backlog_path, 1180, persist=True) == metadata
+    assert host.backlog_observation(metadata, backlog_path, 1181, persist=True) == {
+        "ok": False,
+        "reason": "queue_backlog",
+    }
+
+
+def test_empty_observation_resets_interval_and_new_backlog_starts_fresh(backlog_path):
+    full = queue_metadata({"default": 1}, {"0": 1})
+    host.backlog_observation(full, backlog_path, 1000, persist=True)
+    assert host.backlog_observation(full, backlog_path, 1181, persist=True)["ok"] is False
+    empty = queue_metadata({"default": 0}, {"0": 0})
+    assert host.backlog_observation(empty, backlog_path, 1182, persist=True) == empty
+    assert json.loads(backlog_path.read_text()) == {}
+    assert host.backlog_observation(full, backlog_path, 1183, persist=True) == full
+    assert json.loads(backlog_path.read_text()) == {"sidekiq:default": 1183, "stream:0": 1183}
+    assert host.backlog_observation(full, backlog_path, 1363, persist=True) == full
+
+
+def test_restart_uses_persisted_nonempty_interval_even_when_count_changes(backlog_path):
+    host.backlog_observation(
+        queue_metadata({"default": 3}, {"2": 2}), backlog_path, 1000, persist=True
+    )
+    persisted = json.loads(backlog_path.read_text())
+    assert persisted == {"sidekiq:default": 1000, "stream:2": 1000}
+    # Fresh observations carry no in-memory clock. Continued nonempty status
+    # survives a process restart without claiming that these are the same jobs.
+    result = host.backlog_observation(
+        queue_metadata({"default": 1}, {"2": 1}), backlog_path, 1181, persist=True
+    )
+    assert result == {"ok": False, "reason": "queue_backlog"}
+    assert json.loads(backlog_path.read_text()) == persisted
+
+
+def test_backlog_dry_run_reads_existing_interval_without_writing_or_creating_files(backlog_path):
+    full = queue_metadata()
+    assert host.backlog_observation(full, backlog_path, 1000, persist=False) == full
+    assert not backlog_path.exists()
+    host.backlog_observation(full, backlog_path, 1000, persist=True)
+    original = backlog_path.read_bytes()
+    empty = queue_metadata({}, {})
+    assert host.backlog_observation(empty, backlog_path, 1181, persist=False) == empty
+    assert backlog_path.read_bytes() == original
+    assert host.backlog_observation(full, backlog_path, 1181, persist=False) == {
+        "ok": False,
+        "reason": "queue_backlog",
+    }
+    assert backlog_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"ready_counts": None},
+        {"stream_unread_counts": None},
+        {"ready_counts": []},
+        {"stream_unread_counts": []},
+        {"ready_counts": {"invalid/name": 1}},
+        {"ready_counts": {"private text": 1}},
+        {"ready_counts": {"a" * 65: 1}},
+        {"stream_unread_counts": {"8": 1}},
+        {"stream_unread_counts": {"0:private": 1}},
+        {"ready_counts": {1: 1}},
+        {"ready_counts": {"default": -1}},
+        {"ready_counts": {"default": True}},
+        {"stream_unread_counts": {"0": 1.5}},
+        {"ready_counts": {f"queue_{index}": 1 for index in range(65)}},
+    ],
+)
+def test_unknown_metadata_or_invalid_queue_names_fail_with_bounded_reason(backlog_path, changes):
+    metadata = {**queue_metadata(), **changes}
+    assert host.backlog_observation(metadata, backlog_path, 1000, persist=True) == {
+        "ok": False,
+        "reason": "queue_metadata_invalid",
+    }
+    assert not backlog_path.exists()
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [1001, -1, True, None, "private timestamp", float("nan"), float("inf"), 10**1000],
+    ids=["future", "negative", "boolean", "missing", "text", "nan", "infinity", "overflow"],
+)
+def test_future_or_corrupt_persisted_backlog_timestamps_fail_closed(backlog_path, timestamp):
+    backlog_path.write_text(json.dumps({"sidekiq:default": timestamp}))
+    backlog_path.chmod(0o600)
+    before = backlog_path.read_bytes()
+    assert host.backlog_observation(queue_metadata(), backlog_path, 1000, persist=True) == {
+        "ok": False,
+        "reason": "queue_metadata_invalid",
+    }
+    assert backlog_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["public", "symlink", "invalid_json", "not_mapping"])
+def test_backlog_file_corruption_is_bounded_and_never_overwritten(backlog_path, damage):
+    backlog_path.write_text("{}")
+    backlog_path.chmod(0o600)
+    if damage == "public":
+        backlog_path.chmod(0o644)
+    elif damage == "symlink":
+        original = backlog_path.with_name("original.json")
+        backlog_path.rename(original)
+        backlog_path.symlink_to(original)
+    elif damage == "invalid_json":
+        backlog_path.write_text("not json")
+    else:
+        backlog_path.write_text("[]")
+    before = backlog_path.read_bytes()
+    assert host.backlog_observation(queue_metadata(), backlog_path, 1000, persist=True) == {
+        "ok": False,
+        "reason": "queue_metadata_invalid",
+    }
+    assert backlog_path.read_bytes() == before
+
+
+def test_backlog_check_only_uses_counts_and_its_local_timestamp_file(backlog_path, monkeypatch):
+    class MetadataOnly(dict):
+        def get(self, key, *args):
+            assert key in {"ok", "ready_counts", "stream_unread_counts"}
+            return super().get(key, *args)
+
+    metadata = MetadataOnly(queue_metadata({"default": 1}, {"1": 1}))
+    metadata["job_payload"] = "synthetic-private-payload-marker"
+    for function in ("command", "containers", "run_probe", "heartbeat"):
+        monkeypatch.setattr(
+            host, function, Mock(side_effect=AssertionError("unexpected external read"))
+        )
+    assert host.backlog_observation(metadata, backlog_path, 1000, persist=True) is metadata
+    assert json.loads(backlog_path.read_text()) == {"sidekiq:default": 1000, "stream:1": 1000}
+    assert "private" not in backlog_path.read_text()
+
+
+@pytest.mark.parametrize("metadata", [None, [], "invalid"])
+def test_nonmapping_backlog_observation_fails_with_bounded_reason(backlog_path, metadata):
+    assert host.backlog_observation(metadata, backlog_path, 1000, persist=True) == {
+        "ok": False,
+        "reason": "queue_metadata_invalid",
+    }
+    assert not backlog_path.exists()
+
+
+def test_existing_failed_queue_observation_keeps_its_bounded_reason_without_reading_payload(
+    backlog_path,
+):
+    observation = {"ok": False, "reason": "redis_unavailable"}
+    assert host.backlog_observation(observation, backlog_path, 1000, persist=True) is observation
+    assert not backlog_path.exists()

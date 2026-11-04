@@ -7,6 +7,7 @@ import concurrent.futures
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -203,6 +204,48 @@ def load_state(path: Path) -> dict:
     return state
 
 
+def backlog_observation(observation: dict, path: Path, now: float, *, persist: bool) -> dict:
+    """Track observed nonempty queues without reading jobs or claiming exact job age."""
+    if not isinstance(observation, dict):
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+    if observation.get("ok") is not True:
+        return observation
+    ready = observation.get("ready_counts")
+    unread = observation.get("stream_unread_counts")
+    if not isinstance(ready, dict) or not isinstance(unread, dict) or len(ready) > 64 or len(unread) > 8:
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+    if any(not isinstance(k, str) or not re.fullmatch(r"[A-Za-z0-9_:-]{1,64}", k) for k in ready):
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+    if any(str(k) not in set("01234567") for k in unread):
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+    counts = {**{"sidekiq:" + k: v for k, v in ready.items()},
+              **{"stream:" + str(k): v for k, v in unread.items()}}
+    if any(type(v) is not int or v < 0 for v in counts.values()):
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+    previous = {}
+    if path.is_symlink():
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+    try:
+        if path.exists():
+            if path.stat().st_mode & 0o077 or path.stat().st_size > 32768:
+                return {"ok": False, "reason": "queue_metadata_invalid"}
+            previous = json.loads(path.read_text())
+            if not isinstance(previous, dict) or len(previous) > 72:
+                return {"ok": False, "reason": "queue_metadata_invalid"}
+            if any(type(v) not in (float, int) or not math.isfinite(v) or not 0 <= v <= now
+                   for v in previous.values()):
+                return {"ok": False, "reason": "queue_metadata_invalid"}
+        current = {key: previous.get(key, now) for key, n in counts.items() if n > 0}
+        age = max((now - stamp for stamp in current.values()), default=0)
+        if persist:
+            save_state(path, current)
+        if age > 180:
+            return {"ok": False, "reason": "queue_backlog"}
+        return observation
+    except (OSError, ValueError, TypeError, OverflowError):
+        return {"ok": False, "reason": "queue_metadata_invalid"}
+
+
 def tick(config: dict, path: Path, *, dry_run: bool = False, test_telegram: bool = False) -> dict:
     state = load_state(path)
     if test_telegram:
@@ -234,6 +277,10 @@ def tick(config: dict, path: Path, *, dry_run: bool = False, test_telegram: bool
     if tunnel.returncode:
         observations["telegram_proxy"] = {"ok": False, "reason": "tunnel_unavailable"}
     now = time.time()
+    observations["queues"] = backlog_observation(
+        observations.get("queues", {}), path.with_name("queue-backlog.json"), now,
+        persist=not dry_run,
+    )
     machine, events, reported = transition(state["machine"], observations, now)
     delivered = set(answer.get("telegram_delivered", []))
     remaining = {k: v for k, v in state["pending"].items() if v["delivery_id"] not in delivered}
