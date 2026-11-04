@@ -85,6 +85,20 @@ def compose_files(
 
 def main() -> int:
     try:
+        if sys.argv[1:2] == ["--monitoring"]:
+            # Separate fixed project; cannot activate, rebuild or replace core services.
+            args = sys.argv[2:]
+            if not args or args[0] not in {"run", "config", "ps"} or any(
+                arg.split("=", 1)[0] in {"-f", "--file", "--env-file", "--project-directory", "-p", "--project-name"}
+                or arg.startswith("-f") for arg in args
+            ):
+                raise ValueError("unsupported monitoring command")
+            environment = {k: v for k, v in os.environ.items() if not k.startswith("COMPOSE_")}
+            return subprocess.call([
+                "docker", "compose", "--project-name", "nevidimy-monitor",
+                "--env-file", "/dev/null", "-f", str(ROOT / "deploy/timeweb/compose.monitor.yml"),
+                *args,
+            ], cwd=ROOT, env=environment)
         domain_https = DOMAIN_HTTPS_DROPIN.is_file()
         files, values = compose_files(
             ENV_FILE,

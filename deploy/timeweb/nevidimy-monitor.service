@@ -1,0 +1,18 @@
+[Unit]
+Description=Nevidimy independent bot watchdog
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/nevidimy/monitor/current
+ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
+ExecStart=/usr/bin/python3 -B /opt/nevidimy/monitor/current/scripts/bot_monitor.py
+TimeoutStartSec=45
+UMask=0077
+StateDirectory=nevidimy-monitor
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+

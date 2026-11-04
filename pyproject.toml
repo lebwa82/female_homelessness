@@ -46,6 +46,9 @@ target-version = "py314"
 [tool.ruff.per-file-target-version]
 "scripts/chatwoot_compose.py" = "py310"
 "scripts/prepare_internal_tls.py" = "py310"
+"scripts/bot_monitor.py" = "py310"
+"scripts/install_bot_monitoring.py" = "py310"
+"app/monitoring/state.py" = "py310"
 
 [tool.uv.sources]
 ru-core-news-sm = { url = "https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.8.0/ru_core_news_sm-3.8.0-py3-none-any.whl" }

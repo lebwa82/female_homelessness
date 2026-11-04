@@ -1,0 +1,39 @@
+# Independent project: never replaces or restarts a working bot service.
+services:
+  probe:
+    image: ${MONITOR_IMAGE:?Set the inspected immutable agent image ID}
+    pull_policy: never
+    entrypoint: ["/app/.venv/bin/python", "-B", "/monitor/probe.py"]
+    command: []
+    user: "65534:65534"
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 32
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stdin_open: true
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      SSL_CERT_FILE: /run/tls/ca-bundle.pem
+    volumes:
+      - type: bind
+        source: ${MONITOR_PROBE_SOURCE:?Set the probe source path}
+        target: /monitor/probe.py
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MONITOR_CA_SOURCE:?Set the existing internal CA path}
+        target: /run/tls/ca.crt
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MONITOR_CA_BUNDLE_SOURCE:?Set the existing trusted CA bundle}
+        target: /run/tls/ca-bundle.pem
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [runtime]
+networks:
+  runtime:
+    external: true
+    name: ${MONITOR_NETWORK:?Set the inspected existing Compose network}
