@@ -52,6 +52,9 @@ Compose project. Основной release `/opt/nevidimy/app` не перекл�
 
 Прямого маршрута в Telegram нет. Heartbeat Better Stack идёт отдельным HTTPS
 с хоста, без Telegram-прокси. В логах нет URL heartbeat, токенов и сырых ошибок.
+Одна отправка ограничена четырьмя секундами. При таймауте TCP/TLS пробуется
+следующий свежий DNS-адрес того же домена: SNI, Host и проверка сертификата
+остаются исходными. Домены не подменяются, перенаправления не выполняются.
 Доступы к основному боту и админ-боту читаются в памяти из текущих контейнеров;
 копии токенов в новой конфигурации не создаются.
 
@@ -120,7 +123,7 @@ oneshot; вернуть предыдущую ссылку `monitor/current` и w
 
 ## Проверки кода
 
-`uv run pytest tests/test_bot_monitor_*.py tests/test_setup_bot_monitoring.py
+`uv run pytest tests/test_bot_monitor_*.py tests/test_monitor_heartbeat.py tests/test_setup_bot_monitoring.py
 tests/test_install_bot_monitoring.py tests/test_chatwoot_compose_entrypoint.py -q --tb=short`.
 Дополнительные Lua-тесты используют Redis 7+ в изолированном пустом DB15:
 `TEST_MONITOR_REDIS_URL=redis://127.0.0.1:16379/15`.

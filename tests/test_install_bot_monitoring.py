@@ -24,6 +24,7 @@ def release(tmp_path, monkeypatch):
         "scripts/chatwoot_compose.py": "# compose\n",
         "deploy/timeweb/compose.monitor.yml": "services: {}\n",
         "app/monitoring/state.py": "# state\n",
+        "app/monitoring/heartbeat.py": "# heartbeat\n",
         "deploy/timeweb/nevidimy-monitor.service": "[Service]\nExecStart=/usr/bin/python3 -B /opt/nevidimy/monitor/current/scripts/bot_monitor.py\n",
         "deploy/timeweb/nevidimy-monitor.timer": "[Timer]\nOnUnitActiveSec=60\n",
         "deploy/timeweb/monitor.env.example": "BOT_MONITOR_HEARTBEAT_URLS_JSON={}\n",
@@ -226,6 +227,7 @@ def test_failed_enable_leaves_recoverable_backup_and_preserves_state(release):
         "scripts/install_bot_monitoring.py",
         "scripts/bot_monitor.py",
         "app/monitoring/state.py",
+        "app/monitoring/heartbeat.py",
         "scripts/chatwoot_compose.py",
     ],
 )
@@ -239,6 +241,7 @@ def test_host_runtime_modules_parse_with_python_310(relative):
     [
         "scripts/chatwoot_compose.py",
         "deploy/timeweb/compose.monitor.yml",
+        "app/monitoring/heartbeat.py",
     ],
 )
 def test_missing_runtime_dependency_stops_before_writes(release, relative):

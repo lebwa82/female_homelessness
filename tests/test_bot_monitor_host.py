@@ -4,11 +4,11 @@ import copy
 import json
 import subprocess
 from unittest.mock import Mock
-from urllib.error import HTTPError
 
 import pytest
 import yaml
 
+from app.monitoring.heartbeat import send_heartbeat
 from app.monitoring.state import CHECKS
 from scripts import bot_monitor as host
 from scripts import chatwoot_compose as compose
@@ -340,36 +340,8 @@ def test_probe_timeout_removes_only_named_monitor_container(monkeypatch):
     assert command.call_args_list[1].args[0] == ["docker", "rm", "-f", host.PROBE_NAME]
 
 
-@pytest.mark.parametrize("ok", [True, False])
-def test_heartbeat_disables_environment_proxies_and_redirects(monkeypatch, ok):
-    monkeypatch.setenv("HTTPS_PROXY", "http://synthetic-untrusted-proxy:9999")
-    response = Mock(status=204)
-    response.__enter__ = Mock(return_value=response)
-    response.__exit__ = Mock(return_value=False)
-    opener = Mock()
-    opener.open.return_value = response
-    factory = Mock(return_value=opener)
-    monkeypatch.setattr(host, "build_opener", factory)
-    url = config()["urls"]["agent"]
-    assert host.heartbeat(url, ok) is True
-    assert factory.call_args.args[0].proxies == {}
-    blocker = opener.add_handler.call_args.args[0]
-    assert blocker.redirect_request(None, None, 302, "redirect", {}, "https://evil.example") is None
-    request = opener.open.call_args.args[0]
-    assert request.full_url == url + ("" if ok else "/fail")
-    assert request.get_method() == "POST"
-    assert request.data == b""
-    assert opener.open.call_args.kwargs["timeout"] == 3
-
-
-def test_redirect_failure_is_not_retried_or_logged(monkeypatch, capsys):
-    opener = Mock()
-    url = config()["urls"]["agent"]
-    opener.open.side_effect = HTTPError(url, 302, "synthetic secret", {}, None)
-    monkeypatch.setattr(host, "build_opener", Mock(return_value=opener))
-    assert host.heartbeat(url, True) is False
-    assert opener.open.call_count == 1
-    assert capsys.readouterr() == ("", "")
+def test_host_uses_the_verified_deadline_bounded_heartbeat_transport():
+    assert host.heartbeat is send_heartbeat
 
 
 def test_dry_run_sends_no_heartbeat_or_telegram_and_does_not_persist(tmp_path, runtime):

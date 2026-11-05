@@ -15,11 +15,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.monitoring.heartbeat import send_heartbeat as heartbeat
 from app.monitoring.state import CHECKS, format_telegram_event, transition
 
 PROJECT = "nevidimy-timeweb"
@@ -143,25 +143,6 @@ def run_probe(data: dict, docker_env: dict) -> dict:
     except subprocess.TimeoutExpired:
         command(["docker", "rm", "-f", PROBE_NAME], timeout=3)
         raise ValueError("probe_timeout") from None
-
-
-def heartbeat(url: str, ok: bool) -> bool:
-    # Direct HTTPS to the external watchdog is independent of Telegram's proxy.
-    request = Request(url + ("" if ok else "/fail"), data=b"", method="POST")
-    try:
-        opener = build_opener(ProxyHandler({}))
-        # No redirects: a secret heartbeat URL must never be forwarded elsewhere.
-        from urllib.request import HTTPRedirectHandler
-
-        class NoRedirect(HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
-                return None
-
-        opener.add_handler(NoRedirect())
-        with opener.open(request, timeout=3) as response:
-            return 200 <= response.status < 300
-    except Exception:  # noqa: BLE001 - never log a secret URL
-        return False
 
 
 def save_state(path: Path, state: dict) -> None:

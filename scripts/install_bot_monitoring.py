@@ -111,6 +111,7 @@ def validate(revision: str, source: Path, layout: Layout, apply: bool) -> tuple[
         "scripts/chatwoot_compose.py",
         "deploy/timeweb/compose.monitor.yml",
         "app/monitoring/state.py",
+        "app/monitoring/heartbeat.py",
         "deploy/timeweb/monitor.env.example",
         *("deploy/timeweb/" + name for name in UNIT_NAMES),
     ):
