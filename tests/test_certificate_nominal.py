@@ -12,9 +12,15 @@ def parse_amount(monkeypatch, provider, amount):
             "Серийный номер INVALID-SERIAL\nАктивировать до 31.12.2030\n"
         )
     else:
-        text = "Пятёрочка\nНомер INVALIDTESTONLY\n01.01.2025 - 31.12.2030\n"
+        text = "Пятёрочка\n01.01.2025 - 31.12.2030\n"
+        if amount.startswith(("Номер ", "Номер:")):
+            # These cases include the number field immediately before the amount.
+            number = "123456"
+        else:
+            number = "INVALIDTESTONLY"
+            text += f"Номер {number}\n"
         monkeypatch.setattr(
-            certificate_documents, "_decode_qr_values", lambda _: ("INVALIDTESTONLY",),
+            certificate_documents, "_decode_qr_values", lambda _: (number,),
         )
     page = SimpleNamespace(extract_text=lambda **kwargs: text + amount)
     monkeypatch.setattr(

@@ -188,7 +188,18 @@ def _parse_ozon(
 
 
 def _parse_pyaterochka(pdf_bytes: bytes, filename: str, text: str) -> ParsedCertificatePdf:
-    number = _match(text, r"Номер(?: и QR-PAYLOAD)?\s*:?\s*([A-Za-z0-9]+)")
+    # PDF glyph positioning can insert spaces inside the printed number.
+    # Read the whole value line, not a prefix or text from the next field.
+    number_fields = re.findall(
+        r"^[^\S\r\n]*Номер(?: и QR-PAYLOAD)?(?=[^\S\r\n]|:|\r?$)"
+        r"[^\S\r\n]*:?[^\S\r\n]*(?:\r?\n)?([^\r\n]*)",
+        text, re.IGNORECASE | re.MULTILINE,
+    )
+    if len(number_fields) != 1:
+        raise ValueError("certificate must have one printed number")
+    number = "".join(number_fields[0].split())
+    if not re.fullmatch(r"[A-Za-z0-9]+", number):
+        raise ValueError("invalid printed certificate number")
     date_pair = re.search(
         r"(\d{2}\.\d{2}\.\d{4})\s*[-—]\s*(\d{2}\.\d{2}\.\d{4})", text
     )
