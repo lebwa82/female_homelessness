@@ -1,15 +1,105 @@
+import io
+from datetime import UTC, datetime, timedelta
+from html import escape
 from unittest.mock import AsyncMock, Mock, call
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 from botocore.exceptions import ClientError
 
 from analytics import hourly_export
 from analytics.hourly_export import publish
+from analytics.shared_s3 import TeamShare, parse_signed_share
 
 BUCKET = "a1b2c3d4-nevidimy-analytics"
 STAMP = "2026-11-11T12:00:00+00:00"
 FILES = {"latest.xlsx": b"synthetic workbook bytes", "latest.html": b"<p>Synthetic report</p>"}
+SHARE_ID = "12345678-1234-1234-1234-123456789abc"
+
+
+def signed_object(name, identifier=SHARE_ID):
+    query = urlencode({
+        "X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": "synthetic",
+        "X-Amz-Date": "20990101T000000Z", "X-Amz-Expires": "86400", "X-Amz-SignedHeaders": "host",
+        "X-Amz-Signature": "a" * 64,
+    })
+    return f"https://s3.twcstorage.ru/{BUCKET}/team-share/{identifier}/{name}?{query}"
+
+
+def old_dashboard(url):
+    return f'<a id="download-excel" class="pill" href="{escape(url, quote=True)}">Скачать Excel</a>'
+
+
+def test_refresh_same_pair_and_same_excel_link(ready_files, monkeypatch):
+    share = parse_signed_share(signed_object("dashboard.html"), BUCKET, "dashboard.html")
+    excel = signed_object("latest.xlsx")
+    existing = old_dashboard(excel)
+    expected = existing + '<script id="metrics-data" type="application/json">{"fresh":true}</script>'
+    (ready_files / "snapshot.json").write_text('{"fresh": true}', encoding="utf-8")
+    renderer = Mock(return_value=expected)
+    monkeypatch.setattr(hourly_export, "render_shared_dashboard", renderer)
+    client = Mock()
+    client.get_object.return_value = {"Body": io.BytesIO(existing.encode())}
+    sizes = {share.key("latest.xlsx"): 1}
+    uploads = []
+
+    def put(**params):
+        uploads.append((params["Key"], params["Body"].read(), params["ContentDisposition"], params["CacheControl"]))
+        sizes[params["Key"]] = params["ContentLength"]
+
+    client.put_object.side_effect = put
+    client.head_object.side_effect = lambda *, Bucket, Key: {
+        "ContentLength": sizes[Key], "Metadata": {"snapshot-utc": STAMP},
+    }
+    assert hourly_export.refresh_team_share(client, BUCKET, ready_files, STAMP, share) is True
+    client.get_object.assert_called_once_with(Bucket=BUCKET, Key=share.key("dashboard.html"))
+    renderer.assert_called_once_with(existing, {"fresh": True})
+    assert uploads == [
+        (share.key("latest.xlsx"), FILES["latest.xlsx"], 'attachment; filename="latest.xlsx"', "private, no-store"),
+        (share.key("dashboard.html"), expected.encode(), "inline", "private, no-store"),
+    ]
+    client.generate_presigned_url.assert_not_called()
+
+
+def test_expired_team_share_does_not_call_s3(ready_files):
+    client = Mock()
+    expired = TeamShare(SHARE_ID, datetime.now(UTC) - timedelta(seconds=1))
+    assert hourly_export.refresh_team_share(client, BUCKET, ready_files, STAMP, expired) is False
+    assert not client.mock_calls
+
+
+def test_foreign_workbook_link_prevents_updates(ready_files):
+    share = parse_signed_share(signed_object("dashboard.html"), BUCKET, "dashboard.html")
+    client = Mock()
+    foreign = signed_object("latest.xlsx", identifier="98765432-1234-1234-1234-123456789abc")
+    client.get_object.return_value = {"Body": io.BytesIO(old_dashboard(foreign).encode())}
+    with pytest.raises(ValueError, match="outside the configured share"):
+        hourly_export.refresh_team_share(client, BUCKET, ready_files, STAMP, share)
+    client.put_object.assert_not_called()
+
+
+def test_deleted_workbook_not_recreated(ready_files, monkeypatch):
+    share = parse_signed_share(signed_object("dashboard.html"), BUCKET, "dashboard.html")
+    client = Mock()
+    existing = old_dashboard(signed_object("latest.xlsx"))
+    client.get_object.return_value = {"Body": io.BytesIO(existing.encode())}
+    client.head_object.side_effect = policy_error("NoSuchKey")
+    monkeypatch.setattr(hourly_export, "render_shared_dashboard", Mock(return_value=existing))
+    (ready_files / "snapshot.json").write_text('{}', encoding="utf-8")
+    with pytest.raises(ClientError, match="NoSuchKey"):
+        hourly_export.refresh_team_share(client, BUCKET, ready_files, STAMP, share)
+    client.put_object.assert_not_called()
+
+
+@pytest.mark.parametrize("change", [
+    lambda url: url + "&versionId=synthetic",
+    lambda url: url.replace("s3.twcstorage.ru", "example.invalid"),
+    lambda url: url.replace("X-Amz-Expires=86400", "X-Amz-Expires=604801"),
+    lambda url: url.replace("dashboard.html", "../dashboard.html"),
+])
+def test_share_requires_unversioned_key_and_known_scope(change):
+    with pytest.raises(ValueError, match="analytics"):
+        parse_signed_share(change(signed_object("dashboard.html")), BUCKET, "dashboard.html")
 
 
 def policy_error(code):

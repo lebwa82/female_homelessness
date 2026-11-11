@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlencode
@@ -16,6 +18,8 @@ from botocore.exceptions import ClientError
 
 from analytics.chat_export_xlsx import ExportTable, write_workbook
 from analytics.internal_html import render_html
+from analytics.shared_dashboard import render_shared_dashboard
+from analytics.shared_s3 import TeamShare, parse_signed_share, workbook_link
 
 # This is the approved schema of the previous export. Do not automatically
 # include new columns or other workspaces when Chatwoot adds them.
@@ -60,7 +64,7 @@ async def export_table(connection: asyncpg.Connection, table: str, account_id: i
     return ExportTable(table, tuple((name, types[name]) for name in names), rows)
 
 
-async def build(directory: Path) -> tuple[str, dict[str, int]]:
+async def build(directory: Path, *, keep_snapshot: bool = False) -> tuple[str, dict[str, int]]:
     account_id = int(os.environ["ANALYTICS_ACCOUNT_ID"])
     inbox_id = int(os.environ["ANALYTICS_INBOX_ID"])
     bot_name = os.environ["ANALYTICS_BOT_NAME"]
@@ -90,6 +94,8 @@ async def build(directory: Path) -> tuple[str, dict[str, int]]:
             tables = [await export_table(connection, name, account_id) for name in EXPORT_COLUMNS]
             counts = await write_workbook(directory / "latest.xlsx", tables, stamp)
             (directory / "latest.html").write_text(html, encoding="utf-8")
+            if keep_snapshot:
+                (directory / "snapshot.json").write_text(raw, encoding="utf-8")
     finally:
         await connection.close(timeout=5)
     return stamp.isoformat(), counts
@@ -108,6 +114,16 @@ def assert_private_bucket(client, bucket: str) -> None:
         raise ValueError("Analytics bucket has an unexpected bucket policy")
 
 
+def put_verified(client, bucket, key, stream, size, content_type, disposition, stamp):
+    client.put_object(
+        Bucket=bucket, Key=key, Body=stream, ContentLength=size, ContentType=content_type,
+        ContentDisposition=disposition, CacheControl="private, no-store", Metadata={"snapshot-utc": stamp},
+    )
+    head = client.head_object(Bucket=bucket, Key=key)
+    if head["ContentLength"] != size or head["Metadata"].get("snapshot-utc") != stamp:
+        raise ValueError("Published object did not match the build")
+
+
 def publish(client, bucket: str, directory: Path, stamp: str) -> None:
     if bucket != "nevidimy-analytics" and not bucket.endswith("-nevidimy-analytics"):
         raise ValueError("Expected the dedicated analytics bucket")
@@ -118,19 +134,49 @@ def publish(client, bucket: str, directory: Path, stamp: str) -> None:
     for path, content_type in files:
         size = path.stat().st_size
         with path.open("rb") as data:
-            client.put_object(
-                Bucket=bucket,
-                Key=path.name,
-                Body=data,
-                ContentLength=size,
-                ContentType=content_type,
-                ContentDisposition=f'attachment; filename="{path.name}"',
-                CacheControl="private, no-store",
-                Metadata={"snapshot-utc": stamp},
-            )
-        head = client.head_object(Bucket=bucket, Key=path.name)
-        if head["ContentLength"] != size or head["Metadata"].get("snapshot-utc") != stamp:
-            raise ValueError("Published object did not match the build")
+            put_verified(client, bucket, path.name, data, size, content_type, f'attachment; filename="{path.name}"', stamp)
+
+
+def configured_share() -> TeamShare | None:
+    identifier = os.environ.get("ANALYTICS_TEAM_SHARE_ID", "")
+    expiry = os.environ.get("ANALYTICS_TEAM_SHARE_EXPIRES_AT", "")
+    if not identifier and not expiry:
+        return None
+    share = TeamShare(identifier, datetime.fromisoformat(expiry))
+    return share if share.active() else None
+
+
+def refresh_team_share(client, bucket: str, directory: Path, stamp: str, share: TeamShare) -> bool:
+    """Refresh only the existing share, after the normal private publication."""
+    if not share.active():
+        return False
+    html_key, xlsx_key = share.key("dashboard.html"), share.key("latest.xlsx")
+    # Both objects must already exist. Do not recreate an intentionally removed share.
+    with client.get_object(Bucket=bucket, Key=html_key)["Body"] as stream:
+        previous = stream.read(1_000_001)
+    if len(previous) > 1_000_000:
+        raise ValueError("Shared analytics dashboard is too large")
+    template = previous.decode("utf-8")
+    excel_url = workbook_link(template)
+    excel = parse_signed_share(excel_url, bucket, "latest.xlsx")
+    if excel.identifier != share.identifier or excel.expires_at < share.expires_at:
+        raise ValueError("Workbook link is outside the configured share")
+    snapshot = json.loads((directory / "snapshot.json").read_text(encoding="utf-8"))
+    updated = render_shared_dashboard(template, snapshot)
+    if workbook_link(updated) != excel_url:
+        raise ValueError("Dashboard update changed the workbook link")
+    html = updated.encode("utf-8")
+    workbook = directory / "latest.xlsx"
+    size = workbook.stat().st_size
+    if size <= 0:
+        raise ValueError("Missing analytics workbook")
+    client.head_object(Bucket=bucket, Key=xlsx_key)
+    if not share.active():
+        return False
+    with workbook.open("rb") as data:
+        put_verified(client, bucket, xlsx_key, data, size, ARTIFACTS[0][1], 'attachment; filename="latest.xlsx"', stamp)
+    put_verified(client, bucket, html_key, io.BytesIO(html), len(html), ARTIFACTS[1][1], "inline", stamp)
+    return True
 
 
 def main() -> None:
@@ -139,7 +185,8 @@ def main() -> None:
     try:
         with TemporaryDirectory(dir=os.environ.get("RUNTIME_DIRECTORY")) as temporary:
             directory = Path(temporary)
-            stamp, counts = asyncio.run(build(directory))
+            share = configured_share()
+            stamp, counts = asyncio.run(build(directory, keep_snapshot=share is not None))
             stage = "publish"
             client = boto3.client(
                 "s3",
@@ -154,10 +201,14 @@ def main() -> None:
                     retries={"mode": "standard", "total_max_attempts": 2},
                 ),
             )
-            publish(client, os.environ["ANALYTICS_S3_BUCKET"], directory, stamp)
+            bucket = os.environ["ANALYTICS_S3_BUCKET"]
+            publish(client, bucket, directory, stamp)
+            stage = "shared dashboard"
+            refreshed = share is not None and refresh_team_share(client, bucket, directory, stamp, share)
     except Exception as error:  # noqa: BLE001 - backend errors can include SQL values or credentials.
         raise SystemExit(f"Analytics {stage} failed: {type(error).__name__}") from None
-    print(json.dumps({"snapshot_utc": stamp, "rows": counts, "files": [k for k, _ in ARTIFACTS]}))
+    print(json.dumps({"snapshot_utc": stamp, "rows": counts, "files": [k for k, _ in ARTIFACTS],
+                      "team_share_refreshed": refreshed}))
 
 
 if __name__ == "__main__":
