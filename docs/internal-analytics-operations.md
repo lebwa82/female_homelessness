@@ -70,10 +70,11 @@ systemctl list-timers nevidimy-analytics.timer
 полное имя бакета из панели Timeweb и не добавляй ключи в аргументы команд:
 
 ```sh
+nevidimy_analytics_bucket='полное-имя-бакета'
 aws --profile nevidimy-analytics --endpoint-url https://s3.twcstorage.ru \
-  s3 cp s3://<имя-бакета>/latest.html ./latest.html
+  s3 cp "s3://${nevidimy_analytics_bucket}/latest.html" ./latest.html
 aws --profile nevidimy-analytics --endpoint-url https://s3.twcstorage.ru \
-  s3 cp s3://<имя-бакета>/latest.xlsx ./latest.xlsx
+  s3 cp "s3://${nevidimy_analytics_bucket}/latest.xlsx" ./latest.xlsx
 ```
 
 HTML откроется локально в браузере. XLSX содержит чувствительную переписку:
