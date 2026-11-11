@@ -4,9 +4,10 @@ WITH scope AS (
  SELECT i.id FROM inboxes i JOIN channel_telegram t ON t.id=i.channel_id
  WHERE i.account_id=$1::bigint AND i.id=$2::bigint AND i.channel_type='Channel::Telegram' AND t.bot_name=$3::text
 ), c AS (
- SELECT c.* FROM conversations c JOIN scope s ON s.id=c.inbox_id WHERE c.account_id=$1 AND c.contact_id IS NOT NULL
+ SELECT c.id,c.contact_id,c.display_id,c.custom_attributes
+ FROM conversations c JOIN scope s ON s.id=c.inbox_id WHERE c.account_id=$1 AND c.contact_id IS NOT NULL
 ), m0 AS (
- SELECT m.*,c.contact_id,
+ SELECT m.id,m.conversation_id,m.content,m.private,m.message_type,m.source_id,m.additional_attributes,m.status,m.created_at,c.contact_id,
  CASE jsonb_typeof(m.content_attributes::jsonb)
  WHEN 'object' THEN m.content_attributes::jsonb
  WHEN 'string' THEN (m.content_attributes::jsonb #>> '{}')::jsonb
