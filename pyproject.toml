@@ -26,9 +26,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-analytics = ["XlsxWriter==3.3.1"]
 dev = [
-  { include-group = "analytics" },
   "pyyaml",
   "pytest",
   "pytest-asyncio",
