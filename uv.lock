@@ -1786,12 +1786,16 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+analytics = [
+    { name = "xlsxwriter" },
+]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pyyaml" },
     { name = "reportlab" },
     { name = "ruff" },
+    { name = "xlsxwriter" },
 ]
 
 [package.metadata]
@@ -1818,12 +1822,14 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+analytics = [{ name = "xlsxwriter", specifier = "==3.3.1" }]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pyyaml" },
     { name = "reportlab", specifier = ">=5.0.1" },
     { name = "ruff" },
+    { name = "xlsxwriter", specifier = "==3.3.1" },
 ]
 
 [[package]]
@@ -1855,6 +1861,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/0f/270bafe92fde3b069a39bc01e39ee79340895b335640df861d43d2a51885/wrapt-2.3.0-cp314-cp314t-win_amd64.whl", hash = "sha256:42869085687f0aefd57c0f636c3f9354f8ffb321a8ba9cb52d19beb796e561c5", size = 83104, upload-time = "2026-07-28T06:05:52.405Z" },
     { url = "https://files.pythonhosted.org/packages/55/b3/af176d79a8515a8a720eccdad9a96f6e31a30abf2865430c8c42adf2fd13/wrapt-2.3.0-cp314-cp314t-win_arm64.whl", hash = "sha256:b1e5aa486e269b00ed35e64771c7d0ab8096cfd2643405ca8cd60ebedc099a51", size = 81774, upload-time = "2026-07-28T06:05:53.902Z" },
     { url = "https://files.pythonhosted.org/packages/00/39/3daf9f47be208606586de4568ba6713db53ebc8fd7a575aea1fe57983b69/wrapt-2.3.0-py3-none-any.whl", hash = "sha256:d8c7ed08477429752b8c44991f40ad7838b18332a160698740a6bfbc10d998a2", size = 61866, upload-time = "2026-07-28T06:06:12.9Z" },
+]
+
+[[package]]
+name = "xlsxwriter"
+version = "3.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9c/fb/31bdbf3737222d92ef7d2db4d50089b2253dbbb63ceb6d20a4447f6b7ed0/xlsxwriter-3.3.1.tar.gz", hash = "sha256:0867761912cceac76f97ffa76eeda18c623ae9217f601be8512f55b1af4bdb6e", size = 223040, upload-time = "2026-10-28T22:52:46.592Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/eb/1e6af9959a567901a7e7c7cef2e75883e487df223ed67f9a8977ff863bd8/xlsxwriter-3.3.1-py3-none-any.whl", hash = "sha256:8e2c89e59d733fe59e112317218c64fbbc276d90a8c144ebd6f7fa15e7ab184a", size = 180583, upload-time = "2026-10-28T22:52:45.048Z" },
 ]
 
 [[package]]
