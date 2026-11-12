@@ -230,6 +230,8 @@ def queues():
           end
         end
       end
+      # DEPRECATED: generic consultation macros here belong to this legacy installer.
+      # Timeweb uses deploy/timeweb/consultation-success-macros.rb instead.
       commands = [
         ['Вернуть боту', [{action_name: 'add_private_note', action_params: ['[women-help:return-to-bot]']}]],
         ['Консультация завершена', [{action_name: 'add_private_note', action_params: ['[women-help:consultation-completed]']}]],

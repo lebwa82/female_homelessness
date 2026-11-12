@@ -53,12 +53,15 @@ _BOT_BOOKKEEPING_ATTRIBUTES = frozenset({
 
 
 RETURN_TO_BOT = "[women-help:return-to-bot]"
+# DEPRECATED: generic completion/planning commands are compatibility entrypoints.
+# New consultation macros must use the typed CONSULTATION_SUCCESS commands below.
 CONSULTATION_COMPLETED = "[women-help:consultation-completed]"
 CONSULTATION_SCHEDULE = "[women-help:consultation-schedule]"
 CONSULTATION_CANCEL = "[women-help:consultation-cancel]"
 CONSULTATION_SUCCESS = {
     "[women-help:consultation-success:psychologist_3_sessions]": "psychologist_3_sessions",
     "[women-help:consultation-success:legal_consultation]": "legal_consultation",
+    "[women-help:consultation-success:peer_consultation]": "peer_consultation",
 }
 
 

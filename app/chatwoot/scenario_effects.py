@@ -11,10 +11,10 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.catalog import get_aid_item
-from app.scenario import CERTIFICATES
+from app.scenario import CERTIFICATES, CONSULTATION_IDS
 
 MSK = ZoneInfo("Europe/Moscow")
-SUCCESS_CONSULTATIONS = frozenset({"psychologist_3_sessions", "legal_consultation"})
+SUCCESS_CONSULTATIONS = frozenset(CONSULTATION_IDS)
 REFERRAL_JOB = "referral:source"
 REFERRAL_SOURCES = {
     "website": "Сайт", "friend": "Знакомые", "organization": "Организация",
@@ -107,7 +107,11 @@ def referral_ready(current: dict) -> bool:
 
 def review_job(jobs: dict, key: str, request: dict, end: datetime,
                *, delay: timedelta = timedelta(hours=2)) -> dict:
-    """Move an unsent review, but never send a second review for the same request."""
+    """Shared review scheduler; never repeat a review already sent.
+
+    The two-hour default is DEPRECATED compatibility for legacy entrypoints.
+    All typed success macros pass an explicit one-hour delay.
+    """
     job_key = f"review:{key}"
     if jobs.get(job_key, {}).get("state") in {"sent", "answered"}:
         return jobs
@@ -159,8 +163,9 @@ class ScenarioEffects:
                     "aid_id": payload["aid_id"], "state": "requested",
                     "requested_at": now.isoformat(),
                 })
-                # Psychologist/legal surveys now require explicit staff confirmation.
-                # Keep the existing contact-check flow for the peer consultation.
+                # DEPRECATED fallback: none of the supported CONSULTATION_IDS enter
+                # this branch. All three require a typed staff-success confirmation.
+                # Keep legacy check jobs/answer handling compatible with stored history.
                 if payload["aid_id"] not in SUCCESS_CONSULTATIONS:
                     jobs = schedule(jobs, f"check:{key}", "s5",
                                     datetime.fromisoformat(request["requested_at"]) + timedelta(days=4),
@@ -236,6 +241,14 @@ class ScenarioEffects:
     async def complete(self, event) -> bool:
         if event.consultation_aid_id is not None:
             return await self._complete_success(event)
+        return await self._complete_legacy(event)
+
+    async def _complete_legacy(self, event) -> bool:
+        """DEPRECATED generic completion; retained for old private/queued commands.
+
+        Reachable for compatibility, not used by any typed success macro.
+        Unlike those macros, its caller also releases the human assignment.
+        """
         current = attrs(await self.api.get_conversation(event.conversation_id))
         requests = dict(current.get("scenario_requests") or {})
         selected = [key for key, value in requests.items()
@@ -334,7 +347,10 @@ class ScenarioEffects:
         return True
 
     async def plan_consultation(self, event) -> None:
-        """Explicit staff macros use sidebar fields; never infer dates from dialogue."""
+        """DEPRECATED planning by sidebar end time; legacy private commands only.
+
+        Still reachable for compatibility; typed success macros never call it.
+        """
         current = attrs(await self.api.get_conversation(event.conversation_id))
         last_message = current.get("consultation_schedule_last_message_id", 0)
         if event.message_id <= last_message:

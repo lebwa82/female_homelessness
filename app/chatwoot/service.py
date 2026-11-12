@@ -582,6 +582,7 @@ class ChatwootAgentService:
 
     async def _staff_message(self, event: StaffMessage) -> None:
         if event.consultation_schedule:
+            # DEPRECATED compatibility: only old scheduling/cancellation commands.
             await self._scenario_effects.plan_consultation(event)
             return  # Scheduling alone never changes ownership or the current menu.
         conversation = await self._api.get_conversation(event.conversation_id)
@@ -592,6 +593,8 @@ class ChatwootAgentService:
         if event.consultation_aid_id:
             await self._scenario_effects.complete(event)
             return  # Recording success does not release a staff-owned conversation.
+        # DEPRECATED generic completion. Typed success macros returned above and
+        # must never inherit this legacy close/unassign behavior.
         if event.consultation_completed and not await self._scenario_effects.complete(event):
             return
         release = event.return_to_bot or event.consultation_completed

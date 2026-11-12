@@ -6,7 +6,8 @@ raise 'account administrator required' unless admin
 
 definitions = [
   ['Консультация психолога прошла успешно', '[women-help:consultation-success:psychologist_3_sessions]'],
-  ['Консультация юриста прошла успешно', '[women-help:consultation-success:legal_consultation]']
+  ['Консультация юриста прошла успешно', '[women-help:consultation-success:legal_consultation]'],
+  ['Разговор с равной консультанткой прошёл успешно', '[women-help:consultation-success:peer_consultation]']
 ]
 Account.transaction do
   definitions.each do |name, command|

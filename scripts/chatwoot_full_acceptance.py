@@ -198,7 +198,8 @@ class Acceptance:
 
     async def staff(self, cid, text, *, private=False, completed=False, returning=False, scheduling=None):
         if scheduling and self.mode == "webhook":
-            # Exercise the actual operator macro, not just its private-note text.
+            # DEPRECATED compatibility probe for the old operator macros, not the
+            # three typed consultation-success macros. Never install them implicitly.
             names = {"schedule": "Запланировать опрос консультации", "cancel": "Отменить опрос консультации"}
             macros = await self.raw_request("GET", "/macros")
             macros = macros if isinstance(macros, list) else macros["payload"]
@@ -564,6 +565,10 @@ class Acceptance:
         await self.case("timer-certificate-and-reminder", certificate_timer)
 
     async def scheduling(self):
+        """Legacy end-time planning compatibility plus unchanged ownership/timer checks.
+
+        Not acceptance of the current typed success macros or their +1h/+4d policy.
+        """
         if self.mode == "webhook":
             definitions = await self.raw_request("GET", "/custom_attribute_definitions")
             assert {"consultation_ends_at", "consultation_request_id"} <= {

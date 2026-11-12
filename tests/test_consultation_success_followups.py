@@ -7,18 +7,26 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from test_chatwoot_service import FakeChatwoot, StubGateway, ordinary_evaluation
+from test_chatwoot_service import FakeChatwoot, StubGateway, event, ordinary_evaluation
 
-from app.chatwoot.contracts import CONSULTATION_SUCCESS, StaffMessage, parse_staff_message
+from app.chatwoot.contracts import (
+    CONSULTATION_CANCEL,
+    CONSULTATION_COMPLETED,
+    CONSULTATION_SCHEDULE,
+    CONSULTATION_SUCCESS,
+    ConversationChanged,
+    StaffMessage,
+    parse_staff_message,
+)
 from app.chatwoot.event_queue import DurableEventQueue
-from app.chatwoot.scenario_effects import daytime
+from app.chatwoot.scenario_effects import SUCCESS_CONSULTATIONS, daytime
 from app.chatwoot.service import ChatwootAgentService
 from app.config import settings
-from app.scenario import SCREENS
+from app.scenario import CONSULTATION_IDS, SCREENS
 
 NOW = datetime(2026, 10, 29, 10, tzinfo=UTC)
 KEY = 'a' * 24
-AIDS = ('psychologist_3_sessions', 'legal_consultation')
+AIDS = CONSULTATION_IDS
 
 
 @pytest.fixture
@@ -73,19 +81,59 @@ async def test_new_consultation_request_waits_for_staff_confirmation(runtime, ai
     assert jobs[f'wellbeing:{KEY}']['due_at'] == (NOW+timedelta(days=14)).isoformat()
 
 
-async def test_peer_consultation_contact_check_is_unchanged(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+@pytest.mark.parametrize('screen', ('s5', 's59'))
+async def test_already_sent_legacy_contact_survey_still_accepts_answers(runtime, aid, screen):
     api, service = runtime
-    await service._scenario_effects.apply(23, 41, [(23, 'scenario_event', 'completed', {
-        'key': KEY, 'kind': 'consultation_requested', 'aid_id': 'peer_consultation',
-    })])
-    assert attrs(api)['scenario_followups'][f'check:{KEY}']['screen'] == 's5'
-    assert attrs(api)['scenario_followups'][f'check:{KEY}']['due_at'] == (NOW+timedelta(days=4)).isoformat()
+    seed(api, aid)
+    jobs = attrs(api)['scenario_followups']
+    key = f'check:{KEY}'
+    if screen == 's59':
+        jobs[key]['state'] = 'answered'
+        key = f'reminder:{key}'
+    assert await service.send_due_followup(23)
+    assert attrs(api)['scenario']['screen'] == screen
+    assert attrs(api)['scenario_followups'][key]['state'] == 'sent'
+    answer = api.replies[-1]['choices'][0]
+
+    assert await service.process(event(answer.id, 80))
+
+    jobs = attrs(api)['scenario_followups']
+    assert jobs[key]['state'] == 'answered'
+    assert jobs[f'reminder:check:{KEY}']['state'] != 'pending'
+    assert not any(k.startswith(('review:', 'wellbeing:')) for k in jobs)
 
 
-async def test_certificate_delivery_does_not_cancel_consultation_wellbeing(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_success_macro_never_calls_deprecated_completion_or_planning(runtime, monkeypatch, aid):
     api, service = runtime
-    seed(api, AIDS[0])
-    await service.process(completion(AIDS[0]))
+    seed(api, aid)
+    legacy = AsyncMock(side_effect=AssertionError('deprecated completion called'))
+    planning = AsyncMock(side_effect=AssertionError('deprecated planning called'))
+    monkeypatch.setattr(service._scenario_effects, '_complete_legacy', legacy)
+    monkeypatch.setattr(service._scenario_effects, 'plan_consultation', planning)
+    command = f'[women-help:consultation-success:{aid}]'
+    parsed = parse_staff_message({
+        'event': 'message_created', 'message_type': 'outgoing', 'private': True,
+        'id': 70, 'conversation': {'id': 23}, 'sender': {'type': 'user', 'id': 4},
+        'content': command, 'created_at': NOW.isoformat(),
+    })
+    assert parsed is not None and parsed.consultation_aid_id == aid
+
+    await service.process(parsed)
+
+    legacy.assert_not_awaited()
+    planning.assert_not_awaited()
+    jobs = attrs(api)['scenario_followups']
+    assert jobs[f'review:{KEY}']['due_at'] == (NOW+timedelta(hours=1)).isoformat()
+    assert jobs[f'wellbeing:{KEY}']['due_at'] == (NOW+timedelta(days=4)).isoformat()
+
+
+@pytest.mark.parametrize('aid', AIDS)
+async def test_certificate_delivery_does_not_cancel_consultation_wellbeing(runtime, aid):
+    api, service = runtime
+    seed(api, aid)
+    await service.process(completion(aid))
     await service._scenario_effects.certificate_delivered(23, 'synthetic', {
         'aid_id': 'food_card', 'expires_at': (NOW+timedelta(days=7)).isoformat(),
     })
@@ -170,15 +218,16 @@ async def test_late_queue_processing_anchors_to_macro_creation_not_processing(ru
     assert jobs[f'wellbeing:{KEY}']['due_at'] == (NOW+timedelta(days=4)).isoformat()
 
 
-async def test_durable_queue_roundtrip_preserves_click_time_and_legacy_event_schema(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_durable_queue_roundtrip_preserves_click_time_and_legacy_event_schema(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
+    seed(api, aid)
     redis = SimpleNamespace(xadd=AsyncMock())
     queue = DurableEventQueue(redis, service, namespace='synthetic', lanes=1)
     await queue.enqueue(StaffMessage(69, 23, 4))
     legacy = json.loads(redis.xadd.call_args.args[1]['payload'])
     assert 'consultation_aid_id' not in legacy and 'occurred_at' not in legacy
-    original = completion(AIDS[0], occurred_at=NOW)
+    original = completion(aid, occurred_at=NOW)
     await queue.enqueue(original)
     fields = redis.xadd.call_args.args[1]
     assert StaffMessage(**json.loads(fields['payload'])) == original
@@ -232,9 +281,10 @@ async def test_manual_consultation_without_client_request_can_be_marked_once(run
     assert attrs(api)['scenario_followups'] == before
 
 
-async def test_retry_after_saved_jobs_and_lost_note_keeps_first_click_time(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_retry_after_saved_jobs_and_lost_note_keeps_first_click_time(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
+    seed(api, aid)
     add_note = api.add_private_note
 
     async def lose_first_note(*args, **kwargs):
@@ -242,35 +292,37 @@ async def test_retry_after_saved_jobs_and_lost_note_keeps_first_click_time(runti
 
     api.add_private_note = lose_first_note
     with pytest.raises(RuntimeError, match='synthetic private-note failure'):
-        await service.process(completion(AIDS[0]))
+        await service.process(completion(aid))
     before = deepcopy(attrs(api)['scenario_followups'])
     api.add_private_note = add_note
     service._scenario_effects.clock = lambda: NOW+timedelta(days=1)
 
-    await service.process(completion(AIDS[0]))
+    await service.process(completion(aid))
 
     assert attrs(api)['scenario_followups'] == before
     assert attrs(api)['scenario_requests'][KEY]['success_marked_at'] == NOW.isoformat()
     assert api.conversation['status'] == 'pending'
 
 
-async def test_second_mark_does_not_replace_a_survey_already_sent(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_second_mark_does_not_replace_a_survey_already_sent(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
-    await service.process(completion(AIDS[0]))
+    seed(api, aid)
+    await service.process(completion(aid))
     service._scenario_effects.clock = lambda: NOW+timedelta(hours=1)
     await service.send_due_followup(23)
     before = deepcopy(attrs(api)['scenario_followups'])
-    await service.process(completion(AIDS[0], 71))
+    await service.process(completion(aid, 71))
     assert attrs(api)['scenario_followups'] == before
     assert not await service.send_due_followup(23)
     assert len(api.replies) == 1
 
 
-async def test_four_day_wellbeing_does_not_require_an_answer_to_the_first_survey(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_four_day_wellbeing_does_not_require_an_answer_to_the_first_survey(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
-    await service.process(completion(AIDS[0]))
+    seed(api, aid)
+    await service.process(completion(aid))
     service._scenario_effects.clock = lambda: NOW+timedelta(hours=1)
     await service.send_due_followup(23)
     service._scenario_effects.clock = lambda: NOW+timedelta(days=4)
@@ -279,51 +331,72 @@ async def test_four_day_wellbeing_does_not_require_an_answer_to_the_first_survey
     assert len(api.replies) == 2
 
 
-async def test_kind_filter_and_explicit_id_never_complete_wrong_consultation(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_kind_filter_and_explicit_id_never_complete_wrong_consultation(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
-    attrs(api)['scenario_requests']['b'*24] = {'aid_id': AIDS[1], 'state': 'requested'}
-    await service.process(completion(AIDS[1]))
+    other_aid = AIDS[(AIDS.index(aid)+1) % len(AIDS)]
+    seed(api, aid)
+    attrs(api)['scenario_requests']['b'*24] = {'aid_id': other_aid, 'state': 'requested'}
+    await service.process(completion(other_aid))
     assert attrs(api)['scenario_requests'][KEY]['state'] == 'requested'
     assert attrs(api)['scenario_requests']['b'*24]['state'] == 'completed'
     assert f'review:{KEY}' not in attrs(api)['scenario_followups']
 
 
-@pytest.mark.parametrize('selection', ('', 'c'*24))
-async def test_ambiguous_or_invalid_selection_does_not_change_ownership_or_jobs(runtime, selection):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_explicit_id_for_another_kind_cannot_complete_a_consultation(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
-    attrs(api)['scenario_requests']['b'*24] = {'aid_id': AIDS[0], 'state': 'requested'}
+    seed(api, aid)
+    other_aid = AIDS[(AIDS.index(aid)+1) % len(AIDS)]
+    attrs(api)['scenario_requests']['b'*24] = {'aid_id': other_aid, 'state': 'requested'}
+    attrs(api)['consultation_request_id'] = 'b'*24
+    before = deepcopy(attrs(api)['scenario_followups'])
+
+    await service.process(completion(aid))
+
+    assert attrs(api)['scenario_requests'][KEY]['state'] == 'requested'
+    assert attrs(api)['scenario_requests']['b'*24]['state'] == 'requested'
+    assert attrs(api)['scenario_followups'] == before
+
+
+@pytest.mark.parametrize('aid', AIDS)
+@pytest.mark.parametrize('selection', ('', 'c'*24))
+async def test_ambiguous_or_invalid_selection_does_not_change_ownership_or_jobs(runtime, selection, aid):
+    api, service = runtime
+    seed(api, aid)
+    attrs(api)['scenario_requests']['b'*24] = {'aid_id': aid, 'state': 'requested'}
     attrs(api)['consultation_request_id'] = selection
     before = deepcopy(attrs(api)['scenario_followups'])
     await api.assign_human(23, 4)
-    await service.process(completion(AIDS[0]))
+    await service.process(completion(aid))
     assert attrs(api)['scenario_followups'] == before
     assert api.conversation['assignee_id'] == 4
     assert api.statuses == []
     attrs(api)['consultation_request_id'] = KEY
-    await service.process(completion(AIDS[0], 71))
+    await service.process(completion(aid, 71))
     assert attrs(api)['scenario_requests'][KEY]['state'] == 'completed'
     assert attrs(api)['scenario_requests']['b'*24]['state'] == 'requested'
 
 
+@pytest.mark.parametrize('aid', AIDS)
 @pytest.mark.parametrize('hour', (4, 16, 19))
-async def test_daytime_window_applies_to_both_click_relative_delays(runtime, hour):
+async def test_daytime_window_applies_to_both_click_relative_delays(runtime, hour, aid):
     api, service = runtime
-    seed(api, AIDS[0])
+    seed(api, aid)
     click = NOW.replace(hour=hour)
-    await service.process(completion(AIDS[0], occurred_at=click))
+    await service.process(completion(aid, occurred_at=click))
     jobs = attrs(api)['scenario_followups']
     assert jobs[f'review:{KEY}']['due_at'] == daytime(click+timedelta(hours=1)).isoformat()
     assert jobs[f'wellbeing:{KEY}']['due_at'] == daytime(click+timedelta(days=4)).isoformat()
 
 
+@pytest.mark.parametrize('aid', AIDS)
 @pytest.mark.parametrize('screen', ('s7', 's52'))
 @pytest.mark.parametrize('guard', ('human', 'snoozed', 'pending_input', 'awaiting_text', 'safety'))
-async def test_existing_delivery_guards_hold_both_surveys(runtime, screen, guard):
+async def test_existing_delivery_guards_hold_both_surveys(runtime, screen, guard, aid):
     api, service = runtime
-    seed(api, AIDS[0])
-    await service.process(completion(AIDS[0]))
+    seed(api, aid)
+    await service.process(completion(aid))
     service._scenario_effects.clock = lambda: NOW+timedelta(days=4)
     jobs = attrs(api)['scenario_followups']
     if screen == 's52':
@@ -343,13 +416,14 @@ async def test_existing_delivery_guards_hold_both_surveys(runtime, screen, guard
     assert api.replies == []
 
 
-async def test_completion_does_not_clear_active_safety_handoff(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_completion_does_not_clear_active_safety_handoff(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
+    seed(api, aid)
     attrs(api)['workflow_state'] = 'safety_escalation'
     attrs(api)['scenario'] = {'screen': 'i7'}
     await api.assign_human(23, 4)
-    await service.process(completion(AIDS[0]))
+    await service.process(completion(aid))
     assert attrs(api)['workflow_state'] == 'safety_escalation'
     assert attrs(api)['scenario'] == {'screen': 'i7'}
     assert api.conversation['assignee_id'] == 4
@@ -357,14 +431,15 @@ async def test_completion_does_not_clear_active_safety_handoff(runtime):
     assert not await service.send_due_followup(23)
 
 
-async def test_success_keeps_current_input_and_waits_for_explicit_return_to_bot(runtime):
+@pytest.mark.parametrize('aid', AIDS)
+async def test_success_keeps_current_input_and_waits_for_explicit_return_to_bot(runtime, aid):
     api, service = runtime
-    seed(api, AIDS[0])
+    seed(api, aid)
     attrs(api)['scenario'] = {'screen': 's74', 'awaiting_text': True}
     attrs(api)['scenario_pending_input'] = {'message_id': 40}
     await api.assign_human(23, 4)
     api.conversation['status'] = 'open'
-    await service.process(completion(AIDS[0]))
+    await service.process(completion(aid))
     assert attrs(api)['scenario_pending_input'] == {'message_id': 40}
     assert attrs(api)['scenario'] == {'screen': 's74', 'awaiting_text': True}
     service._scenario_effects.clock = lambda: NOW+timedelta(hours=1)
@@ -377,10 +452,45 @@ async def test_success_keeps_current_input_and_waits_for_explicit_return_to_bot(
     assert attrs(api)['scenario']['screen'] == 's7'
 
 
+@pytest.mark.parametrize('aid', AIDS)
+@pytest.mark.parametrize('return_method', ('unassign', 'resolve', 'macro'))
+async def test_return_to_bot_releases_both_success_surveys_once(runtime, aid, return_method):
+    api, service = runtime
+    seed(api, aid)
+    await api.assign_human(23, 4)
+    await api.set_status(23, 'open')
+    await service.process(completion(aid))
+    service._scenario_effects.clock = lambda: NOW+timedelta(hours=1)
+    assert not await service.send_due_followup(23)
+
+    if return_method == 'macro':
+        await service.process(StaffMessage(71, 23, 4, return_to_bot=True))
+    else:
+        if return_method == 'resolve':
+            await api.set_status(23, 'resolved')
+        else:
+            await api.unassign_human(23)
+        await service.process(ConversationChanged(23))
+
+    assert await service.send_due_followup(23)
+    assert not await service.send_due_followup(23)
+    assert attrs(api)['scenario_followups'][f'review:{KEY}']['state'] == 'sent'
+    assert attrs(api)['scenario_followups'][f'wellbeing:{KEY}']['state'] == 'pending'
+    service._scenario_effects.clock = lambda: NOW+timedelta(days=4)
+    assert await service.send_due_followup(23)
+    assert not await service.send_due_followup(23)
+    assert attrs(api)['scenario']['screen'] == 's52'
+    assert len(api.replies) == 2
+
+
 def test_timeweb_macro_definitions_match_authenticated_commands():
     script = (Path(__file__).parents[1]/'deploy/timeweb/consultation-success-macros.rb').read_text()
     for command in CONSULTATION_SUCCESS:
         assert command in script
     assert 'Консультация психолога прошла успешно' in script
     assert 'Консультация юриста прошла успешно' in script
+    assert 'Разговор с равной консультанткой прошёл успешно' in script
+    assert set(CONSULTATION_SUCCESS.values()) == set(CONSULTATION_IDS) == SUCCESS_CONSULTATIONS
+    for legacy_command in (CONSULTATION_COMPLETED, CONSULTATION_SCHEDULE, CONSULTATION_CANCEL):
+        assert legacy_command not in script
     assert 'existing success macro was edited' in script
