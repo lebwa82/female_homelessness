@@ -22,7 +22,7 @@ from app.chatwoot.event_queue import DurableEventQueue
 from app.chatwoot.scenario_effects import SUCCESS_CONSULTATIONS, daytime
 from app.chatwoot.service import ChatwootAgentService
 from app.config import settings
-from app.scenario import CONSULTATION_IDS, SCREENS
+from app.scenario import AID_SCREENS, CONSULTATION_IDS, SCREENS
 
 NOW = datetime(2026, 10, 29, 10, tzinfo=UTC)
 KEY = 'a' * 24
@@ -481,6 +481,39 @@ async def test_return_to_bot_releases_both_success_surveys_once(runtime, aid, re
     assert not await service.send_due_followup(23)
     assert attrs(api)['scenario']['screen'] == 's52'
     assert len(api.replies) == 2
+
+
+@pytest.mark.parametrize('aid', AIDS)
+@pytest.mark.parametrize('manual_prior', (False, True))
+async def test_new_client_request_after_completed_consultation_gets_its_own_surveys(
+    runtime, aid, manual_prior,
+):
+    api, service = runtime
+    if not manual_prior:
+        seed(api, aid)
+    await service.process(completion(aid))
+    old_jobs = deepcopy(attrs(api)['scenario_followups'])
+    old_request_keys = set(attrs(api)['scenario_requests'])
+    # Simulate the client reopening the service's offer and booking it again.
+    screen = AID_SCREENS[aid]
+    attrs(api)['scenario'] = {'screen': screen, 'variant': 0, 'aid_id': aid,
+                             'awaiting_text': False}
+    attrs(api)['workflow_state'] = 'scenario'
+    revision = attrs(api).get('workflow_navigation', {}).get('revision', 0)
+    assert await service.process(event(f'sc:{screen}:0:{revision}', 81))
+    requests = attrs(api)['scenario_requests']
+    new_keys = [k for k, request in requests.items()
+                if k not in old_request_keys and request['aid_id'] == aid
+                and request['state'] == 'requested']
+    assert len(new_keys) == 1
+
+    await service.process(completion(aid, 90))
+
+    jobs = attrs(api)['scenario_followups']
+    new_key = new_keys[0]
+    assert attrs(api)['scenario_requests'][new_key]['state'] == 'completed'
+    assert f'review:{new_key}' in jobs and f'wellbeing:{new_key}' in jobs
+    assert all(jobs[k] == j for k, j in old_jobs.items())
 
 
 def test_timeweb_macro_definitions_match_authenticated_commands():

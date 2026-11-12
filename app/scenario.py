@@ -21,6 +21,10 @@ AID_SCREENS = {value: key for key, value in AIDS.items()}
 CONSULTATIONS = {"s34": "s34b", "s35": "s35b", "s38": "s38b"}
 CERTIFICATES = ("food_card", "medicine_card", "hostel_3_nights", "children_card")
 CONSULTATION_IDS = ("psychologist_3_sessions", "legal_consultation", "peer_consultation")
+CONSULTATION_TEXT_TARGETS = {
+    "s7": "s71", "s71": "s72", "s72": "s73", "s721": "s73", "s73": "s74",
+    "s52": "s54",  # Neutral acknowledgement, not an inferred wellbeing score.
+}
 TEXT_TARGETS = {"s35d": "s35c", "s36": "s36b", "s511": "s52", "s57": "s57",
                 "s6": "s61", "s74": "s75", "i1": "i1", "s39b": "s39c"}
 STOCK_MENU_SPLITS = {"s21": 5, "s22": 5, "s25": 6}
@@ -221,7 +225,8 @@ class ScenarioFlow:
                                  if self.service.certificate_available is not None else "paused"))
         return turn
 
-    async def callback(self, record, callback: str, request_key: str) -> AgentTurn | None:
+    async def callback(self, record, callback: str, request_key: str,
+                       *, answer_text: str | None = None) -> AgentTurn | None:
         data = record.scenario
         screen = data.get("screen")
         if callback.startswith("sc:"):
@@ -270,7 +275,10 @@ class ScenarioFlow:
                 return await self.show(record, "i8", variant=1, submitted=True)
             if data.get("job_key") and screen not in {"s39b", "s39c"}:
                 await self.event(record, "survey_answer", request_key, job_key=data["job_key"],
-                                 screen=screen, answer=index, label=label)
+                                 screen=screen, answer=index, label=label,
+                                 **({"text": answer_text, "aid_id": data.get("aid_id"),
+                                     "request_id": data.get("request_key")}
+                                    if answer_text is not None else {}))
             if screen in CONSULTATIONS:
                 aid = AIDS[screen]
                 key = await self.event(record, "consultation_requested",
@@ -342,10 +350,43 @@ class ScenarioFlow:
             return await self.show(record, "i1")
         return None
 
+    async def _consultation_text(self, record, value: str, request_key: str) -> AgentTurn | None:
+        """Called after policy checks; preserve literal answers, never infer a score."""
+        data = record.scenario
+        screen = data.get("screen")
+        if data.get("aid_id") not in CONSULTATION_IDS or screen not in {
+            *CONSULTATION_TEXT_TARGETS, "s74",
+        }:
+            return None
+
+        def normalize(text):
+            return " ".join(text.casefold().strip().strip(" .!?,;:…").removeprefix("💬").split())
+
+        normalized = normalize(value)
+        if normalized == "вернуться в начало":
+            return await self.home(record)
+        if screen == "s7":
+            normalized = {"да": "ответить", "нет": "не сейчас"}.get(normalized, normalized)
+        # Reuse the button path for exact labels, including discomfort, opting out
+        # and Human. Original written input is retained alongside the selected label.
+        for choice in self.current(record).choices:
+            if normalize(choice.label) == normalized:
+                return await self.callback(record, choice.id, request_key, answer_text=value)
+        target = CONSULTATION_TEXT_TARGETS.get(screen)
+        if target is None:
+            return None  # The existing s74 optional-feedback field handles its text.
+        await self.event(record, "survey_answer", request_key, screen=screen, text=value,
+                         aid_id=data["aid_id"], request_id=data.get("request_key"),
+                         job_key=data.get("job_key"))
+        return await self.show(record, target)
+
     async def text(self, record, value: str, request_key: str) -> AgentTurn | None:
         data = record.scenario
         screen = data.get("screen")
         # The caller has already checked safety and human-handoff policy.
+        consultation_turn = await self._consultation_text(record, value, request_key)
+        if consultation_turn is not None:
+            return consultation_turn
         # Accept a written certificate reply without guessing a button answer.
         certificate_reply = (screen in {"s5", "s51", "s59"}
                              and data.get("aid_id") in CERTIFICATES)
