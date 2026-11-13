@@ -363,3 +363,64 @@ def test_ca_preparation_failure_is_silent_and_never_attempts_a_connection(transp
     transport.resolver.assert_not_called()
     assert transport.raw == []
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(("plan", "stage", "reason"), [
+    ({"connect_error": OSError(111, URL)}, "tcp_connect", "network_error"),
+    ({"tls_error": ssl.SSLCertVerificationError(URL)}, "tls_handshake",
+     "certificate_verification"),
+    ({"tls_seconds": 10}, "tls_handshake", "timeout"),
+    ({"send_error": OSError(URL)}, "http_request", "network_error"),
+    ({"response": b"invalid " + URL.encode()}, "http_response", "http_protocol"),
+    ({"status": 429}, "http_response", "http_status"),
+    ({"status": 503}, "http_response", "http_status"),
+])
+def test_delivery_errors_log_safe_stage_metadata(transport, caplog, plan, stage, reason):
+    import json
+
+    transport.plans["192.0.2.1"] = plan
+    assert heartbeat.send_heartbeat(URL, True) is False
+    records = [json.loads(r.getMessage()) for r in caplog.records]
+    record = next(r for r in records if r["stage"] == stage)
+    assert record["event"] == "heartbeat_delivery_error"
+    assert record["host"] == HOST
+    assert record["target_ip"] == "192.0.2.1"
+    assert record["reason"] == reason
+    assert type(record["elapsed_ms"]) is int
+    if "status" in plan:
+        assert record["status"] == plan["status"]
+    if "connect_error" in plan:
+        assert record["errno"] == 111
+    assert URL not in caplog.text
+    assert "synthetic_secret" not in caplog.text
+    assert "/api/v1/heartbeat/" not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.parametrize("stage", ["ca_load", "dns_lookup"])
+def test_preparation_errors_log_safe_metadata(transport, caplog, monkeypatch, stage):
+    import json
+
+    if stage == "ca_load":
+        monkeypatch.setattr(heartbeat.ssl, "create_default_context",
+                            Mock(side_effect=OSError(URL)))
+    else:
+        transport.resolver.side_effect = socket.gaierror(-2, URL)
+    assert heartbeat.send_heartbeat(URL, True) is False
+    record = json.loads(caplog.records[0].getMessage())
+    assert record["stage"] == stage
+    assert record["reason"] == ("dns_error" if stage == "dns_lookup" else "network_error")
+    assert "synthetic_secret" not in caplog.text
+
+
+def test_successful_retry_preserves_failure_diagnostics(transport, caplog):
+    import json
+
+    transport.addresses.append(transport.address("192.0.2.2"))
+    transport.plans["192.0.2.1"] = {"tls_seconds": 10}
+    transport.plans["192.0.2.2"] = {}
+    assert heartbeat.send_heartbeat(URL, True) is True
+    records = [json.loads(r.getMessage()) for r in caplog.records]
+    assert len(records) == 1
+    assert records[0]["reason"] == "timeout"
+    assert records[0]["stage"] == "tls_handshake"
