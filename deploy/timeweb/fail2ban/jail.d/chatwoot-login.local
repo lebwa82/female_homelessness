@@ -1,0 +1,11 @@
+[chatwoot-login]
+enabled = true
+backend = polling
+logpath = /var/lib/docker/volumes/nevidimy-timeweb_caddy_data/_data/chatwoot-login.log
+port = 443
+# Docker-published traffic is DNATed and forwarded, not received by INPUT.
+banaction = nftables[type=custom, table=f2b-chatwoot, chain=f2b-chatwoot-forward, chain_hook=forward, match="ct status dnat tcp dport <port>", blocktype="counter drop"]
+usedns = no
+findtime = 10m
+maxretry = 5
+bantime = 1h

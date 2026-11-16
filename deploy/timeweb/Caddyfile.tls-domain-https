@@ -1,5 +1,27 @@
 https://{$CHATWOOT_HOSTNAME} {
     tls /run/certs/chatwoot/fullchain.pem /run/certs/chatwoot/privkey.pem
+    log chatwoot_login {
+        output file /data/chatwoot-login.log {
+            mode 0600
+            roll_size 1MiB
+            roll_keep 2
+            roll_keep_for 24h
+        }
+        format filter {
+            wrap json {
+                time_format rfc3339
+            }
+            request delete
+            resp_headers delete
+            user_id delete
+        }
+    }
+    @other_requests not {
+        method POST
+        path_regexp chatwoot_login ^/(?:auth|super_admin)/sign_in/*(?:\..*)?$
+    }
+    log_skip @other_requests
+    log_append source_ip {http.request.remote.host}
     encode zstd gzip
     header >Strict-Transport-Security "max-age=31536000"
     reverse_proxy https://chatwoot:3000 {
