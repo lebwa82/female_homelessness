@@ -1,0 +1,9 @@
+[sshd]
+enabled = true
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=ssh.service + _COMM=sshd + _COMM=sshd-session
+port = 22
+banaction = nftables[type=multiport]
+findtime = 10m
+maxretry = 6
+bantime = 1h

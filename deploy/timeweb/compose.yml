@@ -115,6 +115,9 @@ x-agent-bot-message-projection: &agent-bot-message-projection
 
 services:
   chatwoot:
+    env_file:
+      - path: /etc/women-help-chatwoot-mfa.env
+        required: false
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
     pull_policy: never
     mem_limit: 1536m
@@ -158,6 +161,9 @@ services:
       retries: 8
 
   sidekiq:
+    env_file:
+      - path: /etc/women-help-chatwoot-mfa.env
+        required: false
     image: ${CHATWOOT_IMAGE:?Set the verified Chatwoot image}
     pull_policy: never
     mem_limit: 2048m

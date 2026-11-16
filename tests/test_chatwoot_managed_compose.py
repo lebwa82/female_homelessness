@@ -260,6 +260,11 @@ def test_timeweb_domain_https_exposes_only_chatwoot(compose_command) -> None:
         ("0.0.0.0", "80", 80), ("0.0.0.0", "443", 443),
     }
     assert not caddy.get("env_file")
+    mfa_env = "/etc/women-help-chatwoot-mfa.env"
+    assert {
+        name for name, service in services.items()
+        if {"path": mfa_env, "required": False} in service.get("env_file", [])
+    } == {"chatwoot", "sidekiq"}
     certificate_mount = next(v for v in caddy["volumes"]
                              if v["target"] == "/run/certs/chatwoot")
     assert certificate_mount["read_only"] is True
