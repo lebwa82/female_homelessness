@@ -206,14 +206,16 @@ def _parse_pyaterochka(pdf_bytes: bytes, filename: str, text: str) -> ParsedCert
     if date_pair is None:
         raise ValueError("certificate validity period was not found")
     qr_values = _decode_qr_values(pdf_bytes)
-    if qr_values != (number,):
-        raise ValueError("certificate QR does not match its printed number")
+    # The printed serial and payment QR are separate identifiers in some
+    # provider templates. Preserve both without requiring them to be equal.
+    if len(qr_values) != 1 or re.fullmatch(r"[A-Za-z0-9]+", qr_values[0]) is None:
+        raise ValueError("certificate must have one valid payment QR code")
     nominal = _nominal_rubles(text)
     return ParsedCertificatePdf(
         provider_slug="pyaterochka",
         provider="Пятёрочка",
         nominal_rubles=nominal,
-        activation_code=number,
+        activation_code=qr_values[0],
         serial_number=number,
         valid_from=_date(date_pair.group(1), end=False),
         expires_at=_date(date_pair.group(2), end=True),

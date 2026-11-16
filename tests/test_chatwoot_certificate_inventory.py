@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -98,3 +99,32 @@ async def test_available_aid_ids_is_a_global_read_only_snapshot(aids, allow_test
     assert query.startswith("SELECT DISTINCT a.aid_id ")
     assert "recipient_hash" not in query
     assert "FOR UPDATE" not in query
+
+
+@pytest.mark.parametrize("exists", [False, True])
+async def test_document_dedup_checks_independent_qr_serial_and_pdf_hash(exists, monkeypatch):
+    connection = AsyncMock()
+    result = MagicMock()
+    result.first.return_value = (1,) if exists else None
+    connection.execute.return_value = result
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = connection
+    monkeypatch.setattr(certificates, "create_async_engine", lambda *args, **kwargs: engine)
+    inventory = CertificateInventory("synthetic", identity_key="test", account_id=1)
+    document = SimpleNamespace(
+        activation_code="SYNTHETICQR123", serial_number="SYNTHETICSERIAL456",
+        pdf_sha256="a" * 64,
+    )
+
+    assert await inventory.contains_document(document) is exists
+
+    args = connection.execute.call_args.args
+    assert args[1] == {
+        "activation_code": "SYNTHETICQR123", "serial_number": "SYNTHETICSERIAL456",
+        "pdf_sha256": "a" * 64,
+    }
+    query = " ".join(str(args[0]).split())
+    assert "activation_code = :activation_code" in query
+    assert "OR serial_number = :serial_number" in query
+    assert "OR pdf_sha256 = :pdf_sha256" in query
+    engine.begin.assert_not_called()
