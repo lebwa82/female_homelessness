@@ -1,0 +1,10 @@
+services:
+  connector:
+    networks:
+      vk_callback:
+        aliases: [nevidimy-vk-callback]
+
+networks:
+  vk_callback:
+    external: true
+    name: nevidimy-vk-callback

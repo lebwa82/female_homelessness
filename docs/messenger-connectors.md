@@ -58,16 +58,24 @@ flowchart LR
    agent и доступом только к его inbox. В env передать его API token.
    Администратор отдельно получает `inbox_identifier` и `hmac_token` API inbox.
    Коннектору не нужны admin token, Agent Bot token, Telegram token или ключи LLM.
-3. Создать независимый случайный `CONNECTOR_CALLBACK_SECRET` из 32–128 символов
+3. На Timeweb с Chatwoot 4.19+ использовать подпись API inbox. Взять `secret`
+   канала из настроек Chatwoot под администратором и сохранить его в
+   `CONNECTOR_CHATWOOT_WEBHOOK_SECRET`. Указать HTTPS-origin коннектора
+   в `CONNECTOR_PUBLIC_URL`. API inbox отправляет POST на
+   `https://vk-connector.example.org/webhooks/chatwoot`. Коннектор проверяет
+   HMAC исходного тела и время отправки. Отдельный `CONNECTOR_INBOX_HMAC_TOKEN`
+   используется для идентификации контактов.
+
+   Для старого режима без подписи используется случайный
+   `CONNECTOR_CALLBACK_SECRET` из 32–128 символов
    `A-Z`, `a-z`, `0-9`, `_`, `-`, например `secrets.token_urlsafe(32)`.
    Callback URL API inbox:
    `https://vk-connector.example.org/webhooks/chatwoot/SECRET` либо
    `https://wa-connector.example.org/webhooks/chatwoot/SECRET`.
-   API-inbox callbacks в Chatwoot 4.12.1 не подписаны отдельным HMAC;
-   поэтому HTTPS и секрет URL обязательны. Access logs коннектора отключены;
-   proxy не должен записывать секретный callback URL и Meta verify token.
+   Старому режиму нужен HTTPS и секрет в URL. Access logs коннектора отключены.
+   Proxy должен скрывать старый callback URL и Meta verify token.
 4. При запуске процесс проверяет тип inbox, его identifier, обязательность HMAC
-   и путь callback. Указание Telegram inbox останавливает запуск до приёма работы.
+   для контактов и адрес подписанного callback. Указание Telegram inbox останавливает запуск до приёма работы.
 
 Входящая личность привязана к `provider:community_or_phone:peer` через
 ContactInbox `source_id`. HMAC подписывает такой же identifier. Автоматического
@@ -169,6 +177,30 @@ docker compose -p women-help-vk --env-file /etc/women-help-vk.env \
 env нужного канала и выполнять `up -d --no-deps connector` с тем же `-p`.
 Для сборки в managed environment передать публичный CA bundle как BuildKit
 secret `proxy_ca`; он не сохраняется в образе.
+
+### HTTPS для ВК на Timeweb
+
+Использовать отдельный публичный DNS-адрес для одного профиля ВК. Caddy получает
+для него публичный сертификат автоматически. Перед изменениями проверить целевой
+сервер по [инструкции деплоя с Mac](deploy-timeweb-from-mac.md).
+
+1. Создать внутреннюю сеть `docker network create --internal nevidimy-vk-callback`
+   или проверить её параметры, если она уже создана. Присоединять к ней только
+   Caddy и контейнер выбранного профиля ВК. Для этого запустить профиль с файлами
+   `-f deploy/connectors/compose.yml -f deploy/connectors/compose.timeweb-vk.yml`.
+2. Указать выбранное имя в `VK_CALLBACK_HOSTNAME` в платформенном env. В режиме
+   public-domain HTTPS штатный `scripts/chatwoot_compose.py` подключит overlay
+   ВК. Провалидировать Compose с `config --quiet`. Overlay монтирует отдельный
+   сайт в Caddy, исключает его домен из Telegram-прокси и отключает вывод
+   аргументов `WebhookJob` в Rails и Sidekiq. Проверка публичного адреса через
+   SafeFetch остаётся включённой.
+3. Проверить, что Caddy обслуживает новый домен, `GET /healthz` возвращает `404`,
+   а POST без подписи на `/webhooks/chatwoot` получает `401`. Проверить ответ на
+   `confirmation` с секретом ВК, включить `message_new` и обменяться тестовыми
+   сообщениями из ВК и Chatwoot. Подпись webhook проверить на развёрнутом Chatwoot.
+
+Для отката убрать `VK_CALLBACK_HOSTNAME`, применить конфигурацию Caddy, Rails и
+Sidekiq через штатный entrypoint и остановить Compose-проект ВК с сохранением тома Redis.
 
 ## Раздельные тесты
 

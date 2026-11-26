@@ -29,12 +29,17 @@ class Chatwoot:
 
     async def check_inbox(self):
         inbox = await self.api("GET", f"/inboxes/{self.settings.inbox_id}")
+        callback = inbox.get("webhook_url") or ""
+        path = self.settings.chatwoot_webhook_path
+        if self.settings.chatwoot_webhook_secret.get_secret_value():
+            callback_matches = callback == self.settings.public_url + path
+        else:
+            callback_matches = urlsplit(callback).path == path
         # Refuse a Telegram inbox even if an operator supplies the wrong ID.
         if (inbox.get("channel_type") != "Channel::Api"
                 or inbox.get("inbox_identifier") != self.settings.inbox_identifier
                 or inbox.get("hmac_mandatory") is not True
-                or urlsplit(inbox.get("webhook_url") or "").path !=
-                "/webhooks/chatwoot/" + self.settings.callback_secret.get_secret_value()):
+                or not callback_matches):
             raise ValueError("connector requires its own HMAC-protected API inbox")
 
     def source(self, peer):

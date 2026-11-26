@@ -25,15 +25,21 @@ def compose_files(
 ) -> tuple[list[str], dict[str, str]]:
     if http_local and domain_https:
         raise ValueError("Select exactly one UI overlay")
-    selectors = {"CHATWOOT_INTERNAL_TLS", "INTERNAL_TLS_DIR", "POSTGRES_TLS_CA_FILE"}
+    selectors = {
+        "CHATWOOT_INTERNAL_TLS", "INTERNAL_TLS_DIR", "POSTGRES_TLS_CA_FILE",
+        "VK_CALLBACK_HOSTNAME",
+    }
     values = {}
     webhook = ""
+    chatwoot_hostname = ""
     for line in env_file.read_text().splitlines():
         key, separator, value = line.partition("=")
         if separator and key.strip() in selectors:
             values[key.strip()] = value.strip().strip("\"'")
         elif separator and key.strip() == "NEVIDIMY_AGENT_WEBHOOK_URL":
             webhook = value.strip().strip("\"'")
+        elif separator and key.strip() == "CHATWOOT_HOSTNAME":
+            chatwoot_hostname = value.strip().strip("\"'")
     mode = values.get("CHATWOOT_INTERNAL_TLS", "0")
     if mode not in {"0", "1"}:
         raise ValueError("CHATWOOT_INTERNAL_TLS must be 0 or 1")
@@ -46,6 +52,15 @@ def compose_files(
         files.append("deploy/timeweb/compose.http-local.yml")
     if domain_https:
         files.append("deploy/timeweb/compose.domain-https.yml")
+    vk_hostname = values.get("VK_CALLBACK_HOSTNAME", "")
+    if vk_hostname:
+        label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        if (not domain_https or len(vk_hostname) > 253
+                or not re.fullmatch(rf"{label}(?:\.{label})+", vk_hostname)
+                or vk_hostname.rsplit(".", 1)[-1].isdigit()
+                or vk_hostname == chatwoot_hostname.rstrip(".").lower()):
+            raise ValueError("VK callback requires a separate hostname in public HTTPS mode")
+        files.append("deploy/timeweb/compose.vk-callback.yml")
     if mode == "0":
         if values.get("INTERNAL_TLS_DIR") or values.get("POSTGRES_TLS_CA_FILE"):
             raise ValueError("TLS paths are configured but CHATWOOT_INTERNAL_TLS is not 1")
@@ -103,7 +118,7 @@ def main() -> int:
         for name in files:
             command.extend(["-f", name])
         environment = dict(os.environ)
-        for name in ("CHATWOOT_INTERNAL_TLS", "INTERNAL_TLS_DIR", "POSTGRES_TLS_CA_FILE"):
+        for name in ("CHATWOOT_INTERNAL_TLS", "INTERNAL_TLS_DIR", "POSTGRES_TLS_CA_FILE", "VK_CALLBACK_HOSTNAME"):
             environment.pop(name, None)
         environment.update(values)
         environment.pop("TIMEWEB_TELEGRAM_PROXY_IMAGE", None)
@@ -116,7 +131,7 @@ def main() -> int:
     except (OSError, ValueError):
         # Neither environment values nor subprocess arguments belong in errors.
         print(
-            "Chatwoot Compose configuration failed; check TLS mode, certificates and proxy image.",
+            "Chatwoot Compose configuration failed; check TLS, certificates, proxy image and callback settings.",
             file=sys.stderr,
         )
         return 2

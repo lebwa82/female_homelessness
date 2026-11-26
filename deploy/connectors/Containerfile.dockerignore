@@ -1,6 +1,7 @@
 **
 !app/
 !app/__init__.py
+!app/webhook_signature.py
 !app/connectors/
 !app/connectors/*.py
 !deploy/

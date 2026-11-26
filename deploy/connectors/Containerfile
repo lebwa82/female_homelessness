@@ -8,6 +8,7 @@ RUN --mount=type=secret,id=proxy_ca \
       PIP_CERT=/run/secrets/proxy_ca pip install --no-cache-dir -r requirements.txt; \
     else pip install --no-cache-dir -r requirements.txt; fi
 COPY app/__init__.py ./app/__init__.py
+COPY app/webhook_signature.py ./app/webhook_signature.py
 COPY app/connectors ./app/connectors
 # Workspace sources can be 0600/0700; the runtime UID must be able to read them.
 RUN chmod -R u=rwX,go=rX /app

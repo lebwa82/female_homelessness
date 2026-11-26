@@ -70,8 +70,10 @@ Chatwoot API token, inbox identifier/HMAC token, callback secret, публичн
 
 Создать четыре API inbox с именами из поля `CONNECTOR_CHATWOOT_INBOX_NAME`,
 подключить общего Agent Bot и заполнить реквизиты в соответствующих файлах.
-`CONNECTOR_PUBLIC_URL` — origin выделенного HTTPS endpoint; адрес API inbox
-callback получается добавлением `/webhooks/chatwoot/` и его callback secret.
+`CONNECTOR_PUBLIC_URL` — origin выделенного HTTPS endpoint. На Timeweb с
+Chatwoot 4.19+ указать callback `/webhooks/chatwoot` и заполнить
+`CONNECTOR_CHATWOOT_WEBHOOK_SECRET` ключом подписи API inbox. В старом режиме
+адрес заканчивается на `/webhooks/chatwoot/` и секрет из `CONNECTOR_CALLBACK_SECRET`.
 Для ВК входящий URL заканчивается `/webhooks/vk`, для WhatsApp —
 `/webhooks/whatsapp`. Эти секретные callback URL не печатать в общие логи.
 

@@ -1,0 +1,12 @@
+https://{$VK_CALLBACK_HOSTNAME} {
+	@callbacks {
+		method POST
+		path /webhooks/vk /webhooks/chatwoot
+	}
+	handle @callbacks {
+		reverse_proxy nevidimy-vk-callback:8090
+	}
+	handle {
+		respond 404
+	}
+}

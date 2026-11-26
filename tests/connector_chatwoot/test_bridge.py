@@ -85,6 +85,21 @@ async def test_bridge_refuses_telegram_or_misconfigured_inbox(bridge, inbox):
         await bridge.check_inbox()
 
 
+async def test_bridge_checks_entire_signed_callback_url(bridge):
+    settings = ConnectorSettings(**(bridge.settings.model_dump() | {
+        "public_url": "https://vk.example.test", "chatwoot_webhook_secret": "synthetic-signing-secret",
+        "callback_secret": "",
+    }))
+    signed_bridge = Chatwoot(settings, bridge.http)
+    inbox = {"channel_type": "Channel::Api", "inbox_identifier": "identifier", "hmac_mandatory": True}
+    for wrong_url in ("http://vk.example.test/webhooks/chatwoot", "https://other.example.test/webhooks/chatwoot"):
+        bridge.http.json.return_value = inbox | {"webhook_url": wrong_url}
+        with pytest.raises(ValueError):
+            await signed_bridge.check_inbox()
+    bridge.http.json.return_value = inbox | {"webhook_url": "https://vk.example.test/webhooks/chatwoot"}
+    await signed_bridge.check_inbox()
+
+
 async def test_provider_acceptance_is_a_private_receipt_not_fake_delivery(bridge):
     bridge.http.json.side_effect = [{"payload": []}, {"id": 12}]
     await bridge.receipt(7, 11, ["external-91"])

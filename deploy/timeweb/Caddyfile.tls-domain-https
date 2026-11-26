@@ -36,3 +36,5 @@ http://:80 {
     redir @chatwoot https://{$CHATWOOT_HOSTNAME}{uri} 308
     respond 404
 }
+
+import connector-sites/*.caddy

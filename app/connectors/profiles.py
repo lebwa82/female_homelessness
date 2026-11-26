@@ -99,6 +99,7 @@ def initialize(directory: Path, *, webhook_domain="", chatwoot_url="", image_ver
                 "CONNECTOR_INBOX_IDENTIFIER": "",
                 "CONNECTOR_INBOX_HMAC_TOKEN": "",
                 "CONNECTOR_CALLBACK_SECRET": secrets.token_urlsafe(32),
+                "CONNECTOR_CHATWOOT_WEBHOOK_SECRET": "",
                 "CONNECTOR_ATTACHMENT_HOSTS": "",
             }
             if profile.provider == "vk":
@@ -140,8 +141,10 @@ def inspect_profiles(directory: Path):
             continue
         loaded.append((profile, values, report))
         required = ["CHATWOOT_URL", "ACCOUNT_ID", "INBOX_ID", "API_TOKEN", "INBOX_IDENTIFIER",
-                    "INBOX_HMAC_TOKEN", "PUBLIC_URL", "CALLBACK_SECRET", "ENV_FILE",
+                    "INBOX_HMAC_TOKEN", "PUBLIC_URL", "ENV_FILE",
                     "IMAGE", "BIND_PORT"]
+        if not values.get("CONNECTOR_CHATWOOT_WEBHOOK_SECRET"):
+            required.append("CALLBACK_SECRET")
         required += (["VK_GROUP_ID", "VK_TOKEN", "VK_SECRET", "VK_CONFIRMATION"]
                      if profile.provider == "vk" else [
                          "WHATSAPP_PHONE_ID", "WHATSAPP_BUSINESS_ID", "WHATSAPP_TOKEN",
@@ -190,7 +193,8 @@ def inspect_profiles(directory: Path):
                                numeric(values.get("CONNECTOR_INBOX_ID"))),
             **{key: (values.get(key),) for key in (
                 "CONNECTOR_API_TOKEN", "CONNECTOR_CALLBACK_SECRET", "CONNECTOR_INBOX_IDENTIFIER",
-                "CONNECTOR_INBOX_HMAC_TOKEN", "CONNECTOR_PUBLIC_URL", "CONNECTOR_BIND_PORT")},
+                "CONNECTOR_INBOX_HMAC_TOKEN", "CONNECTOR_CHATWOOT_WEBHOOK_SECRET",
+                "CONNECTOR_PUBLIC_URL", "CONNECTOR_BIND_PORT")},
         }
         bindings["CONNECTOR_BIND_PORT"] = (numeric(values.get("CONNECTOR_BIND_PORT")),)
         bindings["CONNECTOR_PUBLIC_URL"] = (origin(values.get("CONNECTOR_PUBLIC_URL")),)

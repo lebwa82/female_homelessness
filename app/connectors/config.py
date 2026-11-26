@@ -12,12 +12,14 @@ class ConnectorSettings(BaseSettings):
 
     provider: Literal["vk", "whatsapp"]
     chatwoot_url: str
+    public_url: str = ""
     account_id: int = Field(gt=0)
     inbox_id: int = Field(gt=0)
     api_token: SecretStr
     inbox_identifier: str
     inbox_hmac_token: SecretStr
-    callback_secret: SecretStr = Field(min_length=32, max_length=128)
+    callback_secret: SecretStr = SecretStr("")
+    chatwoot_webhook_secret: SecretStr = SecretStr("")
     redis_url: SecretStr = SecretStr("redis://redis:6379/0")
     listen_host: str = "0.0.0.0"
     listen_port: int = Field(default=8090, ge=1, le=65535)
@@ -44,9 +46,17 @@ class ConnectorSettings(BaseSettings):
             raise ValueError("invalid Chatwoot URL")
         if url.path not in {"", "/"} or url.query or url.fragment:
             raise ValueError("Chatwoot URL must be an origin")
+        if self.chatwoot_webhook_secret.get_secret_value():
+            public = urlsplit(self.public_url)
+            if (public.scheme != "https" or not public.hostname or public.username is not None
+                    or public.path or public.query or public.fragment or public.port not in {None, 443}):
+                raise ValueError("signed Chatwoot callback requires a public HTTPS origin")
         secret = self.callback_secret.get_secret_value()
-        if not all(c.isascii() and (c.isalnum() or c in "_-") for c in secret):
-            raise ValueError("callback secret must be URL safe")
+        if not self.chatwoot_webhook_secret.get_secret_value() and (
+            not 32 <= len(secret) <= 128
+            or not all(c.isascii() and (c.isalnum() or c in "_-") for c in secret)
+        ):
+            raise ValueError("configure a Chatwoot signing secret or a URL-safe callback secret")
         names = ["api_token", "inbox_identifier", "inbox_hmac_token"]
         names += (["vk_group_id", "vk_token", "vk_secret", "vk_confirmation"]
                   if self.provider == "vk" else [
@@ -68,6 +78,12 @@ class ConnectorSettings(BaseSettings):
             if not self.whatsapp_phone_id.isascii() or not self.whatsapp_phone_id.isdigit():
                 raise ValueError("invalid WhatsApp phone id")
         return self
+
+    @property
+    def chatwoot_webhook_path(self) -> str:
+        if self.chatwoot_webhook_secret.get_secret_value():
+            return "/webhooks/chatwoot"
+        return "/webhooks/chatwoot/" + self.callback_secret.get_secret_value()
 
     @property
     def scope(self) -> str:

@@ -31,7 +31,7 @@ def compose_command() -> list[str]:
 def render(
     compose_command, *, managed: bool, missing_host: bool = False,
     timeweb=False, http_local=False, telegram=False, ip_https=False, missing_ip=False,
-    domain_https=False,
+    domain_https=False, vk_callback=False,
 ):
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")
@@ -71,6 +71,9 @@ def render(
         command.extend(["-f", str(ROOT / "deploy/timeweb/compose.ip-https.yml")])
     if domain_https:
         command.extend(["-f", str(ROOT / "deploy/timeweb/compose.domain-https.yml")])
+    if vk_callback:
+        environment["VK_CALLBACK_HOSTNAME"] = "vk.example.test"
+        command.extend(["-f", str(ROOT / "deploy/timeweb/compose.vk-callback.yml")])
     profiles = ("agent", "certificate-admin") if timeweb else (
         "agent", "certificate-admin", "polling"
     )
@@ -292,6 +295,31 @@ def test_timeweb_domain_https_has_no_plaintext_ui_or_public_agent() -> None:
     assert unit.count("scripts/chatwoot_compose.py") == 2
     assert "compose.http-local.yml" not in unit
     assert "telegram" not in unit
+
+
+def test_timeweb_vk_callback_only_shares_caddy_network(compose_command) -> None:
+    result = render(compose_command, managed=True, timeweb=True, domain_https=True, vk_callback=True)
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    network = config["networks"]["vk_callback"]
+    assert network["name"] == "nevidimy-vk-callback"
+    assert network["external"] is True
+    services = config["services"]
+    assert {name for name, service in services.items()
+            if "vk_callback" in service.get("networks", {})} == {"caddy"}
+    assert set(services["caddy"]["networks"]) == {"default", "vk_callback"}
+    assert services["caddy"]["environment"]["VK_CALLBACK_HOSTNAME"] == "vk.example.test"
+    assert {v["target"] for v in services["caddy"]["volumes"]} >= {
+        "/run/certs/chatwoot", "/etc/caddy/Caddyfile", "/etc/caddy/connector-sites/vk.caddy",
+    }
+    target = "/app/config/initializers/nevidimy_webhook_job_logging.rb"
+    assert {name for name, service in services.items()
+            if any(v["target"] == target and v.get("read_only")
+                   for v in service.get("volumes", []))} == {"chatwoot", "sidekiq"}
+    for service in (services["chatwoot"], services["sidekiq"]):
+        assert service["environment"]["no_proxy"].split(",") == [
+            "localhost", "127.0.0.1", "chatwoot", "agent-bot", ".sslip.io", "vk.example.test",
+        ]
 
 
 def test_timeweb_mounts_ca_and_does_not_enable_telegram(compose_command) -> None:

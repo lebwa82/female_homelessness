@@ -1,0 +1,35 @@
+x-webhook-job-logging: &webhook-job-logging
+  type: bind
+  source: ../timeweb/webhook_job_logging.rb
+  target: /app/config/initializers/nevidimy_webhook_job_logging.rb
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  chatwoot:
+    environment: &vk-callback-environment
+      # The Telegram proxy accepts only api.telegram.org. SafeFetch still validates the public URL.
+      no_proxy: localhost,127.0.0.1,chatwoot,agent-bot,.sslip.io,${VK_CALLBACK_HOSTNAME:?Set the VK callback hostname}
+    volumes:
+      - *webhook-job-logging
+  sidekiq:
+    environment: *vk-callback-environment
+    volumes:
+      - *webhook-job-logging
+  caddy:
+    environment:
+      VK_CALLBACK_HOSTNAME: ${VK_CALLBACK_HOSTNAME:?Set the VK callback hostname}
+    volumes:
+      - type: bind
+        source: ../timeweb/Caddyfile.vk-callback
+        target: /etc/caddy/connector-sites/vk.caddy
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [default, vk_callback]
+
+networks:
+  vk_callback:
+    external: true
+    name: nevidimy-vk-callback

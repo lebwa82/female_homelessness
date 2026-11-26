@@ -1,10 +1,12 @@
 import asyncio
+import hmac
 import json
 import os
 import subprocess
 import sys
 import uuid
 from pathlib import Path
+from time import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -75,25 +77,48 @@ async def test_repeated_incoming_is_not_sent_to_chatwoot_twice(settings_factory,
     assert cw.incoming.await_count == 2
 
 
+@pytest.mark.parametrize("signed", [False, True])
 async def test_callback_filters_other_inboxes_private_and_incoming(
-        settings_factory, http, client_factory):
-    settings = settings_factory()
+        settings_factory, http, client_factory, signed):
+    secret = "synthetic-signing-secret-for-tests"
+    settings = settings_factory(public_url="https://vk.example.test",
+                                chatwoot_webhook_secret=secret if signed else "")
     queue = SimpleNamespace(enqueue=AsyncMock(), healthy=AsyncMock(return_value=True))
     client = await client_factory(create_application(settings, VK(settings, http), queue))
-    path = "/webhooks/chatwoot/" + settings.callback_secret.get_secret_value()
+    path = settings.chatwoot_webhook_path
     event = {"event": "message_created", "id": 11, "private": False, "message_type": "outgoing",
              "account": {"id": 1}, "inbox": {"id": 2}, "conversation": {"id": 7},
              "content": "canonical content must be re-read"}
+
+    def signature(body, timestamp=None):
+        timestamp = str(int(time())) if timestamp is None else timestamp
+        digest = hmac.digest(secret.encode(), timestamp.encode() + b"." + body, "sha256")
+        return {"X-Chatwoot-Timestamp": timestamp, "X-Chatwoot-Signature": f"sha256={digest.hex()}"}
+
+    async def post(payload):
+        body = json.dumps(payload).encode()
+        headers = signature(body) if signed else {}
+        return await client.post(path, data=body, headers=headers)
+
+    if signed:
+        assert path == "/webhooks/chatwoot"
+        body = json.dumps(event).encode()
+        assert (await client.post(path, data=body)).status == 401
+        assert (await client.post(path, data=body + b" ", headers=signature(body))).status == 401
+        assert (await client.post(path, data=body, headers=signature(body, "100"))).status == 401
+        assert (await client.post(path, data=body, headers=signature(body, "1" * 400))).status == 401
+        legacy_path = path + "/" + settings.callback_secret.get_secret_value()
+        assert (await client.post(legacy_path, data=body)).status == 404
     for update in ({"private": True}, {"message_type": "incoming"}, {"inbox": {"id": 3}},
                    {"account": {"id": 9}}, {"event": "message_updated"}):
-        assert (await client.post(path, json=event | update)).status == 204
+        assert (await post(event | update)).status == 204
     queue.enqueue.assert_not_awaited()
     assert (await client.post(path + "bad", json=event)).status == 404
-    assert (await client.post(path, json=event)).status == 204
+    assert (await post(event)).status == 204
     assert queue.enqueue.call_args.args[0] == {"kind": "outgoing", "message_id": 11,
                                               "conversation_id": 7}
     queue.enqueue.side_effect = ConnectionError()
-    assert (await client.post(path, json=event)).status == 503
+    assert (await post(event)).status == 503
     assert (await client.get("/healthz")).status == 200
     queue.healthy.return_value = False
     assert (await client.get("/healthz")).status == 503

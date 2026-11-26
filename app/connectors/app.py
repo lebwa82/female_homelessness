@@ -7,11 +7,14 @@ import logging
 from aiohttp import web
 
 from app.connectors.chatwoot import outgoing_event
+from app.webhook_signature import InvalidWebhookSignature, verify_webhook_signature
 
 logger = logging.getLogger(__name__)
 
 
 def create_application(settings, provider, queue):
+    chatwoot_secret = settings.chatwoot_webhook_secret.get_secret_value()
+
     async def health(_request):
         try:
             healthy = await queue.healthy()
@@ -61,6 +64,16 @@ def create_application(settings, provider, queue):
         return web.Response(text=challenge)
 
     async def outbound(request):
+        if chatwoot_secret:
+            try:
+                verify_webhook_signature(
+                    raw_body=await request.read(),
+                    timestamp=request.headers.get("X-Chatwoot-Timestamp", ""),
+                    received_signature=request.headers.get("X-Chatwoot-Signature", ""),
+                    secret=chatwoot_secret,
+                )
+            except InvalidWebhookSignature:
+                raise web.HTTPUnauthorized() from None
         try:
             payload = await request.json()
         except (ValueError, UnicodeError):
@@ -78,6 +91,5 @@ def create_application(settings, provider, queue):
     app.router.add_post(f"/webhooks/{settings.provider}", inbound)
     if settings.provider == "whatsapp":
         app.router.add_get("/webhooks/whatsapp", verify_whatsapp)
-    secret = settings.callback_secret.get_secret_value()
-    app.router.add_post(f"/webhooks/chatwoot/{secret}", outbound)
+    app.router.add_post(settings.chatwoot_webhook_path, outbound)
     return app
