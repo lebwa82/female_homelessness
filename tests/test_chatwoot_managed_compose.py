@@ -31,7 +31,7 @@ def compose_command() -> list[str]:
 def render(
     compose_command, *, managed: bool, missing_host: bool = False,
     timeweb=False, http_local=False, telegram=False, ip_https=False, missing_ip=False,
-    domain_https=False, vk_callback=False,
+    domain_https=False, vk_callback=None,
 ):
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")
@@ -72,7 +72,8 @@ def render(
     if domain_https:
         command.extend(["-f", str(ROOT / "deploy/timeweb/compose.domain-https.yml")])
     if vk_callback:
-        environment["VK_CALLBACK_HOSTNAME"] = "vk.example.test"
+        hostname, scope = vk_callback
+        environment.update(VK_CALLBACK_HOSTNAME=hostname, VK_CALLBACK_CADDY_SCOPE=scope)
         command.extend(["-f", str(ROOT / "deploy/timeweb/compose.vk-callback.yml")])
     profiles = ("agent", "certificate-admin") if timeweb else (
         "agent", "certificate-admin", "polling"
@@ -297,8 +298,14 @@ def test_timeweb_domain_https_has_no_plaintext_ui_or_public_agent() -> None:
     assert "telegram" not in unit
 
 
-def test_timeweb_vk_callback_only_shares_caddy_network(compose_command) -> None:
-    result = render(compose_command, managed=True, timeweb=True, domain_https=True, vk_callback=True)
+@pytest.mark.parametrize(("hostname", "scope"), [
+    ("vk.example.test", "sites"),
+    ("chatwoot.example.test", "routes"),
+])
+def test_timeweb_vk_callback_only_shares_caddy_network(compose_command, hostname, scope) -> None:
+    result = render(
+        compose_command, managed=True, timeweb=True, domain_https=True, vk_callback=(hostname, scope),
+    )
     assert result.returncode == 0, result.stderr
     config = json.loads(result.stdout)
     network = config["networks"]["vk_callback"]
@@ -308,17 +315,20 @@ def test_timeweb_vk_callback_only_shares_caddy_network(compose_command) -> None:
     assert {name for name, service in services.items()
             if "vk_callback" in service.get("networks", {})} == {"caddy"}
     assert set(services["caddy"]["networks"]) == {"default", "vk_callback"}
-    assert services["caddy"]["environment"]["VK_CALLBACK_HOSTNAME"] == "vk.example.test"
-    assert {v["target"] for v in services["caddy"]["volumes"]} >= {
-        "/run/certs/chatwoot", "/etc/caddy/Caddyfile", "/etc/caddy/connector-sites/vk.caddy",
-    }
+    assert services["caddy"]["environment"]["VK_CALLBACK_HOSTNAME"] == hostname
+    mounts = {v["target"]: v for v in services["caddy"]["volumes"]}
+    assert {"/run/certs/chatwoot", "/etc/caddy/Caddyfile"} <= mounts.keys()
+    fragment = mounts[f"/etc/caddy/connector-{scope}/vk.caddy"]
+    assert fragment["source"] == str(ROOT / f"deploy/timeweb/connector-{scope}/vk.caddy")
+    assert fragment["read_only"]
+    assert fragment["bind"]["create_host_path"] is False
     target = "/app/config/initializers/nevidimy_webhook_job_logging.rb"
     assert {name for name, service in services.items()
             if any(v["target"] == target and v.get("read_only")
                    for v in service.get("volumes", []))} == {"chatwoot", "sidekiq"}
     for service in (services["chatwoot"], services["sidekiq"]):
         assert service["environment"]["no_proxy"].split(",") == [
-            "localhost", "127.0.0.1", "chatwoot", "agent-bot", ".sslip.io", "vk.example.test",
+            "localhost", "127.0.0.1", "chatwoot", "agent-bot", ".sslip.io", hostname,
         ]
 
 

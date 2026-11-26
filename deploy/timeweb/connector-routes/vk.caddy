@@ -1,0 +1,7 @@
+@vk_callbacks {
+    method POST
+    path /webhooks/vk /webhooks/chatwoot
+}
+handle @vk_callbacks {
+    reverse_proxy nevidimy-vk-callback:8090
+}

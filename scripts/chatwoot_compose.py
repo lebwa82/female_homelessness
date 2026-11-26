@@ -57,9 +57,13 @@ def compose_files(
         label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
         if (not domain_https or len(vk_hostname) > 253
                 or not re.fullmatch(rf"{label}(?:\.{label})+", vk_hostname)
-                or vk_hostname.rsplit(".", 1)[-1].isdigit()
-                or vk_hostname == chatwoot_hostname.rstrip(".").lower()):
-            raise ValueError("VK callback requires a separate hostname in public HTTPS mode")
+                or vk_hostname.rsplit(".", 1)[-1].isdigit()):
+            raise ValueError("VK callback requires a valid hostname in public HTTPS mode")
+        # Compose must use the same Chatwoot hostname that selected the Caddy fragment.
+        values["CHATWOOT_HOSTNAME"] = chatwoot_hostname
+        values["VK_CALLBACK_CADDY_SCOPE"] = (
+            "routes" if vk_hostname == chatwoot_hostname.rstrip(".").lower() else "sites"
+        )
         files.append("deploy/timeweb/compose.vk-callback.yml")
     if mode == "0":
         if values.get("INTERNAL_TLS_DIR") or values.get("POSTGRES_TLS_CA_FILE"):

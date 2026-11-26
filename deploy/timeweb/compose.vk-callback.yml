@@ -22,8 +22,8 @@ services:
       VK_CALLBACK_HOSTNAME: ${VK_CALLBACK_HOSTNAME:?Set the VK callback hostname}
     volumes:
       - type: bind
-        source: ../timeweb/Caddyfile.vk-callback
-        target: /etc/caddy/connector-sites/vk.caddy
+        source: ../timeweb/connector-${VK_CALLBACK_CADDY_SCOPE:-sites}/vk.caddy
+        target: /etc/caddy/connector-${VK_CALLBACK_CADDY_SCOPE:-sites}/vk.caddy
         read_only: true
         bind:
           create_host_path: false

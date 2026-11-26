@@ -194,10 +194,16 @@ def test_public_domain_is_preserved_before_tls_and_conflicting_modes_are_rejecte
         chatwoot_compose.compose_files(environment, domain_https=True, http_local=True)
 
 
-def test_vk_callback_is_selected_only_for_public_https_and_preserves_internal_tls(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("hostname", "scope"), [
+    ("vk.example.test", "sites"),
+    ("chatwoot.example.test", "routes"),
+])
+def test_vk_callback_is_selected_only_for_public_https_and_preserves_internal_tls(
+    tmp_path, monkeypatch, hostname, scope,
+):
     environment, _ = tls_environment(tmp_path, monkeypatch)
     with environment.open("a") as output:
-        output.write("CHATWOOT_HOSTNAME=chatwoot.example.test\nVK_CALLBACK_HOSTNAME=vk.example.test\n")
+        output.write(f"CHATWOOT_HOSTNAME=chatwoot.example.test\nVK_CALLBACK_HOSTNAME={hostname}\n")
     files, values = chatwoot_compose.compose_files(environment, domain_https=True)
     assert files[-4:] == [
         "deploy/timeweb/compose.domain-https.yml",
@@ -205,14 +211,16 @@ def test_vk_callback_is_selected_only_for_public_https_and_preserves_internal_tl
         "deploy/chatwoot/compose.tls.yml",
         "deploy/timeweb/compose.tls-domain-https.yml",
     ]
-    assert values["VK_CALLBACK_HOSTNAME"] == "vk.example.test"
-    with pytest.raises(ValueError, match="requires a separate hostname"):
+    assert values["VK_CALLBACK_HOSTNAME"] == hostname
+    assert values["CHATWOOT_HOSTNAME"] == "chatwoot.example.test"
+    assert values["VK_CALLBACK_CADDY_SCOPE"] == scope
+    with pytest.raises(ValueError, match="requires a valid hostname"):
         chatwoot_compose.compose_files(environment, http_local=True)
 
 
-@pytest.mark.parametrize("hostname", ["chatwoot.example.test", "127.0.0.1", "https://vk.example.test/a"])
-def test_vk_callback_rejects_conflicting_or_malformed_hostnames(tmp_path, hostname):
+@pytest.mark.parametrize("hostname", ["127.0.0.1", "https://vk.example.test/a"])
+def test_vk_callback_rejects_malformed_hostnames(tmp_path, hostname):
     environment = tmp_path / "platform.env"
     environment.write_text(f"CHATWOOT_HOSTNAME=chatwoot.example.test\nVK_CALLBACK_HOSTNAME={hostname}\n")
-    with pytest.raises(ValueError, match="requires a separate hostname"):
+    with pytest.raises(ValueError, match="requires a valid hostname"):
         chatwoot_compose.compose_files(environment, domain_https=True)
