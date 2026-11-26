@@ -224,6 +224,7 @@ services:
   # Telegram is a separate cutover; preparing the web UI must not start it.
   telegram-proxy:
     profiles: ["telegram"]
+    image: ${TIMEWEB_TELEGRAM_PROXY_IMAGE:-localhost/women-help-chatwoot-agent:current}
     mem_limit: 64m
     env_file: !override
       - /etc/women-help-telegram-proxy.env

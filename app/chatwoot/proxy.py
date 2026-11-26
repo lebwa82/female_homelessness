@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from urllib.parse import unquote, urlsplit
 
 import pproxy
@@ -16,33 +17,42 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+PROXY_SOCKETS = "/run/nevidimy-proxy"
+
 
 class TelegramUpstream:
     """Bound/retry only opening a tunnel, before any Telegram request can pass."""
 
-    def __init__(self, connection):
+    def __init__(self, connection, reserve=None):
         self.connection = connection
+        self.reserve = reserve
 
     def __getattr__(self, name):
         return getattr(self.connection, name)
 
     async def open_connection(self, host, port, local_addr, lbind):
-        for attempt in range(1, 4):
+        routes = (
+            [(self.connection, 3, "primary"), (self.reserve, 5, "reserve")]
+            if self.reserve is not None
+            else [(self.connection, 5, "primary")] * 3
+        )
+        for attempt, (connection, timeout, route) in enumerate(routes, 1):
             writer = None
             try:
-                async with asyncio.timeout(5):
-                    reader, writer = await self.connection.open_connection(
-                        host, port, local_addr, lbind, timeout=5
+                async with asyncio.timeout(timeout):
+                    reader, writer = await connection.open_connection(
+                        host, port, local_addr, lbind, timeout=timeout
                     )
-                    return await self.connection.prepare_connection(reader, writer, host, port)
+                    return await connection.prepare_connection(reader, writer, host, port)
             except (TimeoutError, OSError, EOFError, AssertionError) as error:
                 if writer is not None:
                     writer.close()
-                logger.warning("Telegram proxy tunnel retry kind=%s attempt=%s",
-                               type(error).__name__, attempt)
-                if attempt == 3:
+                logger.warning("Telegram proxy tunnel failed route=%s kind=%s attempt=%s",
+                               route, type(error).__name__, attempt)
+                if attempt == len(routes):
                     raise
-                await asyncio.sleep(0.2 * attempt)
+                if self.reserve is None:
+                    await asyncio.sleep(0.2 * attempt)
             except BaseException:
                 if writer is not None:
                     writer.close()
@@ -54,7 +64,9 @@ class TelegramUpstream:
         return reader, writer
 
 
-def upstream_uri(value: str, *, ssh_tunnel: bool = False) -> str:
+def upstream_uri(
+    value: str, *, ssh_tunnel: bool = False, socket_path: str = f"{PROXY_SOCKETS}/socks.sock"
+) -> str:
     parsed = urlsplit(value)
     schemes = {"socks5": "socks5", "socks4": "socks4", "http": "http", "https": "http+ssl"}
     if parsed.scheme not in schemes or not parsed.hostname or not parsed.port:
@@ -66,7 +78,7 @@ def upstream_uri(value: str, *, ssh_tunnel: bool = False) -> str:
     if ssh_tunnel:
         if parsed.scheme != "socks5":
             raise ValueError("SSH tunnel requires the existing SOCKS5 upstream")
-        return f"socks5:///run/nevidimy-proxy/socks.sock{auth}"
+        return f"socks5://{socket_path}{auth}"
     return f"{schemes[parsed.scheme]}://{host}:{parsed.port}{auth}"
 
 
@@ -74,10 +86,18 @@ async def serve() -> None:
     value = settings.resolved_telegram_proxy_url()
     if not value:
         raise ValueError("TELEGRAM_PROXY_URL is required for the internal adapter")
+    reserve_url = os.environ.get("TELEGRAM_PROXY_RESERVE_URL", "").strip()
+    reserve = None
+    if reserve_url:
+        if not settings.telegram_proxy_ssh_tunnel:
+            raise ValueError("Telegram reserve requires SSH tunnels")
+        reserve = pproxy.Connection(upstream_uri(
+            reserve_url, ssh_tunnel=True, socket_path=f"{PROXY_SOCKETS}/reserve-socks.sock"
+        ))
     server = pproxy.Server("http://0.0.0.0:3128")
     remote = TelegramUpstream(pproxy.Connection(upstream_uri(
         value, ssh_tunnel=settings.telegram_proxy_ssh_tunnel
-    )))
+    )), reserve)
     handler = await server.start_server(
         {
             "rserver": [remote],

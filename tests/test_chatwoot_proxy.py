@@ -41,26 +41,54 @@ def test_missing_port_raises_without_echoing_secret():
 
 
 @pytest.mark.asyncio
-async def test_runtime_resolves_settings_and_starts_library_server(monkeypatch):
+@pytest.mark.parametrize("use_reserve", [False, True])
+async def test_runtime_resolves_settings_and_starts_library_server(monkeypatch, use_reserve):
+    monkeypatch.delenv("TELEGRAM_PROXY_RESERVE_URL", raising=False)
+    if use_reserve:
+        monkeypatch.setenv("TELEGRAM_PROXY_RESERVE_URL", "socks5://backup:pw@reserve.test:1080")
     monkeypatch.setattr(
         proxy,
         "settings",
         SimpleNamespace(resolved_telegram_proxy_url=lambda: "socks5://proxy.test:1080",
-                        telegram_proxy_ssh_tunnel=False),
+                        telegram_proxy_ssh_tunnel=use_reserve),
     )
     handler = MagicMock()
     handler.__aenter__ = AsyncMock(return_value=handler)
     handler.__aexit__ = AsyncMock(return_value=False)
     handler.serve_forever = AsyncMock()
     server = SimpleNamespace(start_server=AsyncMock(return_value=handler))
-    connection = MagicMock()
     monkeypatch.setattr(proxy.pproxy, "Server", lambda _: server)
-    monkeypatch.setattr(proxy.pproxy, "Connection", connection)
     await proxy.serve()
-    connection.assert_called_once_with("socks5://proxy.test:1080")
+
     options = server.start_server.call_args.args[0]
+    (remote,) = options["rserver"]
+    assert not remote.direct
+    if use_reserve:
+        assert remote.connection.bind == "/run/nevidimy-proxy/socks.sock"
+        assert remote.reserve.bind == "/run/nevidimy-proxy/reserve-socks.sock"
+        assert remote.reserve.auth == b"backup:pw"
+    else:
+        assert remote.connection.bind == "proxy.test:1080"
+        assert remote.reserve is None
     assert not options["block"]("api.telegram.org")
     assert options["block"]("example.com")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary_is_ssh,reserve_scheme", [(False, "socks5"), (True, "http")])
+async def test_reserve_requires_ssh_and_socks5(monkeypatch, primary_is_ssh, reserve_scheme):
+    monkeypatch.setenv(
+        "TELEGRAM_PROXY_RESERVE_URL", f"{reserve_scheme}://user:reserve-secret@reserve.test:1080"
+    )
+    monkeypatch.setattr(
+        proxy,
+        "settings",
+        SimpleNamespace(resolved_telegram_proxy_url=lambda: "socks5://proxy.test:1080",
+                        telegram_proxy_ssh_tunnel=primary_is_ssh),
+    )
+    with pytest.raises(ValueError) as error:
+        await proxy.serve()
+    assert "reserve-secret" not in str(error.value)
 
 
 @pytest.mark.asyncio
@@ -86,6 +114,54 @@ async def test_tunnel_failure_closes_socket_and_retries_before_connect_ack(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("primary_fails", [False, True])
+async def test_reserve_is_used_only_after_failed_primary_negotiation(primary_fails, caplog):
+    first, second = (object(), MagicMock()), (object(), MagicMock())
+    primary = SimpleNamespace(
+        open_connection=AsyncMock(return_value=first),
+        prepare_connection=AsyncMock(return_value=first),
+    )
+    if primary_fails:
+        primary.prepare_connection.side_effect = AssertionError("private-primary-password")
+    reserve = SimpleNamespace(
+        open_connection=AsyncMock(return_value=second),
+        prepare_connection=AsyncMock(return_value=second),
+    )
+    upstream = proxy.TelegramUpstream(primary, reserve)
+    target = ("api.telegram.org", 443)
+    connected = await upstream.open_connection(*target, None, None)
+    assert connected == (second if primary_fails else first)
+    primary.open_connection.assert_awaited_once_with(*target, None, None, timeout=3)
+    primary.prepare_connection.assert_awaited_once_with(*first, *target)
+    if primary_fails:
+        first[1].close.assert_called_once()
+        reserve.open_connection.assert_awaited_once_with(*target, None, None, timeout=5)
+        reserve.prepare_connection.assert_awaited_once_with(*second, *target)
+        second[1].close.assert_not_called()
+    else:
+        first[1].close.assert_not_called()
+        reserve.open_connection.assert_not_awaited()
+    assert "private-primary-password" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_both_routes_failing_are_not_retried_or_replaced_by_direct():
+    writer = MagicMock()
+    primary = SimpleNamespace(open_connection=AsyncMock(side_effect=OSError()), direct=False)
+    reserve = SimpleNamespace(
+        open_connection=AsyncMock(return_value=(object(), writer)),
+        prepare_connection=AsyncMock(side_effect=EOFError()),
+    )
+    upstream = proxy.TelegramUpstream(primary, reserve)
+    with pytest.raises(EOFError):
+        await upstream.open_connection("api.telegram.org", 443, None, None)
+    primary.open_connection.assert_awaited_once()
+    reserve.open_connection.assert_awaited_once()
+    writer.close.assert_called_once()
+    assert not upstream.direct
+
+
+@pytest.mark.asyncio
 async def test_proxy_tunnel_retries_are_bounded(monkeypatch):
     writer = MagicMock()
     remote = SimpleNamespace(
@@ -100,16 +176,21 @@ async def test_proxy_tunnel_retries_are_bounded(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_proxy_tunnel_is_closed_without_retry():
+@pytest.mark.parametrize("use_reserve", [False, True])
+async def test_cancelled_proxy_tunnel_is_closed_without_retry(use_reserve):
     writer = MagicMock()
     remote = SimpleNamespace(
         open_connection=AsyncMock(return_value=(object(), writer)),
         prepare_connection=AsyncMock(side_effect=asyncio.CancelledError()),
     )
+    reserve = SimpleNamespace(open_connection=AsyncMock()) if use_reserve else None
+    upstream = proxy.TelegramUpstream(remote, reserve)
     with pytest.raises(asyncio.CancelledError):
-        await proxy.TelegramUpstream(remote).open_connection("api.telegram.org", 443, None, None)
+        await upstream.open_connection("api.telegram.org", 443, None, None)
     writer.close.assert_called_once()
     assert remote.open_connection.await_count == 1
+    if reserve:
+        reserve.open_connection.assert_not_awaited()
 
 
 @pytest.mark.asyncio

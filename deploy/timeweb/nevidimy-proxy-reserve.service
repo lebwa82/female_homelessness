@@ -1,0 +1,18 @@
+[Unit]
+Description=Independent restricted SSH transport to the reserve Telegram SOCKS5
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/grep -Fxq timeweb-nevidimy-prod-app-msk-1 /etc/nevidimy-deployment-target
+ExecStartPre=/usr/bin/test -s /opt/nevidimy/secrets/proxy-tunnel/id_ed25519
+ExecStartPre=/usr/bin/test -s /opt/nevidimy/certs/proxy-reserve-known_hosts
+ExecStart=/usr/bin/ssh -F /dev/null -N -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/nevidimy/certs/proxy-reserve-known_hosts -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes -o StreamLocalBindMask=0177 -i /opt/nevidimy/secrets/proxy-tunnel/id_ed25519 -L /opt/nevidimy/run/proxy-tunnel/reserve-socks.sock:127.0.0.1:40858 nevidimy-socks@64.188.93.185
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
