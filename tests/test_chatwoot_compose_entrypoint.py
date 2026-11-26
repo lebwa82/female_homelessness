@@ -135,6 +135,36 @@ def test_existing_timeweb_http_mode_is_preserved_until_explicit_tls_activation(t
     ]
 
 
+@pytest.mark.parametrize("selection", [None, "valid", "remote"])
+def test_proxy_image_selector_is_local_explicit_and_not_an_env_file(tmp_path, monkeypatch, selection):
+    env_file = tmp_path / "chatwoot.env"
+    env_file.touch()
+    selector = tmp_path / "proxy-image"
+    image = "localhost/nevidimy-telegram-proxy:reserve-c22c20c26ee5"
+    if selection:
+        selector.write_text(image if selection == "valid" else "registry.test/foreign:stable")
+    monkeypatch.setattr(chatwoot_compose, "ENV_FILE", env_file)
+    monkeypatch.setattr(chatwoot_compose, "TELEGRAM_PROXY_IMAGE_FILE", selector)
+    monkeypatch.setattr(chatwoot_compose, "HTTP_LOCAL_DROPIN", tmp_path / "http-local")
+    monkeypatch.setattr(chatwoot_compose, "DOMAIN_HTTPS_DROPIN", tmp_path / "domain-https")
+    monkeypatch.setattr(chatwoot_compose.sys, "argv", ["compose.py", "config", "--quiet"])
+    var = "TIMEWEB_TELEGRAM_PROXY_IMAGE"
+    monkeypatch.setenv(var, "registry.test/other:stable")
+    calls = []
+    monkeypatch.setattr(
+        chatwoot_compose.subprocess, "call", lambda args, **kwargs: calls.append((args, kwargs)) or 0
+    )
+    if selection == "remote":
+        assert chatwoot_compose.main() == 2
+        assert not calls
+    else:
+        assert chatwoot_compose.main() == 0
+        command, options = calls[0]
+        assert command[2:4] == ["--env-file", str(env_file)]
+        assert str(selector) not in command
+        assert options["env"].get(var) == (image if selection else None)
+
+
 def test_public_domain_overrides_old_local_dropin_and_preserves_tls(tmp_path, monkeypatch):
     environment, _ = tls_environment(tmp_path, monkeypatch)
     chatwoot_compose.HTTP_LOCAL_DROPIN.touch()

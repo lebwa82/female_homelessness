@@ -17,6 +17,7 @@ ENV_FILE = Path("/etc/women-help-chatwoot.env")
 HTTP_LOCAL_DROPIN = Path("/etc/systemd/system/nevidimy.service.d/http-local.conf")
 DOMAIN_HTTPS_DROPIN = Path("/etc/systemd/system/nevidimy.service.d/public-domain-https.conf")
 POSTGRES_CA = Path("/opt/nevidimy/certs/postgresql-ca.crt")
+TELEGRAM_PROXY_IMAGE_FILE = Path("/etc/women-help-telegram-proxy-image")
 
 
 def compose_files(
@@ -105,11 +106,17 @@ def main() -> int:
         for name in ("CHATWOOT_INTERNAL_TLS", "INTERNAL_TLS_DIR", "POSTGRES_TLS_CA_FILE"):
             environment.pop(name, None)
         environment.update(values)
+        environment.pop("TIMEWEB_TELEGRAM_PROXY_IMAGE", None)
+        if TELEGRAM_PROXY_IMAGE_FILE.is_file():
+            image = TELEGRAM_PROXY_IMAGE_FILE.read_text().strip()
+            if not re.fullmatch(r"localhost/nevidimy-telegram-proxy:(reserve|rollback)-[0-9a-f]{12}", image):
+                raise ValueError("Invalid Timeweb Telegram proxy image")
+            environment["TIMEWEB_TELEGRAM_PROXY_IMAGE"] = image
         return subprocess.call([*command, *sys.argv[1:]], cwd=ROOT, env=environment)
     except (OSError, ValueError):
         # Neither environment values nor subprocess arguments belong in errors.
         print(
-            "Chatwoot Compose configuration failed; check TLS mode and certificate files.",
+            "Chatwoot Compose configuration failed; check TLS mode, certificates and proxy image.",
             file=sys.stderr,
         )
         return 2
