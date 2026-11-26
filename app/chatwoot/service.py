@@ -30,9 +30,15 @@ from app.chatwoot.fast_buttons import (
     UnsupportedFastButton,
     no_external_effect,
 )
+from app.chatwoot.followups import HumanReminderIndex
 from app.chatwoot.queues import QueueCoordinator
 from app.chatwoot.routing import QueueRouter
-from app.chatwoot.scenario_effects import ScenarioEffects, returning_after_day
+from app.chatwoot.scenario_effects import (
+    HUMAN_REMINDER_JOB,
+    HUMAN_REMINDER_TEXT,
+    ScenarioEffects,
+    returning_after_day,
+)
 from app.chatwoot.telemetry import event_timing, timed_stage
 from app.config import settings
 from app.domain import AgentTurn, ConversationState, IncomingMessage
@@ -137,12 +143,16 @@ class ChatwootAgentService:
         certificate_mark_failed: Callable[[str], Awaitable[None]] | None = None,
         certificate_mark_delivered: Callable[[int], Awaitable[None]] | None = None,
         certificate_mark_delivery_failed: Callable[[int], Awaitable[None]] | None = None,
+        human_reminders: HumanReminderIndex | None = None,
     ) -> None:
         self._api = api
         self._gateway = gateway or YandexAgentGateway()
         self._duty_team_id = duty_team_id
         self._queues = QueueCoordinator(api, duty_team_id, queue_router)
-        self._scenario_effects = ScenarioEffects(api, self._queues, can_route=_bot_owns)
+        self._human_reminders = human_reminders
+        self._scenario_effects = ScenarioEffects(
+            api, self._queues, can_route=_bot_owns, human_reminders=human_reminders,
+        )
         self._locks: dict[int, asyncio.Lock] = {}
         self._certificate_claim = certificate_claim
         self._certificate_resume = certificate_resume
@@ -306,7 +316,9 @@ class ChatwootAgentService:
         with timed_stage("history"):
             messages = await self._api.get_messages(event.conversation_id)
         if await self._api.has_reply_for_turn(event.conversation_id, turn_key, messages=messages):
-            await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
+            await self._scenario_effects.menu_delivered(
+                event.conversation_id, event.message_id, human_prompt=event.content == "human",
+            )
             pending = _custom_attributes(conversation).get("scenario_pending_input") or {}
             if pending.get("message_id") == event.message_id:
                 await self._api.set_custom_attributes(event.conversation_id, {
@@ -428,7 +440,9 @@ class ChatwootAgentService:
                     turn_key=turn_key,
                     sensitive_content=turn.audit.get("sensitive_content"),
                 )
-        await self._scenario_effects.menu_delivered(event.conversation_id, event.message_id)
+        await self._scenario_effects.menu_delivered(
+            event.conversation_id, event.message_id, human_prompt=event.content == "human",
+        )
         await self._api.set_custom_attributes(event.conversation_id, {
             "scenario_pending_input": None, "scenario_last_message_id": event.message_id,
         })
@@ -738,24 +752,45 @@ class ChatwootAgentService:
     async def send_due_followup(self, conversation_id: int) -> bool:
         """Called by the single-process worker; shares the inbound conversation lock."""
         async with self._locks.setdefault(conversation_id, asyncio.Lock()):
-            conversation = await self._sync_owner(conversation_id)
-            attributes = _custom_attributes(conversation)
-            if (attributes.get("reply_owner") != "bot" or _human_assigned(conversation)
-                    or conversation.get("status") == "snoozed"
-                    or attributes.get("scenario_pending_input")
-                    or attributes.get("workflow_state") == "safety_escalation"):
-                return False
-            due = await self._scenario_effects.due(conversation)
-            if due is None:
-                return False
-            key, job = due
-            if ((attributes.get("scenario") or {}).get("awaiting_text")
-                    and not (conversation.get("status") == "resolved" and job["screen"] == "s7")):
-                return False
-            turn_key = f"scenario-followup:{key}"
-            if await self._api.has_reply_for_turn(conversation_id, turn_key):
-                await self._scenario_effects.sent(conversation_id, key)
-                return False
+            return await self._send_due_followup(conversation_id)
+
+    async def send_indexed_human_reminder(self, conversation_id: int) -> bool:
+        async with self._locks.setdefault(conversation_id, asyncio.Lock()):
+            sent = await self._send_due_followup(conversation_id, human_only=True)
+            if self._human_reminders is not None:
+                current = _custom_attributes(await self._api.get_conversation(conversation_id))
+                reminder = (current.get("scenario_followups") or {}).get(HUMAN_REMINDER_JOB, {})
+                if reminder.get("state") != "pending":
+                    # Remove under the inbound lock so a new prompt cannot be lost.
+                    await self._human_reminders.discard(conversation_id)
+            return sent
+
+    async def _send_due_followup(self, conversation_id: int, *, human_only: bool = False) -> bool:
+        conversation = await self._sync_owner(conversation_id)
+        attributes = _custom_attributes(conversation)
+        if (attributes.get("reply_owner") != "bot" or _human_assigned(conversation)
+                or conversation.get("status") == "snoozed"
+                or attributes.get("scenario_pending_input")
+                or attributes.get("workflow_state") == "safety_escalation"):
+            return False
+        due = await self._scenario_effects.due(conversation, human_only=human_only)
+        if due is None:
+            return False
+        key, job = due
+        if (key != HUMAN_REMINDER_JOB and (attributes.get("scenario") or {}).get("awaiting_text")
+                and not (conversation.get("status") == "resolved" and job["screen"] == "s7")):
+            return False
+        turn_key = f"scenario-followup:{key}"
+        after_id = None
+        if key == HUMAN_REMINDER_JOB:
+            after_id = job["context"]["prompt_message_id"]
+            turn_key += f":{after_id}"
+        if await self._api.has_reply_for_turn(conversation_id, turn_key, after_id=after_id):
+            await self._scenario_effects.sent(conversation_id, key)
+            return False
+        if key == HUMAN_REMINDER_JOB:
+            turn = AgentTurn(text=HUMAN_REMINDER_TEXT)
+        else:
             if conversation.get("status") == "resolved":
                 await self._api.set_status(conversation_id, "pending")
             # Timers do not invoke LLMs and never copy customer history.
@@ -771,12 +806,12 @@ class ChatwootAgentService:
             )
             turn = service._with_back_choice(seeded.record, turn)
             await self._persist_workflow(conversation_id, seeded.record)
-            if not _bot_owns(await self._sync_owner(conversation_id)):
-                return False
-            await self._api.send_reply(conversation_id, text=turn.text, choices=turn.choices,
-                                       turn_key=turn_key)
-            await self._scenario_effects.sent(conversation_id, key)
-            return True
+        if not _bot_owns(await self._sync_owner(conversation_id)):
+            return False
+        await self._api.send_reply(conversation_id, text=turn.text, choices=turn.choices,
+                                   turn_key=turn_key)
+        await self._scenario_effects.sent(conversation_id, key)
+        return True
 
 
 def _seed_conversation(

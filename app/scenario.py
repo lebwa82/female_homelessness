@@ -132,7 +132,7 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
             continue
         if screen == "i8" and variant == 1 and index == 0:
             continue
-        if screen in {"s57", "i1"} and variant == 1 and label.startswith("Написать"):
+        if screen == "s57" and variant == 1 and label.startswith("Написать"):
             continue
         callback = f"sc:{screen}:{index}:{revision}"
         if screen == "s1":
@@ -144,7 +144,9 @@ def render(screen: str, *, revision: int = 0, context: dict | None = None,
         elif screen in AIDS and AIDS[screen] in CERTIFICATES:
             callback = "certificate:confirm"
         choices.append(Choice(id=callback, label=label))
-    return AgentTurn(text=body, choices=(*choices, HUMAN), audit={"scenario_screen": screen})
+    if screen != "i1" or variant != 0:
+        choices.append(HUMAN)
+    return AgentTurn(text=body, choices=tuple(choices), audit={"scenario_screen": screen})
 
 
 class ScenarioFlow:
@@ -177,6 +179,8 @@ class ScenarioFlow:
         if screen != "i8" or dynamic:
             data.pop("certificate_paused", None)
         data["variant"] = variant_for(screen, data) if variant is None else variant
+        if screen == "i1" and data["variant"] == 0:
+            data["awaiting_text"] = True
         state = ConversationState.SCENARIO.value
         if screen in NEEDS and screen != "s36":
             state = ConversationState.CHOOSING_AID.value
@@ -230,6 +234,11 @@ class ScenarioFlow:
         data = record.scenario
         screen = data.get("screen")
         if callback.startswith("sc:"):
+            if screen == "i1" and callback.startswith("sc:i1:"):
+                # Previously sent i1 buttons used indices 0 (write) and 1 (home).
+                if callback == f"sc:i1:1:{record.navigation.get('revision', 0)}":
+                    return await self.home(record)
+                return self.current(record)
             if not data.get("dynamic_certificates") and (
                     screen in AIDS and AIDS[screen] in CERTIFICATES
                     or screen == "i8" and not data.get("certificate_paused")

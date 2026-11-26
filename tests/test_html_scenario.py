@@ -5,6 +5,7 @@ import pytest
 from test_chatwoot_service import FakeChatwoot, StubGateway, event, ordinary_evaluation
 
 from app.chatwoot.contracts import CONSULTATION_COMPLETED, StaffMessage, parse_staff_message
+from app.chatwoot.followups import HumanReminderIndex, sweep
 from app.chatwoot.scenario_effects import daytime, returning_after_day
 from app.chatwoot.service import ChatwootAgentService
 from app.config import settings
@@ -39,7 +40,7 @@ def test_each_screen_variant_renders_without_duplicate_buttons(screen):
         turn = render(screen, variant=variant)
         assert 0 < len(turn.text) < 4096
         assert len({c.id for c in turn.choices}) == len(turn.choices)
-        assert sum(c.id == "human" for c in turn.choices) == 1
+        assert sum(c.id == "human" for c in turn.choices) == int((screen, variant) != ("i1", 0))
         assert all(len(c.id.encode()) <= 64 for c in turn.choices)
 
 
@@ -284,6 +285,161 @@ async def test_survey_timers_survive_restart_and_any_answer_cancels_reminder(aid
     assert api.conversation["custom_attributes"]["scenario_followups"]["reminder:first"]["state"] == "answered"
 
 
+@pytest.fixture
+async def prompted_handoff(monkeypatch):
+    class NoAfterHoursScan(FakeChatwoot):
+        async def list_conversations(self, page):
+            pytest.fail("Reminders must not scan all conversations after hours")
+
+    class ReminderRedis:
+        def __init__(self):
+            self.scores = {}
+
+        async def zadd(self, key, scores):
+            self.scores.update(scores)
+
+        async def zrem(self, key, member):
+            self.scores.pop(member, None)
+
+        async def zrangebyscore(self, key, lower, upper):
+            return [member for member, score in self.scores.items() if score <= upper]
+
+    monkeypatch.setattr(settings, "llm_enabled", True)
+    api = NoAfterHoursScan(messages=(
+        {"id": 41, "message_type": "incoming", "private": False, "content": "human"},
+    ))
+    service = ChatwootAgentService(
+        api, gateway=StubGateway(ordinary_evaluation()), duty_team_id=9,
+        human_reminders=HumanReminderIndex(ReminderRedis(), account_id=1),
+    )
+    opened = datetime(2026, 10, 3, 0, tzinfo=UTC)
+    service._scenario_effects.clock = lambda: opened
+    assert await service.process(event("human", 41))
+    return api, service, opened
+
+
+@pytest.mark.asyncio
+async def test_handoff_prompt_and_reminder_survive_restart_without_changing_workflow(prompted_handoff):
+    api, service, opened = prompted_handoff
+    attributes = api.conversation["custom_attributes"]
+    scenario = attributes["scenario"]
+    assert (scenario["screen"], scenario["variant"]) == ("i1", 0)
+    revision = attributes["workflow_navigation"]["revision"]
+    prompt = api.replies[0]
+    assert "прямо сюда, в поле внизу" in prompt["text"]
+    assert [(choice.id, choice.label) for choice in prompt["choices"]] == [
+        (f"home:{revision}", "Вернуться в начало"),
+    ]
+    job = attributes["scenario_followups"]["human:reminder"]
+    due = opened + timedelta(minutes=10)
+    assert job["screen"] == "i1"
+    assert job["state"] == "pending"
+    assert job["context"]["prompt_message_id"] == 41
+    assert datetime.fromisoformat(job["due_at"]) == due
+
+    api.messages += ({"id": prompt["message_id"], "message_type": "outgoing", "private": False,
+                      "sender": {"type": "agent_bot"}},)
+    reminders = HumanReminderIndex(service._human_reminders.redis, account_id=1)
+    await reminders.discard(23)  # Simulate a lost index write; Chatwoot still has the timer.
+    restarted = ChatwootAgentService(api, human_reminders=reminders)
+    before_due = due - timedelta(seconds=1)
+    restarted._scenario_effects.clock = lambda: before_due
+    assert not await restarted.process(event("human", 41))
+    assert await sweep(api, restarted, now=before_due, human_reminders=reminders) == 0
+    assert len(api.replies) == 1
+
+    restarted._scenario_effects.clock = lambda: due
+    assert await sweep(api, restarted, now=due, human_reminders=reminders) == 1
+    assert await sweep(api, restarted, now=due, human_reminders=reminders) == 0
+    assert not await reminders.due(due)
+    assert len(api.replies) == 2
+    reminder = api.replies[1]
+    assert reminder["text"] == "Вы можете просто написать сюда пару слов — человек ответит"
+    assert reminder["choices"] == ()
+    assert reminder["attachment"] is None
+    updated = api.conversation["custom_attributes"]
+    for key in ("workflow_state", "workflow_navigation", "scenario"):
+        assert updated[key] == attributes[key]
+    assert updated["scenario_followups"]["human:reminder"]["state"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_handoff_records_direct_text_and_stops_reminder(prompted_handoff):
+    api, service, opened = prompted_handoff
+    message = "Можно задать вопрос?"
+    assert await service.process(event(message, 101))
+    assert "Передала ваше сообщение" in api.replies[-1]["text"]
+    assert any("Сообщение для специалиста" in note and message in note for note in api.notes)
+    attributes = api.conversation["custom_attributes"]
+    scenario = attributes["scenario"]
+    assert (scenario["screen"], scenario["variant"]) == ("i1", 1)
+    assert attributes["scenario_followups"]["human:reminder"]["state"] == "cancelled"
+    service._scenario_effects.clock = lambda: opened + timedelta(minutes=10)
+    assert not await service.send_due_followup(23)
+    assert len(api.replies) == 2
+
+
+@pytest.mark.asyncio
+async def test_handoff_home_button_stops_reminder(prompted_handoff):
+    api, service, _ = prompted_handoff
+    (home,) = api.replies[0]["choices"]
+    assert await service.process(event(home.id, 101))
+    attributes = api.conversation["custom_attributes"]
+    assert attributes["scenario"]["screen"] == "s2"
+    assert attributes["scenario_followups"]["human:reminder"]["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_type,sender_type", [(0, "contact"), (1, "user")],
+                         ids=["incoming", "staff-reply"])
+async def test_handoff_reminder_is_suppressed_before_webhook_processing(
+    prompted_handoff, message_type, sender_type,
+):
+    api, service, opened = prompted_handoff
+    api.messages += ({"id": 101, "message_type": message_type, "private": False,
+                      "sender": {"type": sender_type, "id": 7}},)
+    service._scenario_effects.clock = lambda: opened + timedelta(minutes=10)
+    assert not await service.send_due_followup(23)
+    assert len(api.replies) == 1
+    assert api.conversation["custom_attributes"]["scenario_followups"]["human:reminder"]["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,assignee_id", [("open", 4), ("snoozed", None), ("resolved", None)])
+async def test_handoff_reminder_is_suppressed_when_chatwoot_disables_bot_replies(
+    prompted_handoff, status, assignee_id,
+):
+    api, service, opened = prompted_handoff
+    api.conversation.update(status=status, assignee_id=assignee_id)
+    service._scenario_effects.clock = lambda: opened + timedelta(minutes=10)
+    assert not await service.send_due_followup(23)
+    assert len(api.replies) == 1
+    assert api.conversation["status"] == status
+    assert api.conversation["custom_attributes"]["scenario_followups"]["human:reminder"]["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_handoff_reminder_is_not_resent_after_lost_reply_response(prompted_handoff, monkeypatch):
+    api, service, opened = prompted_handoff
+    send_reply = api.send_reply
+
+    async def lose_response(*args, **kwargs):
+        await send_reply(*args, **kwargs)
+        raise ConnectionError("synthetic")
+
+    monkeypatch.setattr(api, "send_reply", lose_response)
+    due = opened + timedelta(minutes=10)
+    service._scenario_effects.clock = lambda: due
+    with pytest.raises(ConnectionError):
+        await service.send_due_followup(23)
+
+    restarted = ChatwootAgentService(api)
+    restarted._scenario_effects.clock = lambda: due
+    assert not await restarted.send_due_followup(23)
+    assert len(api.replies) == 2
+    assert api.conversation["custom_attributes"]["scenario_followups"]["human:reminder"]["state"] == "sent"
+
+
 def test_variant_buttons_preserve_distinct_answers():
     for screen in ("s71", "s72", "s73"):
         turn = render(screen)
@@ -482,8 +638,6 @@ async def test_every_explicit_html_callback_has_a_runtime_transition(flow, scree
 
 @pytest.mark.asyncio
 async def test_followup_sweep_handles_all_pages_and_isolates_one_failure():
-    from app.chatwoot.followups import sweep
-
     class Api:
         async def list_conversations(self, page):
             return tuple({"id": i, "custom_attributes": {"scenario_followups": {"job": {

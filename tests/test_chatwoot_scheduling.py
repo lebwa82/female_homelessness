@@ -228,7 +228,9 @@ async def test_any_new_input_cancels_idle(runtime, input_text):
     await service.process(event(input_text, 44))
     assert jobs(api)["idle:0"]["state"] == "cancelled"
     service._scenario_effects.clock = lambda: NOW + timedelta(hours=1)
-    assert not await service.send_due_followup(23)
+    assert await service.send_due_followup(23) is (input_text == "human")
+    if input_text == "human":
+        assert jobs(api)["human:reminder"]["state"] == "sent"
 
 
 @pytest.mark.asyncio

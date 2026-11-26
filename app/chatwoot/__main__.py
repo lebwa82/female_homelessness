@@ -13,6 +13,7 @@ from app.chatwoot.app import create_application
 from app.chatwoot.certificates import CertificateInventory, database_url
 from app.chatwoot.client import AiohttpChatwootTransport, ChatwootClient
 from app.chatwoot.event_queue import DurableEventQueue
+from app.chatwoot.followups import HumanReminderIndex
 from app.chatwoot.followups import run as run_followups
 from app.chatwoot.service import ChatwootAgentService
 from app.chatwoot.telemetry import configure as configure_timing_logs
@@ -51,6 +52,9 @@ def main() -> None:
         transport=transport,
         fast_buttons=settings.chatwoot_fast_buttons,
     )
+    redis = Redis.from_url(settings.telegram_ingress_redis_url, decode_responses=True,
+                           socket_timeout=5, socket_connect_timeout=5)
+    human_reminders = HumanReminderIndex(redis, account_id=settings.chatwoot_account_id)
     service = ChatwootAgentService(
         client,
         duty_team_id=settings.chatwoot_duty_team_id,
@@ -63,9 +67,8 @@ def main() -> None:
         certificate_mark_failed=inventory.mark_failed,
         certificate_mark_delivered=inventory.mark_delivered,
         certificate_mark_delivery_failed=inventory.mark_delivery_failed,
+        human_reminders=human_reminders,
     )
-    redis = Redis.from_url(settings.telegram_ingress_redis_url, decode_responses=True,
-                           socket_timeout=5, socket_connect_timeout=5)
     event_queue = DurableEventQueue(redis, service,
                                    namespace=f"women-help:chatwoot-events:{settings.chatwoot_account_id}")
     application = create_application(
@@ -78,7 +81,7 @@ def main() -> None:
     async def lifecycle(_app: web.Application):
         await inventory.initialize()
         await event_queue.start()
-        worker = asyncio.create_task(run_followups(client, service))
+        worker = asyncio.create_task(run_followups(client, service, human_reminders=human_reminders))
         try:
             yield
         finally:

@@ -16,6 +16,9 @@ from app.scenario import CERTIFICATES, CONSULTATION_IDS
 MSK = ZoneInfo("Europe/Moscow")
 SUCCESS_CONSULTATIONS = frozenset(CONSULTATION_IDS)
 REFERRAL_JOB = "referral:source"
+HUMAN_REMINDER_JOB = "human:reminder"
+HUMAN_REMINDER_TEXT = "Вы можете просто написать сюда пару слов — человек ответит"
+IDLE_PROMPT_IDS = {"i4": "menu_message_id", "i1": "prompt_message_id"}
 REFERRAL_SOURCES = {
     "website": "Сайт", "friend": "Знакомые", "organization": "Организация",
     "leaflet": "Листовка", "other": "Другое", "skipped": "Пропущено",
@@ -139,10 +142,11 @@ def returning_after_day(messages: tuple[dict, ...], message_id: int, now: dateti
 
 
 class ScenarioEffects:
-    def __init__(self, api, queues, *, clock=None, can_route=lambda _: True):
+    def __init__(self, api, queues, *, clock=None, can_route=lambda _: True, human_reminders=None):
         self.api, self.queues = api, queues
         self.clock = clock or (lambda: datetime.now(UTC))
         self.can_route = can_route
+        self.human_reminders = human_reminders
 
     async def apply(self, conversation_id: int, message_id: int, actions: list) -> None:
         for _, kind, _, payload in actions:
@@ -410,11 +414,28 @@ class ScenarioEffects:
         await self.api.add_private_note(event.conversation_id, note,
                                         event_key=f"consultation-schedule:{event.message_id}")
 
-    async def menu_delivered(self, conversation_id: int, message_id: int) -> None:
+    async def menu_delivered(self, conversation_id: int, message_id: int,
+                             *, human_prompt: bool = False) -> None:
         current = attrs(await self.api.get_conversation(conversation_id))
-        if (current.get("scenario") or {}).get("screen") != "s2":
-            return
+        scenario = current.get("scenario") or {}
         jobs = dict(current.get("scenario_followups") or {})
+        if human_prompt and scenario.get("screen") == "i1" and scenario.get("variant") == 0:
+            previous = jobs.get(HUMAN_REMINDER_JOB) or {}
+            previous_id = previous.get("context", {}).get("prompt_message_id", 0)
+            if message_id > previous_id:
+                previous = jobs[HUMAN_REMINDER_JOB] = {
+                    "screen": "i1", "due_at": (self.clock() + timedelta(minutes=10)).isoformat(),
+                    "state": "pending", "context": {"prompt_message_id": message_id},
+                }
+                await self.api.set_custom_attributes(conversation_id, {"scenario_followups": jobs})
+            # Reconcile a lost index write using the original due time on callback retry.
+            if (self.human_reminders is not None and message_id >= previous_id
+                    and previous.get("state") == "pending"):
+                due = datetime.fromisoformat(previous["due_at"])
+                await self.human_reminders.add(conversation_id, due)
+            return
+        if scenario.get("screen") != "s2":
+            return
         key = f"idle:{current.get('context_epoch', 0)}"
         updated = schedule(jobs, key, "i4", self.clock() + timedelta(hours=1),
                            {"menu_message_id": message_id})
@@ -426,8 +447,9 @@ class ScenarioEffects:
         jobs = dict(current.get("scenario_followups") or {})
         changed = False
         for key, job in jobs.items():
-            if (job.get("screen") == "i4" and job["state"] == "pending"
-                    and (before_message is None or job["context"]["menu_message_id"] < before_message)):
+            prompt_id = IDLE_PROMPT_IDS.get(job.get("screen"))
+            if (prompt_id and job["state"] == "pending"
+                    and (before_message is None or job["context"][prompt_id] < before_message)):
                 jobs[key] = {**job, "state": "cancelled"}
                 changed = True
         if changed:
@@ -435,33 +457,40 @@ class ScenarioEffects:
             return {**conversation, "custom_attributes": {**current, "scenario_followups": jobs}}
         return conversation
 
-    async def due(self, conversation: dict) -> tuple[str, dict] | None:
+    async def due(self, conversation: dict, *, human_only: bool = False) -> tuple[str, dict] | None:
         current = attrs(conversation)
         jobs = dict(current.get("scenario_followups") or {})
         now = self.clock()
-        if daytime(now) > now:
-            return None
+        during_day = daytime(now) <= now
         # A due post-meeting review takes precedence over an older contact check.
-        for key, job in sorted(jobs.items(), key=lambda p: (p[1]["screen"] != "s7", p[1]["due_at"])):
+        for key, job in sorted(jobs.items(), key=lambda p: (
+            p[0] != HUMAN_REMINDER_JOB, p[1]["screen"] != "s7", p[1]["due_at"],
+        )):
+            if key != HUMAN_REMINDER_JOB and (human_only or not during_day):
+                continue
             if job["state"] != "pending" or datetime.fromisoformat(job["due_at"]) > now:
                 continue
             if job["screen"] == "s39" and not referral_ready(current):
                 continue
-            if job["screen"] == "i4":
+            prompt_id = IDLE_PROMPT_IDS.get(job["screen"])
+            if prompt_id:
                 # Also check stored messages: an incoming webhook may still be
                 # queued. Never nudge a user who has already answered.
-                messages = await self.api.get_messages(conversation["id"])
+                anchor = job["context"][prompt_id]
+                messages = await self.api.get_messages(conversation["id"], after_id=anchor)
                 scenario = current.get("scenario") or {}
                 waiting = (scenario.get("screen") == "s2" or scenario.get("job_key") == key
                            and scenario.get("screen") == "i4")
-                activity = any(m.get("id", 0) > job["context"]["menu_message_id"]
-                               and not m.get("private")
+                if key == HUMAN_REMINDER_JOB:
+                    waiting = scenario.get("screen") == "i1" and scenario.get("variant") == 0
+                activity = any(m.get("id", 0) > anchor and not m.get("private")
                                and (m.get("message_type") in {0, "incoming"}
-                                    or (m.get("sender") or {}).get("type") == "user")
+                                    or (m.get("sender") or {}).get("type") == "user"
+                                    or m.get("sender_type") == "User")
                                for m in messages)
                 if not waiting or activity:
-                    conversation = await self.cancel_idle(conversation)
-                    jobs = dict(attrs(conversation).get("scenario_followups") or {})
+                    jobs[key] = {**job, "state": "cancelled"}
+                    await self.api.set_custom_attributes(conversation["id"], {"scenario_followups": jobs})
                     continue
             expiry = job["context"].get("expires_at")
             if expiry and datetime.fromisoformat(expiry) <= now:
