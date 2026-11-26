@@ -13,12 +13,16 @@ class VK:
         self.settings, self.http = settings, http
 
     def authenticate(self, _raw, _headers, payload):
-        return (isinstance(payload, dict)
-                and type(payload.get("group_id")) is int
-                and payload["group_id"] == self.settings.vk_group_id
-                and isinstance(payload.get("secret"), str)
-                and hmac.compare_digest(payload["secret"].encode(),
-                                        self.settings.vk_secret.get_secret_value().encode()))
+        if (not isinstance(payload, dict) or type(payload.get("group_id")) is not int
+                or payload["group_id"] != self.settings.vk_group_id):
+            return False
+        # VK can confirm the URL before a shared secret has been set in the UI.
+        if payload.get("type") == "confirmation" and "secret" not in payload:
+            return True
+        secret = payload.get("secret")
+        return isinstance(secret, str) and hmac.compare_digest(
+            secret.encode(), self.settings.vk_secret.get_secret_value().encode(),
+        )
 
     def incoming(self, payload):
         if payload.get("type") != "message_new":

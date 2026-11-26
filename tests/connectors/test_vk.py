@@ -92,9 +92,16 @@ async def test_vk_webhook_confirmation_and_enqueue_failure(settings_factory, htt
     settings = settings_factory()
     queue = SimpleNamespace(enqueue=AsyncMock(), healthy=AsyncMock(return_value=True))
     client = await client_factory(create_application(settings, VK(settings, http), queue))
+    confirmation = {"type": "confirmation", "group_id": settings.vk_group_id}
+    response = await client.post("/webhooks/vk", json=confirmation)
+    assert response.status == 200 and await response.text() == "confirm"
+    assert (await client.post("/webhooks/vk", json=confirmation | {"group_id": 9})).status == 401
+    assert (await client.post("/webhooks/vk", json=confirmation | {"secret": "bad"})).status == 401
     response = await client.post("/webhooks/vk", json=payload() | {"type": "confirmation"})
     assert response.status == 200 and await response.text() == "confirm"
     assert queue.enqueue.await_count == 0
+    unsigned = {key: value for key, value in payload().items() if key != "secret"}
+    assert (await client.post("/webhooks/vk", json=unsigned)).status == 401
     assert (await client.post("/webhooks/vk", json=payload() | {"secret": "bad"})).status == 401
     assert (await client.post("/webhooks/vk", json=payload())).status == 200
     assert queue.enqueue.call_args.args[0]["kind"] == "incoming"

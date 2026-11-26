@@ -135,7 +135,9 @@ status webhook: статус всего сообщения повышается 
 **ВК:** включить сообщения сообщества, создать community token с правами
 сообщений и документов. В Callback API включить `message_new`, задать secret,
 скопировать confirmation code, указать
-`https://vk-connector.example.org/webhooks/vk`. Проверяются secret и group ID.
+`https://vk-connector.example.org/webhooks/vk`. При первом подтверждении ВК
+может прислать только `type: confirmation` и `group_id`. Для сообщений
+коннектор всегда проверяет secret и group ID.
 Коннектор обслуживает личные чаты; сообщения групповых бесед игнорируются.
 
 **WhatsApp:** нужен Meta Business/WABA, подключённый номер и Cloud API token с
