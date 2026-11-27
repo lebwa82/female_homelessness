@@ -1,0 +1,2971 @@
+{
+  "version": 1,
+  "tables": {
+    "dim_contact": {
+      "grain": "Одна карточка контакта в аккаунте Chatwoot.",
+      "source": "contacts",
+      "primary_key": [
+        "contact_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Карточки с одинаковыми реквизитами сохраняют отдельные ключи.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID контакта.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата создания карточки контакта. Момент первого обращения за помощью неизвестен.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата последнего изменения карточки.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": []
+    },
+    "dim_inbox": {
+      "grain": "Один включённый в область загрузки канал аккаунта.",
+      "source": "inboxes",
+      "primary_key": [
+        "inbox_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Поля отражают последние наблюдавшиеся настройки канала.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "inbox_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID канала Chatwoot.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "channel_type": {
+          "type": "text",
+          "nullable": true,
+          "description": "Тип канала связи.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "Channel::Api",
+            "Channel::Telegram",
+            "Channel::WebWidget",
+            "Channel::Email",
+            "Channel::Whatsapp",
+            "Channel::FacebookPage",
+            "Channel::Line",
+            "Channel::TwitterProfile",
+            "Channel::Sms",
+            "Channel::TwilioSms"
+          ]
+        },
+        "csat_survey_enabled": {
+          "type": "boolean",
+          "nullable": true,
+          "description": "Включён ли опрос CSAT в канале.",
+          "transformation": "Логическое значение из источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "lock_to_single_conversation": {
+          "type": "boolean",
+          "nullable": true,
+          "description": "Включено ли повторное использование одного диалога.",
+          "transformation": "Логическое значение из источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения настроек канала.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": []
+    },
+    "dim_staff": {
+      "grain": "Одна учётная запись назначенного или связанного пользователя.",
+      "source": "users",
+      "primary_key": [
+        "staff_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Наличие записи User не подтверждает ручное действие человека.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "staff_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID учётной записи автора или назначенного специалиста.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "account_type": {
+          "type": "text",
+          "nullable": true,
+          "description": "Тип учётной записи. NULL часто встречается в источнике. Тип сам по себе не подтверждает ручное авторство.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "User",
+            "SuperAdmin"
+          ]
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения учётной записи.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": []
+    },
+    "dim_aid": {
+      "grain": "Один разрешённый код вида помощи, наблюдавшийся в строках DDS аккаунта.",
+      "source": "Коды видов помощи из фактов и моста применимости пулов DDS",
+      "primary_key": [
+        "account_id",
+        "aid_id"
+      ],
+      "refresh": "Формируется из кодов, присутствующих в текущей порции строк фактов и моста применимости пулов.",
+      "deletions": "Исчезновение кода проверяется только при одновременном полном чтении всех сущностей, из которых строится измерение. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Доступность вида помощи и факт её оказания здесь не измеряются.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "aid_id": {
+          "type": "text",
+          "nullable": false,
+          "description": "Разрешённый код вида помощи.",
+          "transformation": "Проверка точного кода по разрешённому словарю видов помощи.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "food_card",
+            "medicine_card",
+            "hostel_3_nights",
+            "children_card",
+            "psychologist_3_sessions",
+            "legal_consultation",
+            "peer_consultation"
+          ]
+        }
+      },
+      "relationships": []
+    },
+    "dim_certificate_pool": {
+      "grain": "Один пул, связанный с отобранной записью сертификата или очереди.",
+      "source": "women_help_certificate_pools",
+      "primary_key": [
+        "pool_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Пулы и их провайдеры представлены только при наличии такой связи. Общий остаток и полный список пулов неизвестны.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "pool_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID пула сертификатов.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "provider": {
+          "type": "text",
+          "nullable": true,
+          "description": "Провайдер пула, связанного с отобранной записью сертификата или очереди.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "Ozon",
+            "Пятёрочка",
+            "Пятерочка",
+            "ozon",
+            "pyaterochka"
+          ]
+        }
+      },
+      "relationships": [],
+      "scope": {
+        "attribution": [
+          "attributable_certificate",
+          "scoped_certificate_request"
+        ],
+        "inventory_coverage": "attributable_records_only",
+        "description": "Пул попадает в срез через сертификат, связанный с историческим диалогом или сообщением отправки, либо через запись очереди с отобранным диалогом."
+      }
+    },
+    "dim_label": {
+      "grain": "Одна метка Chatwoot из согласованного списка названий.",
+      "source": "labels",
+      "primary_key": [
+        "label_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Пустой результат допустим при отсутствии согласованных меток.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "label_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID метки Chatwoot.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "title": {
+          "type": "text",
+          "nullable": true,
+          "description": "Название метки из согласованного списка категорий.",
+          "transformation": "Точное сопоставление с согласованным списком.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения метки.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": []
+    },
+    "dim_tag": {
+      "grain": "Один тег из согласованного списка названий в области аккаунта.",
+      "source": "tags",
+      "primary_key": [
+        "tag_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Пустой результат допустим. Теги и метки ведутся в разных сущностях Chatwoot.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "tag_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID тега в хранилище тегов.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "name": {
+          "type": "text",
+          "nullable": true,
+          "description": "Название тега из согласованного списка категорий.",
+          "transformation": "Точное сопоставление с согласованным списком.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        }
+      },
+      "relationships": []
+    },
+    "bridge_contact_inbox": {
+      "grain": "Одна запись связи контакта с каналом.",
+      "source": "contact_inboxes",
+      "primary_key": [
+        "contact_inbox_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Пара контакт–канал сама по себе не гарантирует уникальность.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_inbox_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID связи контакта с каналом.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID контакта.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "inbox_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID канала.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата создания связи контакта с каналом.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения связи.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "contact_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID контакта.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "inbox_key"
+          ],
+          "target_table": "dim_inbox",
+          "target_columns": [
+            "inbox_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID канала.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "bridge_pool_aid": {
+      "grain": "Одна разрешённая пара вида помощи и пула, попавшего в область загрузки.",
+      "source": "women_help_certificate_pool_aids",
+      "primary_key": [
+        "account_id",
+        "pool_key",
+        "aid_id"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Связь описывает применимость отобранного пула. Выбранный для документа вид помощи берётся из факта сертификата. Доступный остаток неизвестен.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "pool_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID пула сертификатов.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "aid_id": {
+          "type": "text",
+          "nullable": false,
+          "description": "Код вида помощи, для которого допустим этот пул. не фактическая выдача.",
+          "transformation": "Проверка точного кода по разрешённому словарю видов помощи.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "food_card",
+            "medicine_card",
+            "hostel_3_nights",
+            "children_card",
+            "psychologist_3_sessions",
+            "legal_consultation",
+            "peer_consultation"
+          ]
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "pool_key"
+          ],
+          "target_table": "dim_certificate_pool",
+          "target_columns": [
+            "pool_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID пула сертификатов.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "target_table": "dim_aid",
+          "target_columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Код вида помощи, для которого допустим этот пул. не фактическая выдача.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "bridge_certificate_request_event": {
+      "grain": "Одна уникальная ссылка на событие в записи очереди сертификатов.",
+      "source": "women_help_certificate_requests.source_event_keys",
+      "primary_key": [
+        "certificate_request_key",
+        "event_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Публикуется только однозначный единственный event key при обоих концах очереди в scope. Разные несколько ключей и смешанные области не атрибутируются автоматически: DQ partial_scope_events. Отсутствие моста не означает отсутствие попыток.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "event_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Псевдоним ссылки на событие из разрешённого формата исходного ключа.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "certificate_request_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Ключ записи очереди сертификатов.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "certificate_request_key"
+          ],
+          "target_table": "fact_certificate_request",
+          "target_columns": [
+            "certificate_request_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ записи очереди сертификатов.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "bridge_label_tag": {
+      "grain": "Одно допустимое соответствие метки и тега внутри аккаунта.",
+      "source": "labels.title и tags.name",
+      "primary_key": [
+        "label_key",
+        "tag_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Связь основана на точном совпадении разрешённых названий. При неоднозначном совпадении связь пропускается с отметкой контроля качества.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "label_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Ключ метки из согласованного списка.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "tag_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Ключ тега с таким же разрешённым названием.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "label_key"
+          ],
+          "target_table": "dim_label",
+          "target_columns": [
+            "label_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ метки из согласованного списка.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "tag_key"
+          ],
+          "target_table": "dim_tag",
+          "target_columns": [
+            "tag_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ тега с таким же разрешённым названием.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "bridge_object_tag": {
+      "grain": "Одно каноническое назначение тега объекту в контексте.",
+      "source": "taggings",
+      "primary_key": [
+        "tagging_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Дубли физических назначений с теми же типом объекта, объектом, тегом и контекстом сворачиваются. Исходные ID назначений недоступны.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "tagging_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Псевдоним канонического назначения тега объекту.",
+          "transformation": "UUID из HMAC аккаунта, типа объекта, объекта, тега и контекста.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "tag_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID назначенного тега.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "taggable_type": {
+          "type": "text",
+          "nullable": false,
+          "description": "Тип объекта, которому назначен тег.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "Conversation",
+            "Contact"
+          ]
+        },
+        "object_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID объекта, которому назначен тег.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "context": {
+          "type": "text",
+          "nullable": false,
+          "description": "Контекст назначения тега, необходимый для различения связей.",
+          "transformation": "Контекст проходит проверку допустимого формата. Для меток диалога используется labels.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Самый ранний наблюдавшийся момент среди одинаковых исходных назначений.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "tag_key"
+          ],
+          "target_table": "dim_tag",
+          "target_columns": [
+            "tag_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID назначенного тега.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "object_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Тег диалога.",
+          "condition": "source.taggable_type = 'Conversation' AND source.context = 'labels'",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "object_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Тег карточки контакта.",
+          "condition": "source.taggable_type = 'Contact'",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "fact_conversation": {
+      "grain": "Один диалог Chatwoot.",
+      "source": "conversations",
+      "primary_key": [
+        "conversation_key"
+      ],
+      "refresh": "Дельта по updated_at с перекрытием. Периодическая полная сверка.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Канал может повторно использовать диалог. Статус resolved описывает закрытие диалога.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID диалога.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID контакта, которому принадлежит диалог.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "inbox_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID канала диалога.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_inbox_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID связи контакта с каналом.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата создания диалога.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "status": {
+          "type": "integer",
+          "nullable": true,
+          "description": "Текущий код состояния диалога Chatwoot. Resolved означает закрытие диалога.",
+          "transformation": "Целое число из источника. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "enum_meanings": {
+            "0": "open",
+            "1": "resolved",
+            "2": "pending",
+            "3": "snoozed"
+          }
+        },
+        "status_changed_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата последней смены состояния диалога.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "assignee_staff_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID назначенного специалиста/учётной записи.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения диалога.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "assignee_bot_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID назначенного бота, если используется для отслеживания передачи человеку.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "ai_assignee_type": {
+          "type": "text",
+          "nullable": true,
+          "description": "Тип назначения автоматизации, сохранённый в Chatwoot.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "AgentBot",
+            "Captain::Assistant",
+            "CaptainAssistant"
+          ]
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "contact_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID контакта, которому принадлежит диалог.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "inbox_key"
+          ],
+          "target_table": "dim_inbox",
+          "target_columns": [
+            "inbox_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID канала диалога.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "contact_inbox_key"
+          ],
+          "target_table": "bridge_contact_inbox",
+          "target_columns": [
+            "contact_inbox_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID связи контакта с каналом.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "assignee_staff_key"
+          ],
+          "target_table": "dim_staff",
+          "target_columns": [
+            "staff_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID назначенного специалиста/учётной записи.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "fact_message": {
+      "grain": "Одно сообщение Chatwoot с выбранными метаданными.",
+      "source": "messages",
+      "primary_key": [
+        "message_key"
+      ],
+      "refresh": "Дельта по updated_at с перекрытием. Периодическая полная сверка.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Направление, тип автора и доставка описывают метаданные сообщения. Отправителя связывают с измерением только через его тип.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "message_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID сообщения.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID диалога сообщения.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "inbox_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID канала сообщения.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "sender_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Псевдоним отправителя. Соединять по ключу, аккаунту и условию на sender_type.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "sender_type": {
+          "type": "text",
+          "nullable": true,
+          "description": "Тип сущности отправителя. Значение User само по себе не подтверждает ручное авторство.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "User",
+            "Contact",
+            "AgentBot"
+          ]
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата создания сообщения.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения метаданных сообщения.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "message_type": {
+          "type": "integer",
+          "nullable": true,
+          "description": "Код направления или служебного назначения сообщения Chatwoot.",
+          "transformation": "Целое число из источника. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "enum_meanings": {
+            "0": "incoming",
+            "1": "outgoing",
+            "2": "activity",
+            "3": "template"
+          }
+        },
+        "private": {
+          "type": "boolean",
+          "nullable": true,
+          "description": "Признак внутреннего сообщения.",
+          "transformation": "Логическое значение из источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "status": {
+          "type": "integer",
+          "nullable": true,
+          "description": "Код состояния доставки сообщения Chatwoot.",
+          "transformation": "Целое число из источника. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "enum_meanings": {
+            "0": "sent",
+            "1": "delivered",
+            "2": "read",
+            "3": "failed"
+          }
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID диалога сообщения.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "inbox_key"
+          ],
+          "target_table": "dim_inbox",
+          "target_columns": [
+            "inbox_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID канала сообщения.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "sender_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Сообщение контакта.",
+          "condition": "source.sender_type = 'Contact'",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "sender_key"
+          ],
+          "target_table": "dim_staff",
+          "target_columns": [
+            "staff_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Сообщение с отправителем типа User.",
+          "condition": "source.sender_type = 'User'",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "fact_consultation_request": {
+      "grain": "Одна запись запроса консультации внутри диалога.",
+      "source": "conversations.custom_attributes.scenario_requests",
+      "primary_key": [
+        "request_key"
+      ],
+      "refresh": "Дельта по updated_at родительского диалога с перечитыванием полного набора записей. Периодическая полная сверка.",
+      "deletions": "Исчезновение проверяется после полного чтения затронутого диалога и при полной сверке. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Бизнес-ключ исходной записи состоит из аккаунта, диалога и локального ключа записи. Завершение фиксирует отметку в процессе.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "request_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Псевдоним отдельной записи запроса внутри диалога.",
+          "transformation": "Стабильный UUID из HMAC аккаунта, сущности, исходного диалога и локального ключа записи.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "state": {
+          "type": "text",
+          "nullable": true,
+          "description": "Состояние запроса консультации.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "Для записи с отсутствующим или недопустимым состоянием выводится запись контроля качества.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "requested",
+            "completed"
+          ]
+        },
+        "aid_id": {
+          "type": "text",
+          "nullable": true,
+          "description": "Код запрошенного вида помощи.",
+          "transformation": "Проверка точного кода по разрешённому словарю видов помощи.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "food_card",
+            "medicine_card",
+            "hostel_3_nights",
+            "children_card",
+            "psychologist_3_sessions",
+            "legal_consultation",
+            "peer_consultation"
+          ]
+        },
+        "requested_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата запроса консультации, если сохранена.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "completed_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Момент отметки завершения запроса. Факт состоявшейся консультации неизвестен.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "specialist_staff_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID специалиста, связанного с запросом.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "completed_message_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID сообщения, связанного с отметкой завершения запроса.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Ключ родительского диалога исходной записи запроса.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ родительского диалога исходной записи запроса.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "target_table": "dim_aid",
+          "target_columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Код запрошенного вида помощи.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "specialist_staff_key"
+          ],
+          "target_table": "dim_staff",
+          "target_columns": [
+            "staff_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID специалиста, связанного с запросом.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "completed_message_key"
+          ],
+          "target_table": "fact_message",
+          "target_columns": [
+            "message_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID сообщения, связанного с отметкой завершения запроса.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ],
+      "temporal_rules": {
+        "ordered_pairs": [
+          [
+            "requested_at",
+            "completed_at"
+          ]
+        ],
+        "on_violation": "preserve_dates_with_dq; exclude_from_duration_calculations"
+      }
+    },
+    "fact_followup": {
+      "grain": "Одна запись follow-up внутри диалога.",
+      "source": "conversations.custom_attributes.scenario_followups",
+      "primary_key": [
+        "followup_key"
+      ],
+      "refresh": "Дельта по updated_at родительского диалога с перечитыванием полного набора записей. Периодическая полная сверка.",
+      "deletions": "Исчезновение проверяется после полного чтения затронутого диалога и при полной сверке. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Бизнес-ключ исходной записи состоит из аккаунта, диалога и локального ключа записи. Отправка и ответ описывают процесс follow-up.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "followup_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Псевдоним отдельной записи follow-up внутри диалога.",
+          "transformation": "Стабильный UUID из HMAC аккаунта, сущности, исходного диалога и локального ключа записи.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "state": {
+          "type": "text",
+          "nullable": true,
+          "description": "Состояние follow-up.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "Для записи с отсутствующим или недопустимым состоянием выводится запись контроля качества.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "pending",
+            "sent",
+            "answered",
+            "cancelled",
+            "expired"
+          ]
+        },
+        "due_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Плановая дата отправки follow-up.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "sent_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Момент отметки отправки follow-up. Получение ответа отражается отдельно в состоянии.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "aid_id": {
+          "type": "text",
+          "nullable": true,
+          "description": "Код вида помощи, к которому относится follow-up.",
+          "transformation": "Проверка точного кода по разрешённому словарю видов помощи.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "food_card",
+            "medicine_card",
+            "hostel_3_nights",
+            "children_card",
+            "psychologist_3_sessions",
+            "legal_consultation",
+            "peer_consultation"
+          ]
+        },
+        "request_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Ключ консультационного запроса, разрешённый в том же диалоге.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL при отсутствии ссылки этого типа.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "screen_code": {
+          "type": "text",
+          "nullable": true,
+          "description": "Разрешённый код экрана, связанного с follow-up.",
+          "transformation": "Типизированный скаляр из разрешённого источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "Ключ родительского диалога исходной записи follow-up.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "target_kind": {
+          "type": "text",
+          "nullable": true,
+          "description": "Категория связи follow-up с исходным запросом.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "consultation",
+            "unresolved",
+            "none"
+          ],
+          "enum_meanings": {
+            "consultation": "Запрос консультации разрешён в пределах того же диалога.",
+            "unresolved": "Исходная ссылка есть. Целевой запрос не разрешён.",
+            "none": "Исходная ссылка отсутствует."
+          }
+        },
+        "unresolved_target_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Непрозрачная ссылка follow-up, которую не удалось связать с консультацией.",
+          "transformation": "Стабильный UUID из HMAC аккаунта, сущности, исходного диалога и локального ключа записи.",
+          "null_meaning": "NULL при отсутствии ссылки этого типа.",
+          "history": "Текущее наблюдаемое значение поля."
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ родительского диалога исходной записи follow-up.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "target_table": "dim_aid",
+          "target_columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Код вида помощи, к которому относится follow-up.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "request_key"
+          ],
+          "target_table": "fact_consultation_request",
+          "target_columns": [
+            "request_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Разрешённая ссылка на запрос консультации.",
+          "condition": "source.target_kind = 'consultation' AND source.conversation_key = target.conversation_key",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    },
+    "fact_certificate": {
+      "grain": "Одна запись сертификата, связанная с областью загрузки через исторический диалог или сообщение отправки.",
+      "source": "women_help_pdf_certificates",
+      "primary_key": [
+        "certificate_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Разделяйте record_kind. Прямые ссылки сохраняют исходный NULL. Восстановленные ссылки доступны отдельно. Документы без связи с областью загрузки, включая доступные или зарезервированные до отправки, отсутствуют в срезе. Общий остаток сертификатов неизвестен даже при отсутствии строк.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "certificate_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID исходной записи сертификата.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "pool_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID пула сертификата.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID связанного контакта, если назначен.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL сохраняет отсутствие прямой связи в источнике.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID связанного диалога.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL сохраняет отсутствие прямой связи в источнике.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "source_message_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID исходного сообщения, связанного с записью сертификата.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "send_message_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Ключ сообщения Chatwoot, связанного с отправкой сертификата.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "nominal_rubles": {
+          "type": "integer",
+          "nullable": true,
+          "description": "Номинал сертификата в рублях.",
+          "transformation": "Целое число из источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "unit": "RUB"
+        },
+        "selected_aid_id": {
+          "type": "text",
+          "nullable": true,
+          "description": "Код выбранного вида помощи.",
+          "transformation": "Проверка точного кода по разрешённому словарю видов помощи.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "food_card",
+            "medicine_card",
+            "hostel_3_nights",
+            "children_card",
+            "psychologist_3_sessions",
+            "legal_consultation",
+            "peer_consultation"
+          ]
+        },
+        "status": {
+          "type": "text",
+          "nullable": true,
+          "description": "Состояние записи сертификата, связанной с областью загрузки. Сопоставлять состояние с record_kind. Доступный остаток неизвестен.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "available",
+            "reserved",
+            "submitted",
+            "delivered",
+            "failed",
+            "accepted",
+            "recorded"
+          ],
+          "enum_by_record_kind": {
+            "certificate": [
+              "available",
+              "reserved",
+              "submitted",
+              "delivered",
+              "failed"
+            ],
+            "historical_issuance": [
+              "accepted",
+              "recorded"
+            ]
+          }
+        },
+        "record_kind": {
+          "type": "text",
+          "nullable": true,
+          "description": "Вид записи. Certificate обозначает документ инвентаря, historical_issuance — историческую запись выдачи.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "certificate",
+            "historical_issuance"
+          ]
+        },
+        "is_test": {
+          "type": "boolean",
+          "nullable": true,
+          "description": "Признак тестового сертификата.",
+          "transformation": "Логическое значение из источника.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "valid_from": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Начало срока действия сертификата.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "expires_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Окончание срока действия сертификата.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "reserved_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата отметки резервирования сертификата.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "submitted_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Момент отметки этапа submitted в источнике.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "delivered_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Момент отметки доставки. Факт использования сертификата неизвестен.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "accepted_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Момент отметки принятия в источнике, включая импорт исторических записей.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "issued_on": {
+          "type": "date",
+          "nullable": true,
+          "description": "Календарная дата выдачи, указанная источником.",
+          "transformation": "Сохраняется календарная дата без времени и часового пояса.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "resolved_contact_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Контакт из прямой ссылки или из диалога отправки сертификата.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL, если безопасная связь не установлена.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "resolved_conversation_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Диалог из прямой ссылки или из сообщения отправки сертификата.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL, если безопасная связь не установлена.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "link_origin": {
+          "type": "text",
+          "nullable": true,
+          "description": "Происхождение связей сертификата с диалогом или контактом.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "direct",
+            "send_message",
+            "unresolved"
+          ],
+          "enum_meanings": {
+            "direct": "В источнике есть прямая ссылка на контакт или диалог. Недостающую связь могут восстановить отдельно.",
+            "send_message": "Прямых ссылок нет. Диалог разрешён по сообщению отправки.",
+            "unresolved": "Прямая ссылка и диалог отправки недоступны."
+          }
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "pool_key"
+          ],
+          "target_table": "dim_certificate_pool",
+          "target_columns": [
+            "pool_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID пула сертификата.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "contact_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID связанного контакта, если назначен.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID связанного диалога.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "source_message_key"
+          ],
+          "target_table": "fact_message",
+          "target_columns": [
+            "message_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID исходного сообщения, связанного с записью сертификата.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "send_message_key"
+          ],
+          "target_table": "fact_message",
+          "target_columns": [
+            "message_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ сообщения Chatwoot, связанного с отправкой сертификата.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "account_id",
+            "selected_aid_id"
+          ],
+          "target_table": "dim_aid",
+          "target_columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Код выбранного вида помощи.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "resolved_contact_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Контакт из прямой ссылки или из диалога отправки сертификата.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "resolved_conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Диалог из прямой ссылки или из сообщения отправки сертификата.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ],
+      "scope": {
+        "attribution": [
+          "historical_account_conversation",
+          "send_message"
+        ],
+        "inventory_coverage": "attributable_records_only",
+        "description": "Историческая выдача относится к области загрузки по аккаунту, диалогу и контакту. Документ инвентаря относится к области по сообщению отправки в отобранном диалоге."
+      },
+      "temporal_rules": {
+        "ordered_pairs": [
+          [
+            "valid_from",
+            "expires_at"
+          ]
+        ],
+        "on_violation": "preserve_dates_with_dq; exclude_from_duration_calculations"
+      }
+    },
+    "fact_certificate_request": {
+      "grain": "Одна запись в очереди запросов сертификата.",
+      "source": "women_help_certificate_requests",
+      "primary_key": [
+        "certificate_request_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Первая и последняя даты описывают границы записи очереди. Количество попыток из них неизвестно.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "certificate_request_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID записи запроса в очереди сертификатов.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID контакта, запросившего сертификат.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID исходного диалога запроса.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "source_message_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID исходного сообщения запроса.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "last_conversation_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID последнего связанного диалога.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "last_source_message_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID последнего связанного сообщения.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "aid_id": {
+          "type": "text",
+          "nullable": true,
+          "description": "Код запрошенного вида помощи.",
+          "transformation": "Проверка точного кода по разрешённому словарю видов помощи.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "food_card",
+            "medicine_card",
+            "hostel_3_nights",
+            "children_card",
+            "psychologist_3_sessions",
+            "legal_consultation",
+            "peer_consultation"
+          ]
+        },
+        "pool_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID связанного пула сертификатов.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "reason": {
+          "type": "text",
+          "nullable": true,
+          "description": "Разрешённый код причины попадания запроса в очередь.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "paused",
+            "out_of_stock"
+          ]
+        },
+        "status": {
+          "type": "text",
+          "nullable": true,
+          "description": "Состояние запроса сертификата.",
+          "transformation": "Разрешённый типизированный скаляр, пустые и недопустимые значения исключаются или остаются NULL. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            "waiting",
+            "fulfilled",
+            "cancelled"
+          ]
+        },
+        "first_requested_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Первая дата запроса, сохранённая в записи.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "last_requested_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Последняя сохранённая дата запроса в записи очереди. Число попыток неизвестно.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "fulfilled_certificate_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID сертификата, связанного с исполнением запроса.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "contact_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID контакта, запросившего сертификат.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID исходного диалога запроса.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "last_conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID последнего связанного диалога.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "source_message_key"
+          ],
+          "target_table": "fact_message",
+          "target_columns": [
+            "message_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID исходного сообщения запроса.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "last_source_message_key"
+          ],
+          "target_table": "fact_message",
+          "target_columns": [
+            "message_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID последнего связанного сообщения.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "target_table": "dim_aid",
+          "target_columns": [
+            "account_id",
+            "aid_id"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Код запрошенного вида помощи.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "pool_key"
+          ],
+          "target_table": "dim_certificate_pool",
+          "target_columns": [
+            "pool_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID связанного пула сертификатов.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "fulfilled_certificate_key"
+          ],
+          "target_table": "fact_certificate",
+          "target_columns": [
+            "certificate_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID сертификата, связанного с исполнением запроса.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ],
+      "scope_limitations": "Для конца очереди вне scope соответствующие ID и дата скрыты. При недоступном последнем диалоге скрываются latest aid/reason/status/fulfilled_certificate. Средние попытки не восстанавливаются.",
+      "temporal_rules": {
+        "ordered_pairs": [
+          [
+            "first_requested_at",
+            "last_requested_at"
+          ]
+        ],
+        "on_violation": "preserve_dates_with_dq; exclude_from_duration_calculations"
+      }
+    },
+    "fact_csat": {
+      "grain": "Одна запись ответа на опрос CSAT.",
+      "source": "csat_survey_responses",
+      "primary_key": [
+        "csat_key"
+      ],
+      "refresh": "Полное чтение в пределах заданной области загрузки.",
+      "deletions": "Исчезновение проверяется при полном чтении сущности в области загрузки. Момент обнаружения записывается в deleted_at.",
+      "history": "Текущий наблюдаемый срез. История доступна только для состояний, которые фиксирует загрузчик после первого запуска.",
+      "limitations": "Оценка CSAT лежит в диапазоне 1–5 и относится к отдельному механизму опроса.",
+      "columns": {
+        "account_id": {
+          "type": "bigint",
+          "nullable": false,
+          "description": "Аккаунт Chatwoot, которому принадлежит строка DDS.",
+          "transformation": "Числовой идентификатор заданного аккаунта Chatwoot для области загрузки.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "csat_key": {
+          "type": "uuid",
+          "nullable": false,
+          "description": "ID ответа на опрос CSAT.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL недопустим.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "conversation_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID оцениваемого диалога.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "message_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "Ключ сообщения, связанного с ответом на опрос CSAT.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "contact_key": {
+          "type": "uuid",
+          "nullable": true,
+          "description": "ID контакта, с которым связан ответ.",
+          "transformation": "Стабильный UUID из HMAC с областью аккаунта и сущности. Исходный ключ скрыт.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля."
+        },
+        "rating": {
+          "type": "integer",
+          "nullable": true,
+          "description": "Оценка ответа CSAT по шкале от 1 до 5.",
+          "transformation": "Целое число из источника. Значения за пределами допустимого набора учитываются в контроле качества.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "enum": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "unit": "балл"
+        },
+        "created_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата создания ответа CSAT.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        },
+        "updated_at": {
+          "type": "timestamptz",
+          "nullable": true,
+          "description": "Дата изменения ответа CSAT.",
+          "transformation": "Временная метка без зоны интерпретируется как UTC. Значение с зоной сохраняет тот же момент. Допустимый диапазон значений после перевода в UTC от 2000 до 2100 года включительно.",
+          "null_meaning": "NULL означает отсутствие доступного корректного значения.",
+          "history": "Текущее наблюдаемое значение поля.",
+          "timezone": "UTC"
+        }
+      },
+      "relationships": [
+        {
+          "columns": [
+            "conversation_key"
+          ],
+          "target_table": "fact_conversation",
+          "target_columns": [
+            "conversation_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID оцениваемого диалога.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "message_key"
+          ],
+          "target_table": "fact_message",
+          "target_columns": [
+            "message_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "Ключ сообщения, связанного с ответом на опрос CSAT.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        },
+        {
+          "columns": [
+            "contact_key"
+          ],
+          "target_table": "dim_contact",
+          "target_columns": [
+            "contact_key"
+          ],
+          "cardinality": "many-to-one",
+          "scope": "Требуется равенство account_id на обеих сторонах.",
+          "description": "ID контакта, с которым связан ответ.",
+          "target_filter": "target.account_id=source.account_id AND target.deleted_at IS NULL"
+        }
+      ]
+    }
+  },
+  "requirements": [
+    {
+      "id": 2,
+      "source_requirement": "contacts.id",
+      "targets": [
+        "dim_contact.contact_key"
+      ]
+    },
+    {
+      "id": 3,
+      "source_requirement": "contacts.created_at",
+      "targets": [
+        "dim_contact.created_at"
+      ]
+    },
+    {
+      "id": 4,
+      "source_requirement": "contacts.updated_at",
+      "targets": [
+        "dim_contact.updated_at"
+      ]
+    },
+    {
+      "id": 5,
+      "source_requirement": "contact_inboxes.id",
+      "targets": [
+        "bridge_contact_inbox.contact_inbox_key"
+      ]
+    },
+    {
+      "id": 6,
+      "source_requirement": "contact_inboxes.contact_id",
+      "targets": [
+        "bridge_contact_inbox.contact_key"
+      ]
+    },
+    {
+      "id": 7,
+      "source_requirement": "contact_inboxes.inbox_id",
+      "targets": [
+        "bridge_contact_inbox.inbox_key"
+      ]
+    },
+    {
+      "id": 8,
+      "source_requirement": "contact_inboxes.created_at",
+      "targets": [
+        "bridge_contact_inbox.created_at"
+      ]
+    },
+    {
+      "id": 9,
+      "source_requirement": "contact_inboxes.updated_at",
+      "targets": [
+        "bridge_contact_inbox.updated_at"
+      ]
+    },
+    {
+      "id": 10,
+      "source_requirement": "inboxes.id",
+      "targets": [
+        "dim_inbox.inbox_key"
+      ]
+    },
+    {
+      "id": 11,
+      "source_requirement": "inboxes.channel_type",
+      "targets": [
+        "dim_inbox.channel_type"
+      ]
+    },
+    {
+      "id": 12,
+      "source_requirement": "inboxes.csat_survey_enabled",
+      "targets": [
+        "dim_inbox.csat_survey_enabled"
+      ]
+    },
+    {
+      "id": 13,
+      "source_requirement": "inboxes.lock_to_single_conversation",
+      "targets": [
+        "dim_inbox.lock_to_single_conversation"
+      ]
+    },
+    {
+      "id": 14,
+      "source_requirement": "inboxes.updated_at",
+      "targets": [
+        "dim_inbox.updated_at"
+      ]
+    },
+    {
+      "id": 15,
+      "source_requirement": "conversations.id",
+      "targets": [
+        "fact_conversation.conversation_key"
+      ]
+    },
+    {
+      "id": 16,
+      "source_requirement": "conversations.contact_id",
+      "targets": [
+        "fact_conversation.contact_key"
+      ]
+    },
+    {
+      "id": 17,
+      "source_requirement": "conversations.inbox_id",
+      "targets": [
+        "fact_conversation.inbox_key"
+      ]
+    },
+    {
+      "id": 18,
+      "source_requirement": "conversations.contact_inbox_id",
+      "targets": [
+        "fact_conversation.contact_inbox_key"
+      ]
+    },
+    {
+      "id": 19,
+      "source_requirement": "conversations.created_at",
+      "targets": [
+        "fact_conversation.created_at"
+      ]
+    },
+    {
+      "id": 20,
+      "source_requirement": "conversations.status",
+      "targets": [
+        "fact_conversation.status"
+      ]
+    },
+    {
+      "id": 21,
+      "source_requirement": "conversations.status_changed_at",
+      "targets": [
+        "fact_conversation.status_changed_at"
+      ]
+    },
+    {
+      "id": 22,
+      "source_requirement": "conversations.assignee_id",
+      "targets": [
+        "fact_conversation.assignee_staff_key"
+      ]
+    },
+    {
+      "id": 23,
+      "source_requirement": "conversations.updated_at",
+      "targets": [
+        "fact_conversation.updated_at"
+      ]
+    },
+    {
+      "id": 24,
+      "source_requirement": "conversations.assignee_agent_bot_id",
+      "targets": [
+        "fact_conversation.assignee_bot_key"
+      ]
+    },
+    {
+      "id": 25,
+      "source_requirement": "conversations.ai_assignee_type",
+      "targets": [
+        "fact_conversation.ai_assignee_type"
+      ]
+    },
+    {
+      "id": 26,
+      "source_requirement": "messages.id",
+      "targets": [
+        "fact_message.message_key"
+      ]
+    },
+    {
+      "id": 27,
+      "source_requirement": "messages.conversation_id",
+      "targets": [
+        "fact_message.conversation_key"
+      ]
+    },
+    {
+      "id": 28,
+      "source_requirement": "messages.inbox_id",
+      "targets": [
+        "fact_message.inbox_key"
+      ]
+    },
+    {
+      "id": 29,
+      "source_requirement": "messages.sender_id",
+      "targets": [
+        "fact_message.sender_key"
+      ]
+    },
+    {
+      "id": 30,
+      "source_requirement": "messages.sender_type",
+      "targets": [
+        "fact_message.sender_type"
+      ]
+    },
+    {
+      "id": 31,
+      "source_requirement": "messages.created_at",
+      "targets": [
+        "fact_message.created_at"
+      ]
+    },
+    {
+      "id": 32,
+      "source_requirement": "messages.updated_at",
+      "targets": [
+        "fact_message.updated_at"
+      ]
+    },
+    {
+      "id": 33,
+      "source_requirement": "messages.message_type",
+      "targets": [
+        "fact_message.message_type"
+      ]
+    },
+    {
+      "id": 34,
+      "source_requirement": "messages.private",
+      "targets": [
+        "fact_message.private"
+      ]
+    },
+    {
+      "id": 35,
+      "source_requirement": "messages.status",
+      "targets": [
+        "fact_message.status"
+      ]
+    },
+    {
+      "id": 36,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>",
+      "targets": [
+        "fact_consultation_request.request_key"
+      ]
+    },
+    {
+      "id": 37,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>.state",
+      "targets": [
+        "fact_consultation_request.state"
+      ]
+    },
+    {
+      "id": 38,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>.aid_id",
+      "targets": [
+        "fact_consultation_request.aid_id"
+      ]
+    },
+    {
+      "id": 39,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>.requested_at",
+      "targets": [
+        "fact_consultation_request.requested_at"
+      ]
+    },
+    {
+      "id": 40,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>.completed_at",
+      "targets": [
+        "fact_consultation_request.completed_at"
+      ]
+    },
+    {
+      "id": 41,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>.specialist_id",
+      "targets": [
+        "fact_consultation_request.specialist_staff_key"
+      ]
+    },
+    {
+      "id": 42,
+      "source_requirement": "conversations.custom_attributes.scenario_requests.<entry_key>.completed_message_id",
+      "targets": [
+        "fact_consultation_request.completed_message_key"
+      ]
+    },
+    {
+      "id": 43,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>",
+      "targets": [
+        "fact_followup.followup_key"
+      ]
+    },
+    {
+      "id": 44,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>.state",
+      "targets": [
+        "fact_followup.state"
+      ]
+    },
+    {
+      "id": 45,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>.due_at",
+      "targets": [
+        "fact_followup.due_at"
+      ]
+    },
+    {
+      "id": 46,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>.sent_at",
+      "targets": [
+        "fact_followup.sent_at"
+      ]
+    },
+    {
+      "id": 47,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>.context.aid_id",
+      "targets": [
+        "fact_followup.aid_id"
+      ]
+    },
+    {
+      "id": 48,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>.context.request_key",
+      "targets": [
+        "fact_followup.request_key",
+        "fact_followup.target_kind",
+        "fact_followup.unresolved_target_key"
+      ]
+    },
+    {
+      "id": 49,
+      "source_requirement": "conversations.custom_attributes.scenario_followups.<entry_key>.screen",
+      "targets": [
+        "fact_followup.screen_code"
+      ]
+    },
+    {
+      "id": 50,
+      "source_requirement": "women_help_certificate_pools.id",
+      "targets": [
+        "dim_certificate_pool.pool_key"
+      ]
+    },
+    {
+      "id": 51,
+      "source_requirement": "women_help_certificate_pools.provider",
+      "targets": [
+        "dim_certificate_pool.provider"
+      ]
+    },
+    {
+      "id": 52,
+      "source_requirement": "women_help_certificate_pool_aids.pool_id",
+      "targets": [
+        "bridge_pool_aid.pool_key"
+      ]
+    },
+    {
+      "id": 53,
+      "source_requirement": "women_help_certificate_pool_aids.aid_id",
+      "targets": [
+        "bridge_pool_aid.aid_id"
+      ]
+    },
+    {
+      "id": 54,
+      "source_requirement": "women_help_pdf_certificates.id",
+      "targets": [
+        "fact_certificate.certificate_key"
+      ]
+    },
+    {
+      "id": 55,
+      "source_requirement": "women_help_pdf_certificates.pool_id",
+      "targets": [
+        "fact_certificate.pool_key"
+      ]
+    },
+    {
+      "id": 56,
+      "source_requirement": "women_help_pdf_certificates.contact_id",
+      "targets": [
+        "fact_certificate.contact_key"
+      ]
+    },
+    {
+      "id": 57,
+      "source_requirement": "women_help_pdf_certificates.conversation_id",
+      "targets": [
+        "fact_certificate.conversation_key"
+      ]
+    },
+    {
+      "id": 58,
+      "source_requirement": "women_help_pdf_certificates.source_message_id",
+      "targets": [
+        "fact_certificate.source_message_key"
+      ]
+    },
+    {
+      "id": 59,
+      "source_requirement": "women_help_pdf_certificates.chatwoot_message_id",
+      "targets": [
+        "fact_certificate.send_message_key",
+        "fact_certificate.resolved_contact_key",
+        "fact_certificate.resolved_conversation_key",
+        "fact_certificate.link_origin"
+      ]
+    },
+    {
+      "id": 60,
+      "source_requirement": "women_help_pdf_certificates.nominal_rubles",
+      "targets": [
+        "fact_certificate.nominal_rubles"
+      ]
+    },
+    {
+      "id": 61,
+      "source_requirement": "women_help_pdf_certificates.selected_aid_id",
+      "targets": [
+        "fact_certificate.selected_aid_id"
+      ]
+    },
+    {
+      "id": 62,
+      "source_requirement": "women_help_pdf_certificates.status",
+      "targets": [
+        "fact_certificate.status"
+      ]
+    },
+    {
+      "id": 63,
+      "source_requirement": "women_help_pdf_certificates.record_kind",
+      "targets": [
+        "fact_certificate.record_kind"
+      ]
+    },
+    {
+      "id": 64,
+      "source_requirement": "women_help_pdf_certificates.is_test",
+      "targets": [
+        "fact_certificate.is_test"
+      ]
+    },
+    {
+      "id": 65,
+      "source_requirement": "women_help_pdf_certificates.valid_from",
+      "targets": [
+        "fact_certificate.valid_from"
+      ]
+    },
+    {
+      "id": 66,
+      "source_requirement": "women_help_pdf_certificates.expires_at",
+      "targets": [
+        "fact_certificate.expires_at"
+      ]
+    },
+    {
+      "id": 67,
+      "source_requirement": "women_help_pdf_certificates.reserved_at",
+      "targets": [
+        "fact_certificate.reserved_at"
+      ]
+    },
+    {
+      "id": 68,
+      "source_requirement": "women_help_pdf_certificates.submitted_at",
+      "targets": [
+        "fact_certificate.submitted_at"
+      ]
+    },
+    {
+      "id": 69,
+      "source_requirement": "women_help_pdf_certificates.delivered_at",
+      "targets": [
+        "fact_certificate.delivered_at"
+      ]
+    },
+    {
+      "id": 70,
+      "source_requirement": "women_help_pdf_certificates.accepted_at",
+      "targets": [
+        "fact_certificate.accepted_at"
+      ]
+    },
+    {
+      "id": 71,
+      "source_requirement": "women_help_pdf_certificates.issued_on",
+      "targets": [
+        "fact_certificate.issued_on"
+      ]
+    },
+    {
+      "id": 72,
+      "source_requirement": "women_help_certificate_requests.id",
+      "targets": [
+        "fact_certificate_request.certificate_request_key"
+      ]
+    },
+    {
+      "id": 73,
+      "source_requirement": "women_help_certificate_requests.contact_id",
+      "targets": [
+        "fact_certificate_request.contact_key"
+      ]
+    },
+    {
+      "id": 74,
+      "source_requirement": "women_help_certificate_requests.conversation_id",
+      "targets": [
+        "fact_certificate_request.conversation_key"
+      ]
+    },
+    {
+      "id": 75,
+      "source_requirement": "women_help_certificate_requests.source_message_id",
+      "targets": [
+        "fact_certificate_request.source_message_key"
+      ]
+    },
+    {
+      "id": 76,
+      "source_requirement": "women_help_certificate_requests.last_conversation_id",
+      "targets": [
+        "fact_certificate_request.last_conversation_key"
+      ]
+    },
+    {
+      "id": 77,
+      "source_requirement": "women_help_certificate_requests.last_source_message_id",
+      "targets": [
+        "fact_certificate_request.last_source_message_key"
+      ]
+    },
+    {
+      "id": 78,
+      "source_requirement": "women_help_certificate_requests.aid_id",
+      "targets": [
+        "fact_certificate_request.aid_id"
+      ]
+    },
+    {
+      "id": 79,
+      "source_requirement": "women_help_certificate_requests.pool_id",
+      "targets": [
+        "fact_certificate_request.pool_key"
+      ]
+    },
+    {
+      "id": 80,
+      "source_requirement": "women_help_certificate_requests.reason",
+      "targets": [
+        "fact_certificate_request.reason"
+      ]
+    },
+    {
+      "id": 81,
+      "source_requirement": "women_help_certificate_requests.status",
+      "targets": [
+        "fact_certificate_request.status"
+      ]
+    },
+    {
+      "id": 82,
+      "source_requirement": "women_help_certificate_requests.first_requested_at",
+      "targets": [
+        "fact_certificate_request.first_requested_at"
+      ]
+    },
+    {
+      "id": 83,
+      "source_requirement": "women_help_certificate_requests.last_requested_at",
+      "targets": [
+        "fact_certificate_request.last_requested_at"
+      ]
+    },
+    {
+      "id": 84,
+      "source_requirement": "women_help_certificate_requests.fulfilled_certificate_id",
+      "targets": [
+        "fact_certificate_request.fulfilled_certificate_key"
+      ]
+    },
+    {
+      "id": 85,
+      "source_requirement": "women_help_certificate_requests.source_event_keys[*]",
+      "targets": [
+        "bridge_certificate_request_event.event_key"
+      ]
+    },
+    {
+      "id": 86,
+      "source_requirement": "labels.id",
+      "targets": [
+        "dim_label.label_key"
+      ]
+    },
+    {
+      "id": 87,
+      "source_requirement": "labels.title",
+      "targets": [
+        "dim_label.title"
+      ]
+    },
+    {
+      "id": 88,
+      "source_requirement": "labels.updated_at",
+      "targets": [
+        "dim_label.updated_at"
+      ]
+    },
+    {
+      "id": 89,
+      "source_requirement": "tags.id",
+      "targets": [
+        "dim_tag.tag_key"
+      ]
+    },
+    {
+      "id": 90,
+      "source_requirement": "tags.name",
+      "targets": [
+        "dim_tag.name"
+      ]
+    },
+    {
+      "id": 91,
+      "source_requirement": "taggings.id",
+      "targets": [
+        "bridge_object_tag.tagging_key"
+      ]
+    },
+    {
+      "id": 92,
+      "source_requirement": "taggings.tag_id",
+      "targets": [
+        "bridge_object_tag.tag_key"
+      ]
+    },
+    {
+      "id": 93,
+      "source_requirement": "taggings.taggable_type",
+      "targets": [
+        "bridge_object_tag.taggable_type"
+      ]
+    },
+    {
+      "id": 94,
+      "source_requirement": "taggings.taggable_id",
+      "targets": [
+        "bridge_object_tag.object_key"
+      ]
+    },
+    {
+      "id": 95,
+      "source_requirement": "taggings.context",
+      "targets": [
+        "bridge_object_tag.context"
+      ]
+    },
+    {
+      "id": 96,
+      "source_requirement": "taggings.created_at",
+      "targets": [
+        "bridge_object_tag.created_at"
+      ]
+    },
+    {
+      "id": 97,
+      "source_requirement": "csat_survey_responses.id",
+      "targets": [
+        "fact_csat.csat_key"
+      ]
+    },
+    {
+      "id": 98,
+      "source_requirement": "csat_survey_responses.conversation_id",
+      "targets": [
+        "fact_csat.conversation_key"
+      ]
+    },
+    {
+      "id": 99,
+      "source_requirement": "csat_survey_responses.message_id",
+      "targets": [
+        "fact_csat.message_key"
+      ]
+    },
+    {
+      "id": 100,
+      "source_requirement": "csat_survey_responses.contact_id",
+      "targets": [
+        "fact_csat.contact_key"
+      ]
+    },
+    {
+      "id": 101,
+      "source_requirement": "csat_survey_responses.rating",
+      "targets": [
+        "fact_csat.rating"
+      ]
+    },
+    {
+      "id": 102,
+      "source_requirement": "csat_survey_responses.created_at",
+      "targets": [
+        "fact_csat.created_at"
+      ]
+    },
+    {
+      "id": 103,
+      "source_requirement": "csat_survey_responses.updated_at",
+      "targets": [
+        "fact_csat.updated_at"
+      ]
+    },
+    {
+      "id": 104,
+      "source_requirement": "users.id",
+      "targets": [
+        "dim_staff.staff_key"
+      ]
+    },
+    {
+      "id": 105,
+      "source_requirement": "users.type",
+      "targets": [
+        "dim_staff.account_type"
+      ]
+    },
+    {
+      "id": 106,
+      "source_requirement": "users.updated_at",
+      "targets": [
+        "dim_staff.updated_at"
+      ]
+    }
+  ],
+  "incremental_reference_policy": "Проверяются только обрабатываемые строки; ссылки старых фактов исправляются при обязательной ежедневной полной сверке."
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly DDS incremental metadata load
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+Unit=nevidimy-dds.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "metrics": {
+    "consultation_requests_created": {
+      "available": true,
+      "table": "fact_consultation_request",
+      "date": "requested_at",
+      "timezone": "Europe/Moscow",
+      "formula": "count(*)",
+      "filter": "deleted_at IS NULL AND requested_at IS NOT NULL",
+      "group_by": [
+        "account_id",
+        "day_moscow"
+      ],
+      "grain": "Одна запись запроса консультации, созданная внутри диалога.",
+      "limitations": "Переоткрытия того же запроса не восстанавливаются из текущего среза."
+    },
+    "consultation_requests_completed": {
+      "available": true,
+      "table": "fact_consultation_request",
+      "date": "completed_at",
+      "timezone": "Europe/Moscow",
+      "formula": "count(*)",
+      "filter": "deleted_at IS NULL AND state = 'completed' AND completed_at IS NOT NULL",
+      "group_by": [
+        "account_id",
+        "day_moscow"
+      ],
+      "grain": "Одна запись запроса консультации с наблюдаемой отметкой завершения.",
+      "limitations": "Считаются отметки по дате завершения. Чтобы измерить долю завершившихся запросов, задайте когорту по requested_at и явное окно наблюдения."
+    },
+    "certificate_records_by_status": {
+      "available": true,
+      "table": "fact_certificate",
+      "date": null,
+      "formula": "count(*)",
+      "filter": "deleted_at IS NULL AND is_test IS FALSE",
+      "group_by": [
+        "account_id",
+        "record_kind",
+        "status"
+      ],
+      "grain": "Одна нетестовая запись сертификата, отнесённая к области загрузки.",
+      "limitations": "NULL в признаке теста исключается. NULL в состоянии или виде остаётся отдельной группой. Исторические записи отобраны по аккаунту и диалогу, документы инвентаря по сообщению отправки. Документы без такой связи, в том числе доступные или зарезервированные до отправки, в срез не попадают. Отсутствие строк означает ноль наблюдавшихся записей. Общий остаток неизвестен.",
+      "coverage": "attributable_records_only"
+    },
+    "certificate_request_queue_rows": {
+      "available": true,
+      "table": "fact_certificate_request",
+      "date": null,
+      "formula": "count(*)",
+      "filter": "deleted_at IS NULL",
+      "group_by": [
+        "account_id",
+        "status"
+      ],
+      "grain": "Одна запись очереди в текущем срезе.",
+      "limitations": "Число попыток запроса неизвестно. Даты first_requested_at и last_requested_at задают только границы записи."
+    },
+    "csat_mean_rating": {
+      "available": true,
+      "table": "fact_csat",
+      "date": "created_at",
+      "timezone": "Europe/Moscow",
+      "formula": "avg(rating)",
+      "filter": "deleted_at IS NULL AND created_at IS NOT NULL AND rating BETWEEN 1 AND 5",
+      "group_by": [
+        "account_id",
+        "day_moscow"
+      ],
+      "grain": "Одна запись ответа на опрос CSAT с допустимой оценкой.",
+      "limitations": "Среднее относится к ответившим. Вместе со средним показывайте число ответов."
+    },
+    "actual_help": {
+      "available": false,
+      "table": null,
+      "date": null,
+      "formula": null,
+      "filter": null,
+      "group_by": [],
+      "grain": "Факт оказания помощи.",
+      "limitations": "В DDS отсутствует подтверждающее событие. Отображайте как «неизвестно». Completed, resolved, delivered и answered описывают состояние процесса."
+    },
+    "certificate_stock": {
+      "available": false,
+      "table": null,
+      "date": null,
+      "formula": null,
+      "filter": null,
+      "group_by": [],
+      "grain": "Доступный остаток сертификатов.",
+      "limitations": "Отсутствие привязанных записей ничего не говорит об остатке. Отображайте остаток как «неизвестно»."
+    },
+    "consultation_date_coverage": {
+      "available": true,
+      "table": "fact_consultation_request",
+      "denominator": "all_active_scoped_requests",
+      "formula": "known_requested_at / all_active_scoped_requests",
+      "date": null,
+      "limitations": "Все активные строки текущего scope, включая записи без requested_at. Неизвестная дата не распределяется по дням. Показывать рядом с дневным графиком; отдельно completed без completed_at."
+    },
+    "followup_sent_date_coverage": {
+      "available": true,
+      "table": "fact_followup",
+      "denominator": "active_sent_or_answered_followups",
+      "formula": "known_sent_at / active_sent_or_answered_followups",
+      "date": null,
+      "limitations": "Знаменатель — активные sent/answered. Отсутствие sent_at сохраняется как неизвестное; answered не подтверждает результат помощи."
+    }
+  }
+}

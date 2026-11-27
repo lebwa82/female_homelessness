@@ -1,0 +1,13 @@
+{
+  "account_id": 1,
+  "inbox_ids": [],
+  "excluded_contact_ids": [],
+  "label_titles": [],
+  "scope_confirmed": false,
+  "source_identity": "nevidimy-chatwoot",
+  "identity_key_file": "/etc/nevidimy/dds-identity.key",
+  "source_dsn_env": "DDS_SOURCE_DSN",
+  "target_dsn_env": "DDS_TARGET_DSN",
+  "batch_size": 500,
+  "overlap_hours": 48
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily full scoped DDS reconciliation
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+Unit=nevidimy-dds-reconcile.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Scoped Chatwoot metadata DDS daily full reconciliation
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=nevidimy-analytics
+WorkingDirectory=/opt/nevidimy/analytics/current
+EnvironmentFile=/etc/nevidimy/dds.env
+ExecStart=/opt/nevidimy/analytics/venv/bin/python -m analytics.dds --config /etc/nevidimy/dds.json load --apply --full
+TimeoutStartSec=300
+MemoryMax=128M
+CPUQuota=50%
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
